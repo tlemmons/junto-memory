@@ -94,13 +94,19 @@ async def test_resource_listed() -> bool:
 
 
 async def test_resource_read_shape() -> bool:
-    """Reading an empty inbox should return the documented payload shape."""
+    """Reading an empty inbox should return the documented payload shape.
+    Caller must connect AS the inbox's agent (auth gate added in C2 follow-up)."""
+    nonce = uuid.uuid4().hex[:6]
+    me = f"inbox-smoke-empty-{nonce}"
     async with open_mcp() as s:
-        sid = await start_session(s, f"read-{uuid.uuid4().hex[:6]}")
+        payload = await call_tool(s, "memory_start_session", {
+            "project": "shared_memory",
+            "claude_instance": me,
+            "task_description": "inbox smoke read shape",
+        })
+        sid = payload.get("session_id", "")
         try:
-            result = await s.read_resource(
-                f"inbox://shared_memory/inbox-smoke-empty-{uuid.uuid4().hex[:6]}"
-            )
+            result = await s.read_resource(f"inbox://shared_memory/{me}")
         finally:
             await end_session(s, sid)
     if not result.contents:
@@ -115,6 +121,151 @@ async def test_resource_read_shape() -> bool:
     needed = {"uri", "project", "agent", "count", "messages", "next_cursor", "has_more"}
     ok = needed.issubset(payload.keys()) and payload["count"] == 0 and payload["messages"] == []
     log(f"  resource_read_shape   {'PASS' if ok else 'FAIL':4}  keys={sorted(payload.keys())}")
+    return ok
+
+
+async def test_authz_blocks_other_agent() -> bool:
+    """Agent X subscribing/reading inbox://Y should be denied."""
+    nonce = uuid.uuid4().hex[:6]
+    me = f"inbox-smoke-spy-{nonce}"
+    other = f"inbox-smoke-victim-{nonce}"
+    async with open_mcp() as spy, open_mcp() as victim:
+        # Register both agents (so the project knows them)
+        v_payload = await call_tool(victim, "memory_start_session", {
+            "project": "shared_memory",
+            "claude_instance": other,
+            "task_description": "victim",
+        })
+        v_sid = v_payload.get("session_id", "")
+        s_payload = await call_tool(spy, "memory_start_session", {
+            "project": "shared_memory",
+            "claude_instance": me,
+            "task_description": "spy",
+        })
+        s_sid = s_payload.get("session_id", "")
+
+        # Read should return permission denied JSON, not victim's messages.
+        read = await spy.read_resource(f"inbox://shared_memory/{other}")
+        body = json.loads(read.contents[0].text)  # type: ignore[union-attr]
+        read_blocked = body.get("error") == "permission denied"
+
+        # Subscribe should raise.
+        try:
+            await spy.subscribe_resource(f"inbox://shared_memory/{other}")
+            sub_blocked = False
+        except Exception:
+            sub_blocked = True
+
+        await end_session(spy, s_sid)
+        await end_session(victim, v_sid)
+
+    ok = read_blocked and sub_blocked
+    log(f"  authz_blocks_other     {'PASS' if ok else 'FAIL':4}  read_blocked={read_blocked} sub_blocked={sub_blocked}")
+    return ok
+
+
+async def test_broadcast_fanout() -> bool:
+    """A broadcast (to_instance='*') should notify every subscriber in the project."""
+    nonce = uuid.uuid4().hex[:6]
+    a = f"inbox-smoke-bcA-{nonce}"
+    b = f"inbox-smoke-bcB-{nonce}"
+    notes_a: list = []
+    notes_b: list = []
+    async with open_mcp(notes_a) as sa, open_mcp(notes_b) as sb, open_mcp() as sender:
+        a_sid = (await call_tool(sa, "memory_start_session", {
+            "project": "shared_memory", "claude_instance": a,
+            "task_description": "bc A",
+        })).get("session_id", "")
+        b_sid = (await call_tool(sb, "memory_start_session", {
+            "project": "shared_memory", "claude_instance": b,
+            "task_description": "bc B",
+        })).get("session_id", "")
+        send_sid = await start_session(sender, f"bc-send-{nonce}")
+
+        await sa.subscribe_resource(f"inbox://shared_memory/{a}")
+        await sb.subscribe_resource(f"inbox://shared_memory/{b}")
+
+        await call_tool(sender, "memory_send_message", {
+            "session_id": send_sid,
+            "to_instance": "*",
+            "to_project": "shared_memory",
+            "message": f"broadcast test {nonce}",
+            "category": "info",
+        })
+        await asyncio.sleep(0.5)
+
+        await end_session(sa, a_sid)
+        await end_session(sb, b_sid)
+        await end_session(sender, send_sid)
+
+    from mcp.types import ServerNotification, ResourceUpdatedNotification
+
+    def saw(notes, uri):
+        return any(
+            isinstance(n, ServerNotification) and isinstance(n.root, ResourceUpdatedNotification)
+            and str(n.root.params.uri).rstrip("/") == uri.rstrip("/")
+            for n in notes
+        )
+    a_got = saw(notes_a, f"inbox://shared_memory/{a}")
+    b_got = saw(notes_b, f"inbox://shared_memory/{b}")
+    ok = a_got and b_got
+    log(f"  broadcast_fanout       {'PASS' if ok else 'FAIL':4}  a_got={a_got} b_got={b_got}")
+    return ok
+
+
+async def test_get_messages_cursor() -> bool:
+    """memory_get_messages with cursor should return next_cursor + paginate."""
+    nonce = uuid.uuid4().hex[:6]
+    me = f"inbox-smoke-page-{nonce}"
+    async with open_mcp() as recv, open_mcp() as sender:
+        r_sid = (await call_tool(recv, "memory_start_session", {
+            "project": "shared_memory", "claude_instance": me,
+            "task_description": "cursor recv",
+        })).get("session_id", "")
+        s_sid = await start_session(sender, f"page-send-{nonce}")
+
+        # Send 5 distinct messages
+        for i in range(5):
+            await call_tool(sender, "memory_send_message", {
+                "session_id": s_sid,
+                "to_instance": me,
+                "to_project": "shared_memory",
+                "message": f"page test {nonce} #{i}",
+                "category": "info",
+            })
+            await asyncio.sleep(0.02)  # ensure distinct created_at ordering
+
+        # First page: limit=2 → expect 2 + has_more + next_cursor
+        page1 = await call_tool(recv, "memory_get_messages", {
+            "session_id": r_sid, "limit": 2,
+        })
+        # Second page using cursor
+        page2 = await call_tool(recv, "memory_get_messages", {
+            "session_id": r_sid, "limit": 2, "cursor": page1.get("next_cursor"),
+        })
+        # Third page (final)
+        page3 = await call_tool(recv, "memory_get_messages", {
+            "session_id": r_sid, "limit": 2, "cursor": page2.get("next_cursor"),
+        })
+
+        await end_session(recv, r_sid)
+        await end_session(sender, s_sid)
+
+    ids1 = {m["id"] for m in page1.get("messages", [])}
+    ids2 = {m["id"] for m in page2.get("messages", [])}
+    ids3 = {m["id"] for m in page3.get("messages", [])}
+    distinct = ids1.isdisjoint(ids2) and ids1.isdisjoint(ids3) and ids2.isdisjoint(ids3)
+    counts_ok = (
+        len(ids1) == 2 and len(ids2) == 2 and len(ids3) >= 1 and (len(ids1) + len(ids2) + len(ids3)) >= 5
+    )
+    cursors_ok = bool(page1.get("next_cursor")) and bool(page2.get("next_cursor"))
+    final_ok = page3.get("has_more") is False
+    ok = distinct and counts_ok and cursors_ok and final_ok
+    log(
+        f"  get_messages_cursor    {'PASS' if ok else 'FAIL':4}  "
+        f"counts={len(ids1)}/{len(ids2)}/{len(ids3)} distinct={distinct} "
+        f"cursors_ok={cursors_ok} final_ok={final_ok}"
+    )
     return ok
 
 
@@ -242,6 +393,8 @@ async def cleanup() -> None:
     msg_deleted = db.messages.delete_many({"$or": [
         {"message": {"$regex": "^inbox smoke test "}},
         {"message": {"$regex": "^unsub test "}},
+        {"message": {"$regex": "^broadcast test "}},
+        {"message": {"$regex": "^page test "}},
     ]}).deleted_count
     dir_deleted = db.agent_directory.delete_many(
         {"instance": {"$regex": "^inbox-smoke-"}}
@@ -257,10 +410,13 @@ async def main() -> int:
 
     results = []
     for name, coro in [
-        ("resource_listed",       test_resource_listed()),
-        ("resource_read_shape",   test_resource_read_shape()),
+        ("resource_listed",        test_resource_listed()),
+        ("resource_read_shape",    test_resource_read_shape()),
         ("subscribe_notification", test_subscribe_notification()),
-        ("unsubscribe_silences",  test_unsubscribe_silences()),
+        ("unsubscribe_silences",   test_unsubscribe_silences()),
+        ("authz_blocks_other",     test_authz_blocks_other_agent()),
+        ("broadcast_fanout",       test_broadcast_fanout()),
+        ("get_messages_cursor",    test_get_messages_cursor()),
     ]:
         try:
             ok = await coro

@@ -14,7 +14,7 @@ from shared_memory.app import mcp
 from shared_memory.clients import get_mongo
 from shared_memory.config import MESSAGE_CATEGORIES, MESSAGE_PRIORITIES, MESSAGE_STATUSES
 from shared_memory.helpers import parse_timestamp, require_session, utc_now
-from shared_memory.state import active_sessions
+from shared_memory.state import active_sessions, mcp_session_to_app
 from shared_memory.tools.projects import _fuzzy_match_agent, _is_project_admin
 
 log = logging.getLogger(__name__)
@@ -31,6 +31,62 @@ inbox_subscriptions: Dict[str, Set[Any]] = {}
 def inbox_uri(project: str, agent: str) -> str:
     """Canonical inbox URI for a (project, agent) pair."""
     return f"inbox://{project}/{agent}"
+
+
+def _resolve_caller_identity():
+    """Look up the calling agent's app session by joining the current MCP
+    transport session (from request_context) with the mcp_session_to_app map.
+
+    Returns a dict with project / claude_instance / role / session_id, or
+    None if the caller has not started a memory session yet.
+    """
+    try:
+        server_session = mcp._mcp_server.request_context.session
+    except (LookupError, AttributeError):
+        return None
+    app_sid = mcp_session_to_app.get(server_session)
+    if app_sid is None:
+        return None
+    info = active_sessions.get(app_sid)
+    if info is None:
+        return None
+    return {
+        "session_id": app_sid,
+        "project": info.get("project", ""),
+        "claude_instance": info.get("claude_instance", ""),
+        "role": info.get("role", "agent"),
+    }
+
+
+def _check_inbox_authz(uri_project: str, uri_agent: str):
+    """Authorize a read/subscribe on inbox://<uri_project>/<uri_agent>.
+
+    Returns (ok: bool, reason: str). Allowed if the caller is the named
+    agent itself, an admin in the project, or has the cross-project
+    'admin' or 'user' role from auth.py. The '*' agent (broadcast inbox)
+    is admin-only.
+    """
+    caller = _resolve_caller_identity()
+    if caller is None:
+        return False, "no active memory session for this MCP connection"
+
+    if caller["role"] in ("admin", "user"):
+        return True, "role"
+
+    db = get_mongo()
+    if db is not None and _is_project_admin(db, uri_project, caller["claude_instance"]):
+        return True, "project_admin"
+
+    if uri_agent == "*":
+        return False, "broadcast inbox URI is admin-only"
+
+    if caller["project"] == uri_project and caller["claude_instance"] == uri_agent:
+        return True, "self"
+
+    return False, (
+        f"caller {caller['claude_instance']}@{caller['project']} cannot access "
+        f"inbox://{uri_project}/{uri_agent}"
+    )
 
 
 def get_tmux_target_for_instance(instance_name: str) -> str:
@@ -301,8 +357,10 @@ async def memory_send_message(
     # ── Phase C2: notify inbox subscribers ──
     # If anyone is subscribed to the recipient's inbox URI, push a
     # notifications/resources/updated. The subscriber re-reads the resource
-    # to fetch the new message.
-    await _notify_inbox(msg_doc["to_project"], to_instance)
+    # to fetch the new message. For broadcasts (to_instance="*") we fan out
+    # to every subscribed inbox in the target project so each individual
+    # subscriber sees the broadcast in their own inbox view.
+    await _notify_inbox_for_send(msg_doc["to_project"], to_instance)
 
     return json.dumps({
         "status": "queued",
@@ -328,6 +386,7 @@ async def memory_get_messages(
     limit: int = 20,
     message_id: str = None,
     for_instance: str = None,
+    cursor: str = None,
     ctx: Context = None
 ) -> str:
     """
@@ -342,6 +401,8 @@ async def memory_get_messages(
         limit: Maximum notes to return (default 20)
         message_id: Fetch a specific note by ID (admin/coordinator only)
         for_instance: View notes for a different agent in your project (admin/coordinator only)
+        cursor: Pagination cursor (created_at ISO string from a previous call's
+            next_cursor). Returns the next page of OLDER messages (created_at < cursor).
     """
     error = require_session(session_id)
     if error:
@@ -422,15 +483,35 @@ async def memory_get_messages(
     if not include_delivered:
         query["$and"].append({"status": "pending"})
 
-    # Fetch and format messages (limit to prevent context flooding)
-    cursor = db.messages.find(query).sort([
+    # Cursor pagination: cursor = created_at ISO string from previous call's
+    # next_cursor. Fetch the page of messages OLDER than that cursor.
+    if cursor:
+        cursor_dt = parse_timestamp(cursor)
+        if cursor_dt is not None:
+            query["$and"].append({"created_at": {"$lt": cursor_dt}})
+
+    # Fetch limit+1 to detect "has more" without a separate count query.
+    page_size = max(1, int(limit))
+    db_cursor = db.messages.find(query).sort([
         ("priority", 1),
         ("created_at", -1)
-    ]).limit(limit)
+    ]).limit(page_size + 1)
+
+    raw_docs = list(db_cursor)
+    has_more = len(raw_docs) > page_size
+    raw_docs = raw_docs[:page_size]
+
+    next_cursor = None
+    if has_more and raw_docs:
+        last_created = raw_docs[-1].get("created_at")
+        if hasattr(last_created, "isoformat"):
+            next_cursor = last_created.isoformat()
+        elif last_created is not None:
+            next_cursor = str(last_created)
 
     priority_sort = {"urgent": 0, "normal": 1, "low": 2}
     messages = []
-    for doc in cursor:
+    for doc in raw_docs:
         created_at = doc.get("created_at")
         if hasattr(created_at, "isoformat"):
             created_at = created_at.isoformat()
@@ -459,7 +540,9 @@ async def memory_get_messages(
 
     return json.dumps({
         "count": len(messages),
-        "messages": messages
+        "messages": messages,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
     })
 
 
@@ -753,6 +836,14 @@ def _format_inbox_message(doc: Dict[str, Any]) -> Dict[str, Any]:
 )
 async def read_inbox(project: str, agent: str) -> str:
     """Return pending messages for inbox://<project>/<agent> as JSON."""
+    ok, reason = _check_inbox_authz(project, agent)
+    if not ok:
+        return json.dumps({
+            "uri": inbox_uri(project, agent),
+            "error": "permission denied",
+            "detail": reason,
+        })
+
     db = get_mongo()
     if db is None:
         return json.dumps({
@@ -820,6 +911,31 @@ def _parse_inbox_uri(uri_str: str) -> tuple:
     return (m.group(1), m.group(2))
 
 
+async def _notify_inbox_for_send(to_project: str, to_instance: str) -> None:
+    """Dispatch ResourceUpdated notifications after memory_send_message.
+
+    Direct messages → notify the named agent's inbox URI.
+    Broadcasts (to_instance='*') → notify every subscribed inbox URI in the
+    target project, since each subscriber will see the broadcast in their
+    own get_messages/inbox view.
+    """
+    if not to_project:
+        return
+    if to_instance == "*":
+        prefix = f"inbox://{to_project}/"
+        targets = []
+        for uri in list(inbox_subscriptions.keys()):
+            if not uri.startswith(prefix):
+                continue
+            p, a = _parse_inbox_uri(uri)
+            if p and a and a != "*":
+                targets.append((p, a))
+        for project, agent in targets:
+            await _notify_inbox(project, agent)
+        return
+    await _notify_inbox(to_project, to_instance)
+
+
 async def _notify_inbox(project: str, agent: str) -> None:
     """Fire notifications/resources/updated to every session subscribed to
     inbox://<project>/<agent>. Drops sessions whose send fails (dead transport).
@@ -871,7 +987,14 @@ async def _on_subscribe(uri: AnyUrl) -> None:
         return
     project, agent = _parse_inbox_uri(uri_str)
     if not project or not agent:
-        return
+        raise ValueError(f"malformed inbox URI: {uri_str}")
+
+    ok, reason = _check_inbox_authz(project, agent)
+    if not ok:
+        # Surface a real error so the client doesn't think they subscribed.
+        log.warning("inbox: subscribe denied for %s — %s", uri_str, reason)
+        raise PermissionError(f"subscribe denied: {reason}")
+
     try:
         session = mcp._mcp_server.request_context.session
     except LookupError:

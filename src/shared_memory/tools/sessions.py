@@ -265,6 +265,16 @@ async def memory_start_session(
         "allowed_projects": _auth_projects,
     }
 
+    # Phase C2 inbox auth: bind this app-session to the underlying MCP
+    # transport so resource handlers can resolve the caller's identity from
+    # mcp._mcp_server.request_context.session.
+    try:
+        from shared_memory.state import mcp_session_to_app
+        if ctx is not None and getattr(ctx, "session", None) is not None:
+            mcp_session_to_app[ctx.session] = session_id
+    except Exception:
+        pass  # binding is best-effort; auth handlers fall back to "unknown"
+
     # Gather context for this Claude - keep output compact
     output = {
         "session_id": session_id,
@@ -512,6 +522,14 @@ async def memory_end_session(
 
     # Auto-release any file locks held by this session
     released_locks = release_session_locks(session_id)
+
+    # Phase C2: drop the MCP-session ↔ app-session binding
+    try:
+        from shared_memory.state import mcp_session_to_app
+        for k in [k for k, v in mcp_session_to_app.items() if v == session_id]:
+            mcp_session_to_app.pop(k, None)
+    except Exception:
+        pass
 
     # Remove from active sessions
     del active_sessions[session_id]

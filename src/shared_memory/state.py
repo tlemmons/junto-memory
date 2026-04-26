@@ -17,3 +17,10 @@ file_locks: Dict[str, Dict[str, Any]] = {}
 # Signals stored in memory (retained for 24 hours)
 # Structure: { signal_name: { from_session, from_claude, timestamp, details } }
 active_signals: Dict[str, Dict[str, Any]] = {}
+
+# Phase C2 inbox auth: maps the lowlevel MCP ServerSession (the connection
+# the agent is talking to us over) to our app-level session_id so that
+# resource handlers can resolve the calling agent's identity. Populated by
+# memory_start_session, drained by memory_end_session and stale cleanup.
+# Keyed by the ServerSession object itself (identity-hashable).
+mcp_session_to_app: Dict[Any, str] = {}

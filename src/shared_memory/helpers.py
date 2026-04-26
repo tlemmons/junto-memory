@@ -387,6 +387,13 @@ def cleanup_stale_sessions():
     for sid in to_remove:
         # Release any locks held by this session
         release_session_locks(sid)
+        # Drop MCP-session binding (Phase C2 inbox auth)
+        try:
+            from shared_memory.state import mcp_session_to_app
+            for k in [k for k, v in mcp_session_to_app.items() if v == sid]:
+                mcp_session_to_app.pop(k, None)
+        except Exception:
+            pass
         del active_sessions[sid]
     if to_remove:
         print(f"[MCP] Auto-expired {len(to_remove)} stale sessions (>{SESSION_TTL_DAYS} days idle)")
