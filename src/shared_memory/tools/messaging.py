@@ -1,12 +1,14 @@
 """Inter-agent messaging tools - send/receive messages, agent status, discovery."""
 
 import json
+import logging
 import re
 import uuid
 from datetime import timedelta
-from typing import Dict, List
+from typing import Any, Dict, List, Set
 
 from mcp.server.fastmcp import Context
+from pydantic import AnyUrl
 
 from shared_memory.app import mcp
 from shared_memory.clients import get_mongo
@@ -14,6 +16,21 @@ from shared_memory.config import MESSAGE_CATEGORIES, MESSAGE_PRIORITIES, MESSAGE
 from shared_memory.helpers import parse_timestamp, require_session, utc_now
 from shared_memory.state import active_sessions
 from shared_memory.tools.projects import _fuzzy_match_agent, _is_project_admin
+
+log = logging.getLogger(__name__)
+
+# ── Phase C2: inbox resource subscriptions ──
+# Maps inbox://<project>/<agent> URI → set of ServerSession objects that have
+# subscribed via SubscribeRequest. Populated by the subscribe_resource handler
+# below; drained on unsubscribe or on send-failure (dead session). Lives in
+# process memory because subscriptions are tied to the live HTTP session — a
+# disconnect drops the session and the subscription with it.
+inbox_subscriptions: Dict[str, Set[Any]] = {}
+
+
+def inbox_uri(project: str, agent: str) -> str:
+    """Canonical inbox URI for a (project, agent) pair."""
+    return f"inbox://{project}/{agent}"
 
 
 def get_tmux_target_for_instance(instance_name: str) -> str:
@@ -280,6 +297,12 @@ async def memory_send_message(
     }
 
     db.messages.insert_one(msg_doc)
+
+    # ── Phase C2: notify inbox subscribers ──
+    # If anyone is subscribed to the recipient's inbox URI, push a
+    # notifications/resources/updated. The subscriber re-reads the resource
+    # to fetch the new message.
+    await _notify_inbox(msg_doc["to_project"], to_instance)
 
     return json.dumps({
         "status": "queued",
@@ -679,3 +702,201 @@ async def memory_list_agents(
         "count": len(agents),
         "agents": agents
     }, indent=2)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase C2: inbox resource + subscriptions
+# ──────────────────────────────────────────────────────────────────────────
+
+# Default page size when reading an inbox resource. Same as memory_get_messages.
+INBOX_DEFAULT_LIMIT = 20
+
+
+def _format_inbox_message(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Shape one Mongo message doc into the same payload memory_get_messages emits."""
+    created_at = doc.get("created_at")
+    if hasattr(created_at, "isoformat"):
+        created_at = created_at.isoformat()
+    entry = {
+        "id": doc["_id"],
+        "from": doc.get("from_instance", doc.get("from", "?")),
+        "from_project": doc.get("from_project", ""),
+        "to": doc.get("to_instance", doc.get("to", "?")),
+        "to_project": doc.get("to_project", ""),
+        "category": doc.get("category", "info"),
+        "message": doc.get("message", ""),
+        "priority": doc.get("priority", "normal"),
+        "status": doc.get("status", "pending"),
+        "created": created_at,
+        "delivered": doc.get("status", "pending") != "pending",
+        "chain_depth": doc.get("chain_depth", 0),
+        "require_human": bool(doc.get("require_human", False)),
+        "user_originated": bool(doc.get("user_originated", False)),
+    }
+    if doc.get("reply_to"):
+        entry["reply_to"] = doc["reply_to"]
+    if doc.get("in_response_to"):
+        entry["in_response_to"] = doc["in_response_to"]
+    return entry
+
+
+@mcp.resource(
+    "inbox://{project}/{agent}",
+    name="inbox",
+    description=(
+        "Pending messages for an agent in a project. Reading returns the same "
+        "payload shape as memory_get_messages plus a next_cursor for pagination "
+        "(pass via memory_get_messages cursor= once supported). Subscribe to this "
+        "URI to receive notifications/resources/updated when new messages arrive."
+    ),
+    mime_type="application/json",
+)
+async def read_inbox(project: str, agent: str) -> str:
+    """Return pending messages for inbox://<project>/<agent> as JSON."""
+    db = get_mongo()
+    if db is None:
+        return json.dumps({
+            "uri": inbox_uri(project, agent),
+            "count": 0,
+            "messages": [],
+            "error": "MongoDB unavailable",
+        })
+
+    # Match the targeting rules used by memory_get_messages:
+    #  - workers only get direct messages (no broadcasts).
+    #  - everyone else gets direct + "*" broadcasts.
+    #  - project filter mirrors the legacy/empty-project tolerance.
+    is_worker = agent.startswith("worker_")
+    if is_worker:
+        instance_match = {"to_instance": agent}
+    else:
+        instance_match = {"$or": [{"to_instance": agent}, {"to_instance": "*"}]}
+    project_match = {
+        "$or": [
+            {"to_project": project},
+            {"to_project": {"$exists": False}},
+            {"to_project": ""},
+        ]
+    }
+    query = {"$and": [instance_match, project_match, {"status": "pending"}]}
+
+    cursor = db.messages.find(query).sort([
+        ("priority", 1),
+        ("created_at", -1),
+    ]).limit(INBOX_DEFAULT_LIMIT + 1)
+
+    docs = list(cursor)
+    has_more = len(docs) > INBOX_DEFAULT_LIMIT
+    docs = docs[:INBOX_DEFAULT_LIMIT]
+
+    next_cursor = None
+    if has_more and docs:
+        last_created = docs[-1].get("created_at")
+        if hasattr(last_created, "isoformat"):
+            next_cursor = last_created.isoformat()
+        elif last_created is not None:
+            next_cursor = str(last_created)
+
+    priority_sort = {"urgent": 0, "normal": 1, "low": 2}
+    messages = [_format_inbox_message(d) for d in docs]
+    messages.sort(key=lambda x: (priority_sort.get(x["priority"], 99), x["created"] or ""))
+
+    return json.dumps({
+        "uri": inbox_uri(project, agent),
+        "project": project,
+        "agent": agent,
+        "count": len(messages),
+        "messages": messages,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+    })
+
+
+def _parse_inbox_uri(uri_str: str) -> tuple:
+    """Parse inbox://<project>/<agent> → (project, agent) or (None, None)."""
+    m = re.match(r"^inbox://([^/]+)/([^/?#]+)", uri_str)
+    if not m:
+        return (None, None)
+    return (m.group(1), m.group(2))
+
+
+async def _notify_inbox(project: str, agent: str) -> None:
+    """Fire notifications/resources/updated to every session subscribed to
+    inbox://<project>/<agent>. Drops sessions whose send fails (dead transport).
+    Best-effort: a failure here must not break message insert.
+    """
+    if not project or not agent:
+        return
+    uri_str = inbox_uri(project, agent)
+    sessions = list(inbox_subscriptions.get(uri_str, ()))
+    if not sessions:
+        return
+
+    try:
+        url = AnyUrl(uri_str)
+    except Exception:  # pragma: no cover — defensive
+        log.warning("inbox: cannot construct AnyUrl for %s", uri_str)
+        return
+
+    dead: List[Any] = []
+    for session in sessions:
+        try:
+            await session.send_resource_updated(url)
+        except Exception as e:  # session closed / write end gone
+            log.debug("inbox: drop dead subscriber for %s: %s", uri_str, e)
+            dead.append(session)
+
+    if dead:
+        bucket = inbox_subscriptions.get(uri_str)
+        if bucket is not None:
+            for s in dead:
+                bucket.discard(s)
+            if not bucket:
+                inbox_subscriptions.pop(uri_str, None)
+
+
+# Subscribe / unsubscribe handlers — registered on the lowlevel server because
+# FastMCP exposes a resource decorator but not a subscribe handler. The lowlevel
+# `subscribe_resource()` overrides the request handler for SubscribeRequest.
+# Inside the handler, mcp._mcp_server.request_context.session is the
+# ServerSession that issued the SubscribeRequest — that's the one we need to
+# notify on future updates.
+
+@mcp._mcp_server.subscribe_resource()
+async def _on_subscribe(uri: AnyUrl) -> None:
+    uri_str = str(uri)
+    if not uri_str.startswith("inbox://"):
+        # Only inbox resources are subscribable for now. No-op for others
+        # (the lowlevel server still returns success, matching MCP semantics).
+        return
+    project, agent = _parse_inbox_uri(uri_str)
+    if not project or not agent:
+        return
+    try:
+        session = mcp._mcp_server.request_context.session
+    except LookupError:
+        log.warning("inbox: subscribe outside request context for %s", uri_str)
+        return
+    inbox_subscriptions.setdefault(uri_str, set()).add(session)
+    log.info(
+        "inbox: subscribed %s/%s (subscribers=%d)",
+        project, agent, len(inbox_subscriptions[uri_str]),
+    )
+
+
+@mcp._mcp_server.unsubscribe_resource()
+async def _on_unsubscribe(uri: AnyUrl) -> None:
+    uri_str = str(uri)
+    if not uri_str.startswith("inbox://"):
+        return
+    try:
+        session = mcp._mcp_server.request_context.session
+    except LookupError:
+        return
+    bucket = inbox_subscriptions.get(uri_str)
+    if bucket is None:
+        return
+    bucket.discard(session)
+    if not bucket:
+        inbox_subscriptions.pop(uri_str, None)
+    log.info("inbox: unsubscribed %s (remaining=%d)", uri_str, len(bucket) if bucket else 0)
