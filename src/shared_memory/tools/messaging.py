@@ -271,17 +271,26 @@ async def memory_send_message(
             "existing_message_id": existing_msg["_id"]
         })
 
-    # ── Phase C1: chain depth math ──
-    # Final depth is max(parent.chain_depth + 1, caller-provided chain_depth, 0).
-    # When neither parent nor caller provide a value, defaults to 0 (this is
-    # the natural value for human-originated and top-of-chain agent messages).
-    parent_depth = -1  # so parent_depth + 1 == 0 when no parent
-    if in_response_to:
-        parent = db.messages.find_one({"_id": in_response_to}, {"chain_depth": 1})
-        if parent and isinstance(parent.get("chain_depth"), int):
-            parent_depth = parent["chain_depth"]
-    caller_depth = chain_depth if isinstance(chain_depth, int) else 0
-    final_depth = max(parent_depth + 1, caller_depth, 0)
+    # ── Human-sender rule (design:human-sender-rule-v0.1) ──
+    # When the caller's session is user-tier (Path B soft-auth: only valid
+    # api_keys produce role="user"), force chain_depth=0 regardless of any
+    # in_response_to parent or caller-supplied value. A user send is by
+    # definition the start of a fresh chain even when threaded for UI
+    # continuity. Hard-cap check below is naturally bypassed (0 < cap).
+    sent_by_human = session_info.get("role") == "user"
+
+    if sent_by_human:
+        final_depth = 0
+    else:
+        # ── Phase C1: chain depth math ──
+        # Final depth is max(parent.chain_depth + 1, caller-provided chain_depth, 0).
+        parent_depth = -1  # so parent_depth + 1 == 0 when no parent
+        if in_response_to:
+            parent = db.messages.find_one({"_id": in_response_to}, {"chain_depth": 1})
+            if parent and isinstance(parent.get("chain_depth"), int):
+                parent_depth = parent["chain_depth"]
+        caller_depth = chain_depth if isinstance(chain_depth, int) else 0
+        final_depth = max(parent_depth + 1, caller_depth, 0)
 
     # Hard cap — drop and alert. Coordinator gets a system message so the
     # runaway loop is visible without breaking the calling agent's tool flow.
@@ -344,7 +353,10 @@ async def memory_send_message(
         "in_response_to": in_response_to,
         "chain_depth": final_depth,
         "require_human": final_require_human,
-        "user_originated": session_info.get("claude_instance", "").startswith("user-"),
+        "sent_by_human": sent_by_human,
+        # Legacy field kept during transition. The instance-prefix variant is
+        # forgeable; new code should read sent_by_human instead.
+        "user_originated": sent_by_human or session_info.get("claude_instance", "").startswith("user-"),
         "status": "pending",
         "created_at": now,
         "delivered_at": None,
@@ -373,6 +385,8 @@ async def memory_send_message(
         "reply_to": reply_to,
         "in_response_to": in_response_to,
         "chain_depth": final_depth,
+        "effective_chain_depth": final_depth,
+        "sent_by_human": sent_by_human,
         "require_human": final_require_human,
         "destructive_match": body_is_destructive,
         "persisted": True,
@@ -444,6 +458,7 @@ async def memory_get_messages(
             "chain_depth": doc.get("chain_depth", 0),
             "require_human": bool(doc.get("require_human", False)),
             "user_originated": bool(doc.get("user_originated", False)),
+            "sent_by_human": bool(doc.get("sent_by_human", False)),
         }
         if doc.get("reply_to"):
             entry["reply_to"] = doc["reply_to"]
@@ -528,6 +543,7 @@ async def memory_get_messages(
             "chain_depth": doc.get("chain_depth", 0),
             "require_human": bool(doc.get("require_human", False)),
             "user_originated": bool(doc.get("user_originated", False)),
+            "sent_by_human": bool(doc.get("sent_by_human", False)),
         }
         if doc.get("reply_to"):
             entry["reply_to"] = doc["reply_to"]
@@ -815,6 +831,7 @@ def _format_inbox_message(doc: Dict[str, Any]) -> Dict[str, Any]:
         "chain_depth": doc.get("chain_depth", 0),
         "require_human": bool(doc.get("require_human", False)),
         "user_originated": bool(doc.get("user_originated", False)),
+        "sent_by_human": bool(doc.get("sent_by_human", False)),
     }
     if doc.get("reply_to"):
         entry["reply_to"] = doc["reply_to"]

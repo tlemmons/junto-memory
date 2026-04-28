@@ -387,11 +387,22 @@ def cleanup_stale_sessions():
     for sid in to_remove:
         # Release any locks held by this session
         release_session_locks(sid)
-        # Drop MCP-session binding (Phase C2 inbox auth)
+        # Drop MCP-session binding + inbox subscriptions (Phase C2)
         try:
             from shared_memory.state import mcp_session_to_app
-            for k in [k for k, v in mcp_session_to_app.items() if v == sid]:
+            from shared_memory.tools.messaging import inbox_subscriptions
+            dropped = [k for k, v in mcp_session_to_app.items() if v == sid]
+            for k in dropped:
                 mcp_session_to_app.pop(k, None)
+            if dropped:
+                for uri in list(inbox_subscriptions.keys()):
+                    bucket = inbox_subscriptions.get(uri)
+                    if bucket is None:
+                        continue
+                    for s in dropped:
+                        bucket.discard(s)
+                    if not bucket:
+                        inbox_subscriptions.pop(uri, None)
         except Exception:
             pass
         del active_sessions[sid]

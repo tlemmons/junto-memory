@@ -70,43 +70,52 @@ async def memory_start_session(
     # Cleanup stale sessions on each new session start
     cleanup_stale_sessions()
 
-    # ── Authentication ──
-    _auth_role = "agent"  # default when auth disabled
+    # ── Authentication (Path B soft-auth) ──
+    # Posture: when AUTH_ENABLED=true and no api_key is presented, fall through
+    # as default role="agent" instead of rejecting. This lets existing agents
+    # connect without keys while still requiring a real key for elevated tiers
+    # (user/admin/owner). Invalid keys remain hard-rejected.
+    _auth_role = "agent"  # default when auth disabled OR soft-auth fallback
     _auth_projects = []   # empty = all projects
     try:
         from shared_memory.auth import AUTH_ENABLED, check_project_access, validate_api_key
         if AUTH_ENABLED:
-            if not api_key:
-                return json.dumps({
-                    "error": "Authentication required. Provide api_key parameter.",
-                    "auth_enabled": True,
-                    "hint": "Set api_key in your MCP client config or pass it to memory_start_session."
-                })
-            key_info = validate_api_key(api_key)
-            if not key_info:
+            if api_key:
+                key_info = validate_api_key(api_key)
+                if not key_info:
+                    try:
+                        from shared_memory.audit import log_audit
+                        log_audit("auth.failed", claude_instance, project,
+                                  {"reason": "invalid_key"})
+                    except Exception:
+                        pass
+                    return json.dumps({"error": "Invalid or revoked API key."})
+
+                _auth_role = key_info["role"]
+                _auth_projects = key_info.get("projects", [])
+
+                # Tenant isolation: check project access
+                if not check_project_access(_auth_projects, project):
+                    try:
+                        from shared_memory.audit import log_audit
+                        log_audit("auth.project_denied", claude_instance, project,
+                                  {"key_name": key_info["name"], "allowed": _auth_projects})
+                    except Exception:
+                        pass
+                    return json.dumps({
+                        "error": f"Access denied: your API key does not have access to project '{project}'.",
+                        "allowed_projects": _auth_projects,
+                    })
+            else:
+                # Soft-auth fallback: no key presented, default to agent tier.
+                # Logged so we can see who's still missing keys.
+                print(f"[MCP] soft-auth: unauthenticated session {claude_instance}@{project} → agent tier")
                 try:
                     from shared_memory.audit import log_audit
-                    log_audit("auth.failed", claude_instance, project,
-                              {"reason": "invalid_key"})
+                    log_audit("auth.soft_fallback", claude_instance, project,
+                              {"reason": "no_api_key"})
                 except Exception:
                     pass
-                return json.dumps({"error": "Invalid or revoked API key."})
-
-            _auth_role = key_info["role"]
-            _auth_projects = key_info.get("projects", [])
-
-            # Tenant isolation: check project access
-            if not check_project_access(_auth_projects, project):
-                try:
-                    from shared_memory.audit import log_audit
-                    log_audit("auth.project_denied", claude_instance, project,
-                              {"key_name": key_info["name"], "allowed": _auth_projects})
-                except Exception:
-                    pass
-                return json.dumps({
-                    "error": f"Access denied: your API key does not have access to project '{project}'.",
-                    "allowed_projects": _auth_projects,
-                })
     except ImportError:
         pass  # auth module not available, continue without auth
 
@@ -523,11 +532,27 @@ async def memory_end_session(
     # Auto-release any file locks held by this session
     released_locks = release_session_locks(session_id)
 
-    # Phase C2: drop the MCP-session ↔ app-session binding
+    # Phase C2: drop the MCP-session ↔ app-session binding and any inbox
+    # subscriptions held by those transports. Without this, a client that
+    # ends its session without explicitly unsubscribing would keep receiving
+    # ResourceUpdated notifications until its transport actually dies — and
+    # any follow-up resource read would fail authz because the binding above
+    # is already gone.
     try:
         from shared_memory.state import mcp_session_to_app
-        for k in [k for k, v in mcp_session_to_app.items() if v == session_id]:
+        from shared_memory.tools.messaging import inbox_subscriptions
+        dropped_transports = [k for k, v in mcp_session_to_app.items() if v == session_id]
+        for k in dropped_transports:
             mcp_session_to_app.pop(k, None)
+        if dropped_transports:
+            for uri in list(inbox_subscriptions.keys()):
+                bucket = inbox_subscriptions.get(uri)
+                if bucket is None:
+                    continue
+                for s in dropped_transports:
+                    bucket.discard(s)
+                if not bucket:
+                    inbox_subscriptions.pop(uri, None)
     except Exception:
         pass
 

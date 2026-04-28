@@ -293,6 +293,7 @@ async def memory_autopilot_digest(
     total = db.messages.count_documents(base_query)
     require_human = db.messages.count_documents({**base_query, "require_human": True})
     user_originated = db.messages.count_documents({**base_query, "user_originated": True})
+    sent_by_human = db.messages.count_documents({**base_query, "sent_by_human": True})
 
     by_depth = {}
     for doc in db.messages.find(base_query, {"chain_depth": 1}):
@@ -311,6 +312,7 @@ async def memory_autopilot_digest(
                 "all_messages": total,
                 "require_human": require_human,
                 "user_originated": user_originated,
+                "sent_by_human": sent_by_human,
             },
             "by_chain_depth": by_depth,
             "current_config": {k: _format_dt(v) for k, v in config.items()},
@@ -396,6 +398,31 @@ async def memory_autopilot_check_budget(
                 "destructive_block": True,
             }
         )
+
+    # Gate 2.5: sent-by-human bypass (design:human-sender-rule-v0.1).
+    # Look up the message; if it was sent by a user-tier session, bypass
+    # depth + budget gates entirely. The destructive gate above already had
+    # its turn — destructive content from a human still requires explicit
+    # human review on the receiver side. Server-enforced (forgery-resistant)
+    # rather than client-trusted: a rogue/buggy channel plugin cannot claim
+    # sent_by_human to skip gating.
+    if message_id:
+        msg_doc = db.messages.find_one(
+            {"_id": message_id}, {"sent_by_human": 1}
+        )
+        if msg_doc and msg_doc.get("sent_by_human"):
+            return json.dumps(
+                {
+                    "allowed": True,
+                    "reason": "sent_by_human bypass",
+                    "current_count": 0,
+                    "hourly_budget": config["hourly_budget"],
+                    "depth_cap": config["depth_cap"],
+                    "depth_breach": False,
+                    "destructive_block": False,
+                    "sent_by_human_bypass": True,
+                }
+            )
 
     # Gate 3: depth cap (counted as an attempted auto-process)
     depth_breach = int(chain_depth or 0) > config["depth_cap"]
