@@ -17,6 +17,7 @@ from shared_memory.helpers import (
     get_project_collection,
     get_shared_collection,
     is_expired,
+    normalize_project,
     parse_timestamp,
     require_session,
     update_access_stats,
@@ -77,6 +78,9 @@ async def memory_query(
 
     chroma = await get_chroma()
     active_sessions[session_id]["last_activity"] = utc_now_iso()
+
+    if project:
+        project = normalize_project(project)
 
     results = []
 
@@ -248,6 +252,9 @@ async def memory_get_by_id(
 
     chroma = await get_chroma()
 
+    if project:
+        project = normalize_project(project)
+
     # Build list of collections to search
     collections_to_search = []
 
@@ -335,6 +342,9 @@ async def memory_get_active_work(
 
     chroma = await get_chroma()
 
+    if project:
+        project = normalize_project(project)
+
     # Get from active sessions (in-memory)
     active_work = []
     since_cutoff = None
@@ -343,7 +353,7 @@ async def memory_get_active_work(
 
     for sid, info in active_sessions.items():
         if sid != session_id:
-            if project and info["project"] != project:
+            if project and normalize_project(info["project"]) != project:
                 continue
             if instance and info["claude_instance"] != instance:
                 continue

@@ -13,7 +13,7 @@ from pydantic import AnyUrl
 from shared_memory.app import mcp
 from shared_memory.clients import get_mongo
 from shared_memory.config import MESSAGE_CATEGORIES, MESSAGE_PRIORITIES, MESSAGE_STATUSES
-from shared_memory.helpers import parse_timestamp, require_session, utc_now
+from shared_memory.helpers import normalize_project, parse_timestamp, require_session, utc_now
 from shared_memory.state import active_sessions, mcp_session_to_app
 from shared_memory.tools.projects import _fuzzy_match_agent, _is_project_admin
 
@@ -29,8 +29,13 @@ inbox_subscriptions: Dict[str, Set[Any]] = {}
 
 
 def inbox_uri(project: str, agent: str) -> str:
-    """Canonical inbox URI for a (project, agent) pair."""
-    return f"inbox://{project}/{agent}"
+    """Canonical inbox URI for a (project, agent) pair.
+
+    Project component is normalized so all subscribers/notifiers share the
+    same key in inbox_subscriptions regardless of how they spelled the
+    project name on input.
+    """
+    return f"inbox://{normalize_project(project)}/{agent}"
 
 
 def _resolve_caller_identity():
@@ -52,7 +57,7 @@ def _resolve_caller_identity():
         return None
     return {
         "session_id": app_sid,
-        "project": info.get("project", ""),
+        "project": normalize_project(info.get("project", "")),
         "claude_instance": info.get("claude_instance", ""),
         "role": info.get("role", "agent"),
     }
@@ -118,9 +123,10 @@ def get_pending_messages_for_instance(instance_name: str, project: str = None) -
 
     # Add project scoping if provided
     if project:
+        norm_project = normalize_project(project)
         query["$and"].append({
             "$or": [
-                {"to_project": project},
+                {"to_project": norm_project},
                 {"to_project": {"$exists": False}},
                 {"to_project": ""},
             ]
@@ -218,7 +224,7 @@ async def memory_send_message(
         return json.dumps({"error": f"Invalid category. Must be one of: {MESSAGE_CATEGORIES}"})
 
     session_info = active_sessions[session_id]
-    from_project = session_info.get("project", "")
+    from_project = normalize_project(session_info.get("project", ""))
     target_project = to_project or from_project
     now = utc_now()
 
@@ -227,8 +233,8 @@ async def memory_send_message(
         return json.dumps({"error": "MongoDB unavailable"})
 
     # ── Validate target against project registry ──
-    # Normalize project name
-    normalized_project = target_project.lower().replace("-", "_").replace(" ", "_")
+    # Normalize project name (single source of truth)
+    normalized_project = normalize_project(target_project)
     registered_project = db.projects.find_one({"name": normalized_project})
 
     if registered_project:
@@ -260,7 +266,7 @@ async def memory_send_message(
     dedup_window = now - timedelta(minutes=5)
     existing_msg = db.messages.find_one({
         "to_instance": to_instance,
-        "to_project": normalized_project if registered_project else target_project,
+        "to_project": normalized_project,
         "from_instance": session_info["claude_instance"],
         "message": message,
         "created_at": {"$gte": dedup_window}
@@ -297,16 +303,16 @@ async def memory_send_message(
     if final_depth > CHAIN_DEPTH_HARD_CAP:
         try:
             coordinator = db.registered_agents.find_one({
-                "project": normalized_project if registered_project else target_project,
+                "project": normalized_project,
                 "tier": "admin",
             })
             if coordinator:
                 db.messages.insert_one({
                     "_id": f"msg_{uuid.uuid4().hex[:12]}",
                     "from_instance": "system",
-                    "from_project": normalized_project if registered_project else target_project,
+                    "from_project": normalized_project,
                     "to_instance": coordinator["name"],
-                    "to_project": normalized_project if registered_project else target_project,
+                    "to_project": normalized_project,
                     "message": (
                         f"CHAIN-DEPTH ALERT: dropped a message from "
                         f"{session_info['claude_instance']}@{from_project} "
@@ -342,7 +348,7 @@ async def memory_send_message(
     msg_doc = {
         "_id": message_id,
         "to_instance": to_instance,
-        "to_project": normalized_project if registered_project else target_project,
+        "to_project": normalized_project,
         "from_instance": session_info["claude_instance"],
         "from_project": from_project,
         "from_session": session_id,
@@ -424,7 +430,7 @@ async def memory_get_messages(
 
     session_info = active_sessions[session_id]
     my_instance = session_info["claude_instance"]
-    my_project = session_info.get("project", "")
+    my_project = normalize_project(session_info.get("project", ""))
 
     db = get_mongo()
     if db is None:
@@ -921,11 +927,15 @@ async def read_inbox(project: str, agent: str) -> str:
 
 
 def _parse_inbox_uri(uri_str: str) -> tuple:
-    """Parse inbox://<project>/<agent> → (project, agent) or (None, None)."""
+    """Parse inbox://<project>/<agent> → (project, agent) or (None, None).
+
+    Project component is normalized so case/separator variants of the URI
+    resolve to the same subscription bucket.
+    """
     m = re.match(r"^inbox://([^/]+)/([^/?#]+)", uri_str)
     if not m:
         return (None, None)
-    return (m.group(1), m.group(2))
+    return (normalize_project(m.group(1)), m.group(2))
 
 
 async def _notify_inbox_for_send(to_project: str, to_instance: str) -> None:

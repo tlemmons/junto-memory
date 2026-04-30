@@ -29,7 +29,7 @@ from mcp.server.fastmcp import Context
 
 from shared_memory.app import mcp
 from shared_memory.clients import get_mongo
-from shared_memory.helpers import require_session, utc_now
+from shared_memory.helpers import normalize_project, require_session, utc_now
 from shared_memory.state import active_sessions
 
 
@@ -99,6 +99,7 @@ async def memory_set_autopilot(
 
     session_info = active_sessions[session_id]
     actor = session_info.get("claude_instance", "unknown")
+    project = normalize_project(project)
 
     update: dict = {"updated": utc_now(), "updated_by": actor}
     if enabled is not None:
@@ -166,6 +167,7 @@ async def memory_pause_autopilot(
 
     session_info = active_sessions[session_id]
     actor = session_info.get("claude_instance", "unknown")
+    project = normalize_project(project)
 
     db.agent_autopilot.update_one(
         {"project": project, "agent": agent},
@@ -226,13 +228,13 @@ async def memory_autopilot_status(
 
     if project and agent:
         return json.dumps(
-            {k: _format_dt(v) for k, v in _autopilot_config(db, project, agent).items()},
+            {k: _format_dt(v) for k, v in _autopilot_config(db, normalize_project(project), agent).items()},
             indent=2,
         )
 
     query: dict = {}
     if project:
-        query["project"] = project
+        query["project"] = normalize_project(project)
 
     configs = []
     for doc in db.agent_autopilot.find(query).sort([("project", 1), ("agent", 1)]):
@@ -283,6 +285,7 @@ async def memory_autopilot_digest(
         return json.dumps({"error": "MongoDB unavailable"})
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours)))
+    project = normalize_project(project)
 
     base_query = {
         "to_project": project,
@@ -367,6 +370,7 @@ async def memory_autopilot_check_budget(
     if db is None:
         return json.dumps({"error": "MongoDB unavailable"})
 
+    project = normalize_project(project)
     config = _autopilot_config(db, project, agent)
     now = utc_now()
 

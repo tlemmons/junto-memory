@@ -11,6 +11,7 @@ from shared_memory.config import DOC_STATUSES, WORK_STATUSES
 from shared_memory.helpers import (
     get_project_collection,
     get_shared_collection,
+    normalize_project,
     require_session,
     utc_now_iso,
 )
@@ -172,6 +173,9 @@ async def memory_change_status(
     chroma = await get_chroma()
     now = utc_now_iso()
 
+    if project:
+        project = normalize_project(project)
+
     # Find the document
     if project:
         collection = await get_project_collection(chroma, project)
@@ -264,7 +268,7 @@ async def memory_archive_by_tag(
     for col in collections:
         if project:
             # Only the specified project
-            if col.name == f"{PROJECT_PREFIX}{project.lower().replace('-', '_')}":
+            if col.name == f"{PROJECT_PREFIX}{normalize_project(project)}":
                 target_collections.append(col)
         else:
             # All project and shared collections
@@ -349,7 +353,7 @@ async def memory_restore_by_tag(
 
     for col in collections:
         if project:
-            if col.name == f"{PROJECT_PREFIX}{project.lower().replace('-', '_')}":
+            if col.name == f"{PROJECT_PREFIX}{normalize_project(project)}":
                 target_collections.append(col)
         else:
             if col.name.startswith(PROJECT_PREFIX) or col.name.startswith(SHARED_PREFIX):

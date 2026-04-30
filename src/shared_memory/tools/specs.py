@@ -11,6 +11,7 @@ from shared_memory.config import MAX_CONTENT_SIZE, PROJECT_PREFIX
 from shared_memory.helpers import (
     get_project_collection,
     get_shared_collection,
+    normalize_project,
     require_session,
     utc_now_iso,
 )
@@ -77,6 +78,9 @@ async def memory_define_spec(
     chroma = await get_chroma()
     session_info = active_sessions[session_id]
     now = utc_now_iso()
+
+    if project:
+        project = normalize_project(project)
 
     # Default owner to session's claude_instance
     if not owner:
@@ -248,6 +252,9 @@ async def memory_get_spec(
 
     chroma = await get_chroma()
 
+    if project:
+        project = normalize_project(project)
+
     # Normalize spec name for doc_id
     spec_doc_id = f"spec_{name.replace(':', '_').replace('/', '_')}"
 
@@ -338,6 +345,9 @@ async def memory_list_specs(
 
     chroma = await get_chroma()
     specs = []
+
+    if project:
+        project = normalize_project(project)
 
     # Build where filter - use $and for compound conditions (ChromaDB requirement)
     conditions = [{"type": {"$eq": "spec"}}, {"status": {"$eq": "active"}}]

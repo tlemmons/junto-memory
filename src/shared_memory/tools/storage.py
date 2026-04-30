@@ -17,6 +17,7 @@ from shared_memory.helpers import (
     generate_doc_id,
     get_project_collection,
     get_shared_collection,
+    normalize_project,
     require_session,
     utc_now_iso,
 )
@@ -95,6 +96,9 @@ async def memory_store(
     chroma = await get_chroma()
     session_info = active_sessions[session_id]
     now = utc_now_iso()
+
+    if project:
+        project = normalize_project(project)
 
     # Determine collection
     if project:
@@ -244,6 +248,7 @@ async def memory_record_learning(
     now = utc_now_iso()
 
     if project:
+        project = normalize_project(project)
         collection = await get_project_collection(chroma, project)
     else:
         collection = await get_shared_collection(chroma, "patterns")

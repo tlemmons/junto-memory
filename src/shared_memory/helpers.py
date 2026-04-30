@@ -62,12 +62,25 @@ def calculate_relevance(distance: float) -> float:
     return 1 - (dist / 2)
 
 
+def normalize_project(name: str) -> str:
+    """Canonical project name: lowercase, hyphens/spaces → underscores.
+
+    Single source of truth for project-name comparison. All writes and filters
+    on the `project` field must pass through this so case/separator variants
+    (claudeControl vs claudecontrol vs claude-control) collapse to one bucket.
+    """
+    if not name:
+        return name
+    return name.lower().replace("-", "_").replace(" ", "_")
+
+
 async def get_project_collection(client, project: str):
     """Get or create a project-specific collection (async)."""
-    name = f"{PROJECT_PREFIX}{project.lower().replace('-', '_')}"
+    norm = normalize_project(project)
+    name = f"{PROJECT_PREFIX}{norm}"
     return await client.get_or_create_collection(
         name=name,
-        metadata={"project": project, "created": utc_now_iso()}
+        metadata={"project": norm, "created": utc_now_iso()}
     )
 
 

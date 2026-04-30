@@ -7,7 +7,7 @@ from mcp.server.fastmcp import Context
 
 from shared_memory.app import mcp
 from shared_memory.clients import get_mongo
-from shared_memory.helpers import require_session, utc_now
+from shared_memory.helpers import normalize_project, require_session, utc_now
 from shared_memory.state import active_sessions
 
 
@@ -64,7 +64,7 @@ async def memory_checklist(
         return error
 
     session_info = active_sessions[session_id]
-    target_project = project or session_info.get("project", "")
+    target_project = normalize_project(project or session_info.get("project", ""))
     who = session_info.get("claude_instance", "unknown")
 
     db = get_mongo()

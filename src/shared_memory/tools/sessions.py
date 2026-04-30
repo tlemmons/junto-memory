@@ -19,6 +19,7 @@ from shared_memory.helpers import (
     get_recent_modifications,
     get_relevant_locks_for_session,
     get_shared_collection,
+    normalize_project,
     release_session_locks,
     require_session,
     utc_now,
@@ -119,8 +120,9 @@ async def memory_start_session(
     except ImportError:
         pass  # auth module not available, continue without auth
 
-    # Normalize project name
-    normalized_project = project.lower().replace("-", "_").replace(" ", "_")
+    # Normalize project name (single source of truth: helpers.normalize_project)
+    normalized_project = normalize_project(project)
+    project = normalized_project
 
     # ── Registry awareness ──
     _needs_role_description = False

@@ -16,6 +16,7 @@ from shared_memory.helpers import (
     calculate_relevance,
     get_project_collection,
     get_shared_collection,
+    normalize_project,
     require_session,
     update_access_stats,
     utc_now_iso,
@@ -94,6 +95,9 @@ async def memory_register_function(
     session_info = active_sessions[session_id]
     now = utc_now_iso()
     requires = requires or []
+
+    if project:
+        project = normalize_project(project)
 
     # Determine collection
     if project:
@@ -246,6 +250,8 @@ async def memory_find_function(
 
     # Search project collection
     search_project = project or session_info.get("project")
+    if search_project:
+        search_project = normalize_project(search_project)
     if search_project:
         try:
             proj_collection = await get_project_collection(chroma, search_project)
@@ -412,6 +418,8 @@ async def memory_become_librarian(
 
     if not target_project:
         return json.dumps({"error": "No project specified and none in session"})
+
+    target_project = normalize_project(target_project)
 
     # Find unenriched functions from ChromaDB
     chroma = await get_chroma()

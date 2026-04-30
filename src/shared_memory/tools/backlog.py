@@ -12,6 +12,7 @@ from shared_memory.config import BACKLOG_PRIORITIES, BACKLOG_STATUSES, PROJECT_P
 from shared_memory.helpers import (
     get_project_collection,
     get_shared_collection,
+    normalize_project,
     require_session,
     utc_now_iso,
 )
@@ -62,6 +63,9 @@ async def memory_add_backlog_item(
     chroma = await get_chroma()
     session_info = active_sessions[session_id]
     now = utc_now_iso()
+
+    if project:
+        project = normalize_project(project)
 
     # Store in project collection if specified, otherwise shared
     if project:
@@ -151,9 +155,12 @@ async def memory_list_backlog(
     collections = await chroma.list_collections()
     target_collections = []
 
+    if project:
+        project = normalize_project(project)
+
     for col in collections:
         if project:
-            if col.name == f"{PROJECT_PREFIX}{project.lower().replace('-', '_')}":
+            if col.name == f"{PROJECT_PREFIX}{project}":
                 target_collections.append(col)
         else:
             # All project and shared collections
@@ -312,6 +319,7 @@ async def memory_update_backlog_item(
 
                 # Move to different project if requested
                 if project:
+                    project = normalize_project(project)
                     meta["project"] = project
                     new_collection = await get_project_collection(chroma, project)
                     await new_collection.add(
@@ -464,7 +472,7 @@ async def memory_batch_backlog(
                     results["errors"].append({"index": i, "error": "title is required"})
                     continue
 
-                project = item.get("project", "")
+                project = normalize_project(item.get("project", "")) if item.get("project") else ""
                 priority = item.get("priority", "medium")
                 if priority not in BACKLOG_PRIORITIES:
                     priority = "medium"
