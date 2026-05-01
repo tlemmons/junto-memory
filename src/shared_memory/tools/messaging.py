@@ -38,6 +38,33 @@ def inbox_uri(project: str, agent: str) -> str:
     return f"inbox://{normalize_project(project)}/{agent}"
 
 
+def _live_subscribers_count(to_project: str, to_instance: str) -> int:
+    """Distinct subscriber sessions that will receive a notify for this send.
+
+    Direct send (to_instance != '*'): count subscribers on the recipient's
+    inbox URI.
+    Broadcast (to_instance == '*'): union of subscribers across every
+    agent-inbox URI in the target project, so a session subscribed to
+    several inboxes in the same project counts once, not multiple times.
+
+    Returns 0 if no project, no live subscribers, or no matching URIs.
+    Used by memory_send_message to surface delivery confidence to the
+    sender (backlog_8e1d3e45f6f1) — pairs with `persisted` to distinguish
+    "stored for next /go pickup" from "live-pushed to N sessions".
+    """
+    if not to_project:
+        return 0
+    if to_instance == "*":
+        prefix = f"inbox://{normalize_project(to_project)}/"
+        union: Set[Any] = set()
+        for uri, bucket in inbox_subscriptions.items():
+            if uri.startswith(prefix):
+                union.update(bucket)
+        return len(union)
+    uri_str = inbox_uri(to_project, to_instance)
+    return len(inbox_subscriptions.get(uri_str, set()))
+
+
 def _resolve_caller_identity():
     """Look up the calling agent's app session by joining the current MCP
     transport session (from request_context) with the mcp_session_to_app map.
@@ -396,6 +423,11 @@ async def memory_send_message(
     # subscriber sees the broadcast in their own inbox view.
     await _notify_inbox_for_send(msg_doc["to_project"], to_instance)
 
+    # Subscriber count is read from the in-process subscription map, which
+    # _notify_inbox_for_send may have just pruned of dead sessions. Reading
+    # AFTER notify gives the most accurate "live" count.
+    live_subscribers = _live_subscribers_count(msg_doc["to_project"], to_instance)
+
     return json.dumps({
         "status": "queued",
         "message_id": message_id,
@@ -412,6 +444,7 @@ async def memory_send_message(
         "require_human": final_require_human,
         "destructive_match": body_is_destructive,
         "persisted": True,
+        "live_subscribers": live_subscribers,
     })
 
 

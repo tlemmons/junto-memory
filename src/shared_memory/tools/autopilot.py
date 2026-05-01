@@ -257,6 +257,62 @@ async def memory_autopilot_status(
 
 
 @mcp.tool()
+async def memory_autopilot_count(
+    session_id: str,
+    project: str,
+    agent: str,
+    ctx: Context = None,
+) -> str:
+    """
+    Read-only autopilot budget counter — no event recorded.
+
+    Returns the same `current_count` + `hourly_budget` + window state that
+    `memory_autopilot_check_budget` computes, but does NOT insert an
+    `autopilot_event`. Safe to poll on a heartbeat (e.g., 30s) without
+    consuming budget.
+
+    Use `memory_autopilot_check_budget` when you're about to auto-process
+    a message (records the event, gates allowed/denied). Use this tool for
+    observability — statusline indicators, dashboards, monitoring.
+
+    Args:
+        session_id: Your session ID
+        project: Target project
+        agent: Target agent
+    """
+    error = require_session(session_id)
+    if error:
+        return error
+
+    db = get_mongo()
+    if db is None:
+        return json.dumps({"error": "MongoDB unavailable"})
+
+    project = normalize_project(project)
+    config = _autopilot_config(db, project, agent)
+    now = utc_now()
+    cutoff = now - timedelta(hours=1)
+
+    current_count = db.autopilot_events.count_documents(
+        {"project": project, "agent": agent, "logged_at": {"$gte": cutoff}}
+    )
+
+    return json.dumps(
+        {
+            "project": project,
+            "agent": agent,
+            "current_count": current_count,
+            "hourly_budget": config["hourly_budget"],
+            "depth_cap": config["depth_cap"],
+            "enabled": config["enabled"],
+            "window_start": cutoff.isoformat(),
+            "paused_at": config["paused_at"].isoformat() if config["paused_at"] else None,
+            "paused_reason": config["paused_reason"],
+        }
+    )
+
+
+@mcp.tool()
 async def memory_autopilot_digest(
     session_id: str,
     project: str,
