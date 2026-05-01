@@ -11,6 +11,7 @@ from mcp.server.fastmcp import Context
 from pydantic import AnyUrl
 
 from shared_memory.app import mcp
+from shared_memory.audit import log_audit
 from shared_memory.clients import get_mongo
 from shared_memory.config import MESSAGE_CATEGORIES, MESSAGE_PRIORITIES, MESSAGE_STATUSES
 from shared_memory.helpers import normalize_project, parse_timestamp, require_session, utc_now
@@ -1067,6 +1068,15 @@ async def _on_subscribe(uri: AnyUrl) -> None:
 
     ok, reason = _check_inbox_authz(project, agent)
     if not ok:
+        caller = _resolve_caller_identity()
+        log_audit(
+            "inbox.subscribe.denied",
+            actor=(caller or {}).get("claude_instance", "unknown"),
+            project=project,
+            details={"uri": uri_str, "agent": agent, "reason": reason,
+                     "caller_project": (caller or {}).get("project", "")},
+            session_id=(caller or {}).get("session_id", ""),
+        )
         # Surface a real error so the client doesn't think they subscribed.
         log.warning("inbox: subscribe denied for %s — %s", uri_str, reason)
         raise PermissionError(f"subscribe denied: {reason}")
@@ -1077,6 +1087,15 @@ async def _on_subscribe(uri: AnyUrl) -> None:
         log.warning("inbox: subscribe outside request context for %s", uri_str)
         return
     inbox_subscriptions.setdefault(uri_str, set()).add(session)
+    caller = _resolve_caller_identity()
+    log_audit(
+        "inbox.subscribe",
+        actor=(caller or {}).get("claude_instance", "unknown"),
+        project=project,
+        details={"uri": uri_str, "agent": agent,
+                 "subscriber_count": len(inbox_subscriptions[uri_str])},
+        session_id=(caller or {}).get("session_id", ""),
+    )
     log.info(
         "inbox: subscribed %s/%s (subscribers=%d)",
         project, agent, len(inbox_subscriptions[uri_str]),
@@ -1096,6 +1115,16 @@ async def _on_unsubscribe(uri: AnyUrl) -> None:
     if bucket is None:
         return
     bucket.discard(session)
+    remaining = len(bucket)
     if not bucket:
         inbox_subscriptions.pop(uri_str, None)
-    log.info("inbox: unsubscribed %s (remaining=%d)", uri_str, len(bucket) if bucket else 0)
+    project, agent = _parse_inbox_uri(uri_str)
+    caller = _resolve_caller_identity()
+    log_audit(
+        "inbox.unsubscribe",
+        actor=(caller or {}).get("claude_instance", "unknown"),
+        project=project or "",
+        details={"uri": uri_str, "agent": agent or "", "remaining": remaining},
+        session_id=(caller or {}).get("session_id", ""),
+    )
+    log.info("inbox: unsubscribed %s (remaining=%d)", uri_str, remaining)
