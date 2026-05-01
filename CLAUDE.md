@@ -216,6 +216,7 @@ This applies doubly to shared-memory itself: you're the project that owns the re
 3. **Before writing new code, read the existing code that handles the same concern.** This project has 200+ functions — most of what you'd write probably exists.
 4. **Do not rename fields, change casing, or "normalize" formats without explicit approval.** Other projects depend on the exact shapes shared-memory returns.
 5. **When a task is "done," answer:** "If a fresh agent in another project tried this right now, what would they see?" If you can't answer, the task is not done.
+6. **Fail loud on MCP transport.** Any MCP tool call that errors, times out, or returns a partial/unexpected response surfaces to the user immediately — do not retry blindly, do not pretend it succeeded. Don't equate "queued"/"persisted" with "delivered": `memory_send_message` returns success on persistence regardless of whether any subscriber is live (see `learning_5c447278b1848667`). When you need delivery confirmation, check `live_subscribers` in the response (once `backlog_8e1d3e45f6f1` ships) or expect the recipient to ack on their next `/go`. Subscription failures (PermissionError from inbox subscribe) are real errors, not no-ops — surface them.
 
 ---
 
@@ -230,4 +231,6 @@ This applies doubly to shared-memory itself: you're the project that owns the re
 
 ## Pattern Reference
 
-The transferable park/go pattern (cross-project canon) is stored in shared memory at id `be4f1a9b1369` (tags: `park-go`, `transferable`). When other coordinators ask shared-memory how to adopt this pattern in their projects, point them there. Source pattern came from `coordinator@nimbus` 2026-04-30.
+The transferable park/go pattern (cross-project canon) is stored in shared memory at id `be4f1a9b1369b80f` (tags: `park-go`, `transferable`). When other coordinators ask shared-memory how to adopt this pattern in their projects, point them there. Source pattern came from `coordinator@nimbus` 2026-04-30.
+
+When sage (or any new project) installs the cterm-inbox channel plugin, the rendered channel source string is **`cterm-inbox`** (no `plugin:` prefix — empirically verified 2026-04-30 against a live nimbus jobs-team CC, see `msg_dbed168be1b1` from CT/main). Path-loaded plugins surface differently than marketplace-registered ones. If cterm-inbox ever publishes to Anthropic's marketplace allowlist (Phase E), re-verify — string may shift to `plugin:cterm-inbox:cterm-inbox` at that point.
