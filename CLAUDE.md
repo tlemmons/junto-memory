@@ -231,6 +231,6 @@ This applies doubly to shared-memory itself: you're the project that owns the re
 
 ## Pattern Reference
 
-The transferable park/go pattern (cross-project canon) is stored in shared memory at id `be4f1a9b1369b80f` (tags: `park-go`, `transferable`). When other coordinators ask shared-memory how to adopt this pattern in their projects, point them there. Source pattern came from `coordinator@nimbus` 2026-04-30.
+The transferable park/go pattern (cross-project canon) is stored as a versioned spec at name `pattern:park-go` (current version 1.1.0). Look it up with `memory_get_spec(name="pattern:park-go")`. When other coordinators ask shared-memory how to adopt this pattern in their projects, point them there. Source pattern came from `coordinator@nimbus` 2026-04-30; migrated from `shared_patterns` doc `be4f1a9b1369b80f` (now superseded) to a spec on 2026-05-01 so future revisions don't orphan ID references.
 
 When sage (or any new project) installs the cterm-inbox channel plugin, the rendered channel source string is **`cterm-inbox`** (no `plugin:` prefix — empirically verified 2026-04-30 against a live nimbus jobs-team CC, see `msg_dbed168be1b1` from CT/main). Path-loaded plugins surface differently than marketplace-registered ones. If cterm-inbox ever publishes to Anthropic's marketplace allowlist (Phase E), re-verify — string may shift to `plugin:cterm-inbox:cterm-inbox` at that point.
