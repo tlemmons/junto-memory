@@ -155,13 +155,25 @@ def get_pending_messages_for_instance(instance_name: str, project: str = None) -
     return messages
 
 
-# Phase C1: destructive content gate. Body containing any of these keywords
+# Phase C1.1: destructive content gate. Body containing any of these patterns
 # automatically gets require_human=True so autopilot never auto-acts on it.
-# Pattern is intentionally broad — false positives (require_human=True for a
-# benign message that mentions "delete") are cheap, false negatives are not.
+# This regex is gated by chain_depth>0 in the caller — a depth-0 send is
+# deliberate (human or new agent chain) and trusted to set require_human itself.
+#
+# Tightened from the v1 pattern (backlog_6bcf2d646772). The original matched
+# any case-insensitive mention of DELETE/DROP/TRUNCATE/deploy/production, which
+# false-positived on prose ("category=info: we're going to deploy on Friday"
+# was getting require_human=True). New rules:
+#   - SQL keywords require an adjacent SQL noun (FROM/TABLE/...)
+#   - All-caps only — SQL destructive statements are always upper-case in real
+#     code; lower-case "drop the table" in prose no longer matches
+#   - "deploy/production/prod" removed — too noisy in prose; callers can pass
+#     require_human=True when they really mean it
+#   - rm -rf added — universally destructive
 _DESTRUCTIVE_KEYWORDS = re.compile(
-    r"\b(DELETE|DROP|TRUNCATE|deploy|production|prod\b)\b|git\s+push\s+(--force|-f)\b",
-    re.IGNORECASE,
+    r"\b(DELETE\s+FROM|DROP\s+(TABLE|DATABASE|SCHEMA|INDEX|COLLECTION|VIEW)|TRUNCATE\s+TABLE)\b"
+    r"|git\s+push\s+(--force|-f)\b"
+    r"|\brm\s+-rf\b"
 )
 
 # Phase C1: hard cap on auto-relay chains. Anything arriving with chain_depth
@@ -335,11 +347,15 @@ async def memory_send_message(
             "alert_sent": True,
         })
 
-    # ── Phase C1: destructive content gate ──
-    # Always force require_human=True if the body contains destructive keywords,
-    # even if the caller passed False. False positives are cheap; missing one
-    # destructive auto-action is not.
-    body_is_destructive = bool(_DESTRUCTIVE_KEYWORDS.search(message))
+    # ── Phase C1.1: destructive content gate, chain-depth-gated ──
+    # Auto-flag only when this is a relayed/autopilot message (chain_depth>0).
+    # Depth-0 sends are deliberate (human-tier or new agent chain) — the caller
+    # is presumed to know what they're doing and can pass require_human=True
+    # explicitly. The gate is here to break runaway autopilot loops, not to
+    # police prose. backlog_6bcf2d646772.
+    body_is_destructive = (
+        final_depth > 0 and bool(_DESTRUCTIVE_KEYWORDS.search(message))
+    )
     final_require_human = bool(require_human) or body_is_destructive
 
     # ── Build and store message ──
