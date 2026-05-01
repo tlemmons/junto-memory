@@ -85,23 +85,27 @@ The server runs as a single Docker Compose stack. AI agents connect over MCP (st
 
 ---
 
-## Quick Start
+## Install — Hand It to Your AI
+
+This server is designed for AI coding agents, so the install procedure is too. Clone the repo, then ask your agent to install it for you:
 
 ```bash
 git clone https://github.com/tlemmons/mcp-shared-memory.git
 cd mcp-shared-memory
-cp .env.example .env
-# Edit .env -- set MONGO_PASSWORD to something secure
-docker compose up -d
+# Now hand the prompt below to your AI agent in a fresh session.
 ```
 
-The server will be available at `http://localhost:8080`. MongoDB listens on port 27018 and ChromaDB on port 8001.
+Copy this prompt to a fresh Claude Code (or Cursor, or any MCP-capable agent) session in the cloned directory:
 
-Verify it is running:
+> Install the MCP Shared Memory Server in this repository for me. Read `AGENT_INSTALL.md` and follow it step by step. Use the root-level `docker-compose.yml`. Stop and confirm with me before any destructive operation, before any change that needs a real value (passwords, API keys, port choices), and before enabling auth. When the install is done, run the smoke test described in the doc and report all six done-when results back to me.
 
-```bash
-curl http://localhost:8080/health
-```
+The agent walks through prerequisites, env-file configuration, container start, health check, and MCP-client config — pausing at the right places to ask you for decisions (passwords, ports, auth on/off).
+
+**Why this way?** The install has accumulated enough operational gotchas — Chroma volume mount path, Mongo init credentials, the auth env-var with soft-fallback, the difference between localhost and remote-host trust models — that a 6-line quickstart misleads more often than it helps. `AGENT_INSTALL.md` is dense, branchy, and tested against the actual current code; an agent reads and executes it in a few minutes. If you don't trust an AI agent to run the install, this server is probably not for you — its whole purpose is to coordinate fleets of AI agents working on real codebases.
+
+**Manual install:** `AGENT_INSTALL.md` is human-readable too. It's denser than typical README prose, but follow it the same way and the install works.
+
+After install, MongoDB listens on `localhost:27019`, ChromaDB on `localhost:8001`, and the MCP server on `localhost:8080`.
 
 ### Your First Session
 
@@ -209,7 +213,7 @@ No API keys or authentication tokens are required for local use (see [Security](
 
 ## Tool Reference
 
-40 tools organized into 14 categories.
+48 tools organized into 14 categories. (For the canonical, current list with grouping and end-to-end flows, see the architecture spec inside the server: `memory_get_spec(name="architecture:shared-memory-v1", project="shared_memory")`.)
 
 ### Session Management (2)
 
@@ -334,7 +338,7 @@ All configuration is via environment variables. See `.env.example` for the compl
 | `MONGO_USER` | `mcp_orch` | MongoDB username. |
 | `MONGO_DB` | `mcp_orchestrator` | MongoDB database name. |
 | `MONGO_HOST` | `localhost` | MongoDB host (set automatically in Docker Compose). |
-| `MONGO_PORT` | `27018` | MongoDB external port. |
+| `MONGO_PORT` | `27019` | MongoDB external port. (`.env.example` currently shows `27018`; that's stale — `docker-compose.yml` uses `27019`.) |
 | `CHROMA_HOST` | `localhost` | ChromaDB host (set automatically in Docker Compose). |
 | `CHROMA_PORT` | `8001` | ChromaDB external port. |
 
