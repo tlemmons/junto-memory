@@ -1,10 +1,12 @@
-# MCP Shared Memory Server
+# MCP Shared Memory Server (`junto-memory`)
 
-[![CI](https://github.com/tlemmons/mcp-shared-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/tlemmons/mcp-shared-memory/actions/workflows/ci.yml)
+[![CI](https://github.com/tlemmons/junto-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/tlemmons/junto-memory/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11+-green.svg)
 ![MCP Compatible](https://img.shields.io/badge/MCP-compatible-purple.svg)
 ![Docker](https://img.shields.io/badge/docker-ready-blue.svg)
+
+> The **memory** component of the **[Junto](https://github.com/tlemmons/junto-stack)** multi-agent coordination system. For a working stack with docker-compose + adopter walkthrough, start at [`junto-stack`](https://github.com/tlemmons/junto-stack).
 
 **A shared memory and coordination server for multiple AI coding agents, built on the Model Context Protocol (MCP).**
 
