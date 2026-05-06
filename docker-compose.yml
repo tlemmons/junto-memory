@@ -1,12 +1,13 @@
 services:
   chromadb:
-    # Pinned to a LOCAL tag of the image that created our existing data. The
-    # real image ID is sha256:501769453712... (Chroma 1.x, pulled 2025-12-12).
-    # Downgrading to 0.6.x breaks the SQLite schema — seen 2026-04-17 during
-    # migration: 0 collections visible because 0.6.x can't read 1.x data.
-    # To upgrade: test a full container rebuild on a volume COPY first.
-    image: chromadb/chroma:local-known-working
-    pull_policy: never
+    # Chroma 1.x (Rust rewrite). The image ID we use locally is sha256:501769453712...
+    # which corresponds to the public tag chromadb/chroma:1.2.4 (released 2025-12-12).
+    # Adopters get the same bits via Docker Hub.
+    #
+    # Do NOT downgrade to 0.6.x — different SQLite schema, can't read 1.x data
+    # (verified 2026-04-17 during migration: 0 collections visible after downgrade).
+    # When upgrading to a newer 1.x point release, test on a volume COPY first.
+    image: chromadb/chroma:1.2.4
     container_name: mcp-chromadb
     # Chroma 1.x persists to /data by default. The previous mount at
     # /chroma/chroma was silently ignored, causing the Apr 2026 data loss
