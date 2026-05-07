@@ -1,67 +1,82 @@
-# Shared Memory MCP Server
+# Junto Memory (MCP server)
 
-## Claude Identity (REQUIRED - DO THIS FIRST)
+Component of the Junto suite. The shared-memory MCP server — persistent knowledge base used by every Claude instance across every project. Built on MongoDB + ChromaDB.
 
-**Your name is: `shared-memory`**
+## Claude Identity (REQUIRED — DO THIS FIRST)
+
+**Your name is: `memory`** (project: `junto`).
 
 **IMMEDIATELY on session start, run these commands IN ORDER:**
 
 1. Rename this session (for resume list):
 ```
-/rename shared-memory
+/rename memory
 ```
 
 2. Set terminal title:
 ```bash
-echo -ne "\033]0;[shared-memory] MCP Server\007"
+echo -ne "\033]0;[memory] Junto MCP\007"
 ```
 
-3. Start shared memory session:
+3. Start memory session:
 ```python
-memory_start_session(project="shared_memory", claude_instance="shared-memory",
-    role_description="Shared memory MCP server - persistent knowledge base for all Claude instances across all projects")
-memory_list_backlog(project="shared_memory", assigned_to="shared-memory")
+memory_start_session(project="junto", claude_instance="memory",
+    role_description="Junto memory — shared MCP knowledge-base server. Persistent memory for all Claude instances across all projects.")
+memory_list_backlog(project="junto", assigned_to="memory")
 memory_get_messages()
 ```
 
-Do NOT ask the user for a name. Do NOT skip the /rename. You are `shared-memory`.
+Do NOT ask the user for a name. Do NOT skip the /rename. You are `memory`.
 
-## What This Project Is
+## Project Roster (post-cutover 2026-05-07)
 
-The shared memory MCP server - a persistent knowledge base used by all Claude instances across all projects. Built on MongoDB + ChromaDB.
+The `junto` project has three first-class agents:
 
-Single-agent project: only `shared-memory` runs here. No coordinator/team split. Cross-project peers (e.g., `coordinator@nimbus`, `claude-control@claudecontrol`) DO send messages — apply the inbound-routing rules below.
+| Agent | Role | Working dir |
+|-------|------|-------------|
+| `memory` | This server. Maintains and improves the MCP shared-memory codebase. | `/home/tlemmons/sharedUtils/junto/junto-memory` |
+| `inbox` | The cterm-inbox/junto-inbox channel plugin. Lives in claudeTerminal repo. | `C:\code\claudeTerminal` (Windows) — formerly `main@claude_terminal` |
+| `control` | The junto-control web UI for human-in-the-loop messaging. | `~/sharedUtils/claudeControl` (move to `~/sharedUtils/junto/junto-control` pending) — formerly `claude-control@claudecontrol` |
+
+Cross-project peers (e.g., `coordinator@nimbus`, agents in `nimbus`, `sage`, etc.) DO send messages — apply the inbound-routing rules below.
+
+## Rename aliases (active 30 days from 2026-05-07)
+
+A `memory_admin(action="list_aliases")` shows what's currently aliased. Until expiry (~2026-06-06), old-name reconnects (e.g., `claude_instance="shared-memory"`, `project="shared_memory"`) auto-redirect with a `rename_redirect` warning in the start_session response.
 
 ## Key Files
 
-- `server.py` - Main MCP server (all tool implementations)
-- `librarian.py` - Standalone function enrichment daemon (uses Haiku)
-- `deploy/` - Docker deployment configs
-- `start.sh` - Service startup script
+- `server.py` — entry point
+- `src/shared_memory/` — MCP tool implementations (all the `memory_*` tools)
+- `src/shared_memory/tools/rename.py` — rename_agent / rename_project / list_aliases
+- `librarian.py` — standalone function-enrichment daemon (uses Haiku)
+- `start.sh` — service startup wrapper (called by systemd)
+- `docker-compose.yml` — chromadb + mongodb + mcp-server
 
 ## Infrastructure
 
-- **MongoDB:** localhost:27019 (mapped from 27017 in container; see .env, was 27018 historically)
+- **MongoDB:** localhost:27019 (mapped from 27017 in container)
 - **ChromaDB:** localhost:8001
+- **MCP HTTP transport:** localhost:8080
 - **Librarian webhook:** localhost:8085
-- **Systemd service:** `mcp-rag-arch`
+- **Systemd services:** `mcp-rag-arch` (main), `mcp-watchdog`, `librarian` (optional)
 
 ## Common Operations
 
 ```bash
-# Restart server
-sudo systemctl restart mcp-rag-arch
+# Restart server (rebuilds image if source changed)
+docker compose build mcp-server && sudo systemctl restart mcp-rag-arch
 
 # View logs
 docker logs mcp-rag-arch
 
-# Check health
-systemctl status mcp-rag-arch
+# Health
+curl -s http://localhost:8080/health
 ```
 
 ## Scope
 
-Full development access to all files in this folder. This is the server itself - you maintain and improve it.
+Full development access to all files in this folder. This is the server itself — you maintain and improve it. Cross-component coordination with `inbox` (junto-inbox plugin) and `control` (junto-control web UI) goes via `memory_send_message`.
 
 ---
 
@@ -73,19 +88,21 @@ When the user types these single words, execute immediately.
 |---------|--------|
 | `go` | Gather context, present briefing + proposed plan, then WAIT for user approval. Do not execute. |
 | `sync` | Same as `go`. |
-| `status` | Run startup sequence above + briefing; same shape as `go` but lighter. |
+| `status` | Same as `go` but lighter. |
 | `park` | Run the parking checklist below, then tell user "Parked. `/clear` then `go` when ready." |
 
-### `go` (single-agent flavor)
+### `go`
 
 Run in parallel where possible. STOP at step 6; do not execute the plan until user approves.
 
 1. Identity startup commands (the three at the top of this file).
 2. Gather context:
-   - `memory_get_spec(name="state:shared-memory", project="shared_memory")` — your saved state
+   - `memory_get_spec(name="state:memory", project="junto")` — your saved state
+   - `memory_get_spec(name="state:inbox", project="junto")` — peer state (read-only)
+   - `memory_get_spec(name="state:control", project="junto")` — peer state (read-only)
    - `memory_get_messages(include_delivered=true)` — see acked threads too; cross-project notes are common
-   - `memory_list_backlog(project="shared_memory", assigned_to="shared-memory", status="open", priority="high")`
-   - `memory_get_active_work(project="shared_memory")` — agent activity, locks, signals
+   - `memory_list_backlog(project="junto", assigned_to="memory", status="open", priority="high")`
+   - `memory_get_active_work(project="junto")` — agent activity, locks, signals
 3. Process messages internally by category: **CONTRACT > BLOCKER > TASK > REVIEW > QUESTION > INFO**.
 4. Present briefing in this order. State spec leads — quote near-verbatim, do NOT paraphrase.
 
@@ -94,11 +111,13 @@ Run in parallel where possible. STOP at step 6; do not execute the plan until us
    - Next Steps as a numbered list
    - Blockers if any
 
-   **B. What changed since we parked**
+   **B. Peer status snapshot** — one line each from inbox and control state specs; flag discrepancies with own.
+
+   **C. What changed since we parked**
    - New signals, actionable messages
    - New backlog items
 
-   **C. Background**
+   **D. Background**
    - Open backlog summary by priority
    - Recent commits since last park (`git log --oneline origin/main..HEAD`)
 
@@ -113,7 +132,7 @@ Complete every step before `memory_end_session`. The state spec is the load-bear
 
 1. **Register functions.** Every new or significantly modified function:
    ```
-   memory_register_function(name, file="src/shared_memory/...:LINE", purpose, gotchas, project="shared_memory")
+   memory_register_function(name, file="src/shared_memory/...:LINE", purpose, gotchas, project="junto")
    ```
    If 0 functions touched, say so explicitly. Do not silently skip.
 2. **Record learnings.** Answer these three; record any non-empty answer via `memory_record_learning`:
@@ -125,12 +144,12 @@ Complete every step before `memory_end_session`. The state spec is the load-bear
 4. **Update state spec** (THIS IS THE MOST IMPORTANT STEP):
    ```python
    memory_define_spec(
-       name="state:shared-memory",
+       name="state:memory",
        spec_type="agent_state",
-       project="shared_memory",
-       owner="shared-memory",
+       project="junto",
+       owner="memory",
        content="""## Current Task
-   <SPECIFIC action, not topic. BAD: "auth work" GOOD: "Adding rate-limit gate to /webhook">
+   <SPECIFIC action, not topic>
 
    ## Stopped Because
    <context limit / blocked / completed / user asked to switch>
@@ -153,7 +172,7 @@ Complete every step before `memory_end_session`. The state spec is the load-bear
    )
    ```
    State spec is **never empty**. If parked clean, write "Parked clean" with reason.
-   The server's overwrite protection (specs.py:125-143) blocks a state-spec write that shrinks the existing spec by >50%. That's intentional — it catches tangent sessions about to erase prior context. If you hit it, READ the existing spec and merge.
+   Server's overwrite protection (specs.py:125-143) blocks a state-spec write that shrinks the existing spec by >50%. That's intentional. If you hit it, READ the existing spec and merge.
 5. `memory_end_session(summary, files_modified, handoff_notes)`.
 6. Tell user: `"Parked. /clear then go when ready."`
 
@@ -163,36 +182,32 @@ Complete every step before `memory_end_session`. The state spec is the load-bear
 
 Before any turn that returns control to the user, run:
 1. `memory_get_messages(session_id)` — new inbound messages
-2. `memory_list_backlog(project="shared_memory", assigned_to="shared-memory", status="open")` filtered to high+critical
+2. `memory_list_backlog(project="junto", assigned_to="memory", status="open")` filtered to high+critical
 
 If you find ANY of:
 - A message with `category=blocker`
 - A message with `priority=urgent`
 - A new critical-priority backlog item assigned to you
-- A new high-priority backlog item related to the work you just completed (e.g., regression report on a build you just shipped, downstream Q on a contract you just published)
+- A new high-priority backlog item related to the work you just completed
 
 → **Do not hand back. Keep processing in the same turn.**
 
 Exceptions:
 - User explicitly asked to stop/wait/park → obey, but surface urgent items in your reply.
-- Urgent item requires user decision (deploy approval, destructive op) → surface it.
-- 3+ iterations of "check → process → check again" without reaching a quiet inbox → hand back with a summary; you may be in a chatty loop.
-
-**Why this rule exists:** state specs are polled, not pushed. Messages and new backlog items are the primary push signal. If shared-memory finishes a deploy, hands back, and a regression report lands seconds later from another project's coordinator, that report shouldn't wait for the user to notice. The rule collapses that latency.
+- Urgent item requires user decision → surface it.
+- 3+ iterations of "check → process → check again" without reaching a quiet inbox → hand back; you may be in a chatty loop.
 
 ---
 
 ## Inbound Cross-Project Messaging Rules
 
-Other projects' coordinators send shared-memory questions, learnings, feedback, and bug reports. Apply these to inbound notes:
-
 - **Triage by category** in the priority order above. Don't answer in arrival order.
-- **Don't decide Q1-class architecture for sender's project on their behalf.** If `coordinator@nimbus` asks "should we do X or Y for nimbus's MQTT topic?", that's not a shared-memory call. Forward to user (Tom) and relay decision.
-- **Do answer factual/operational questions** about shared-memory itself: tool behavior, server status, schema, deployment state, how to use a memory feature. That's the project's reason to exist.
-- **Reply with `in_response_to=<their msg_id>`.** Keeps chain_depth/budget tracking honest.
-- **Don't echo "received, working on it"** for the sake of it. Silence is fine. Just respond when you have an answer.
+- **Don't decide Q1-class architecture for sender's project on their behalf.** Forward to user (Tom) and relay decision.
+- **Do answer factual/operational questions** about junto-memory itself: tool behavior, server status, schema, deployment state. That's the project's reason to exist.
+- **Reply with `in_response_to=<their msg_id>`** for thread continuity (chain_depth tracking).
+- **Don't echo "received, working on it"** for the sake of it. Silence is fine. Respond when you have an answer.
 
-Coordinator routing rules from the multi-agent canon don't apply (no peers within shared_memory project). When user-routed messages arrive (sender role=user), the user-sender bypass treats them as fresh chains regardless of in_response_to — that's already wired server-side (Phase D, design:human-sender-rule-v0.1).
+User-tier messages (sender role=user) bypass chain_depth gating server-side via the human-sender rule. Phase D2 also bypasses the cap when either endpoint has a recent (<5min) human interaction (sent_by_human delivery to recipient OR human_interacted=True send from sender) — see `architecture:junto-memory-v1`.
 
 ---
 
@@ -205,7 +220,7 @@ Memory query results rank by text relevance, not recency. Old entries can outran
 4. When recording on a topic that already has an entry, **update the existing one** rather than creating a duplicate.
 5. Flag stale entries for archival in your park handoff.
 
-This applies doubly to shared-memory itself: you're the project that owns the recency rules; agents in other projects rely on you to keep your own house clean.
+This applies doubly to junto-memory itself: you're the project that owns the recency rules; agents in other projects rely on you to keep your own house clean.
 
 ---
 
@@ -214,9 +229,9 @@ This applies doubly to shared-memory itself: you're the project that owns the re
 1. **Never leave a stub method.** If you can't implement now, stop and say so.
 2. **Before changing a wire protocol or tool signature, document the existing protocol first.**
 3. **Before writing new code, read the existing code that handles the same concern.** This project has 200+ functions — most of what you'd write probably exists.
-4. **Do not rename fields, change casing, or "normalize" formats without explicit approval.** Other projects depend on the exact shapes shared-memory returns.
+4. **Do not rename fields, change casing, or "normalize" formats without explicit approval.** Other projects depend on the exact shapes junto-memory returns.
 5. **When a task is "done," answer:** "If a fresh agent in another project tried this right now, what would they see?" If you can't answer, the task is not done.
-6. **Fail loud on MCP transport.** Any MCP tool call that errors, times out, or returns a partial/unexpected response surfaces to the user immediately — do not retry blindly, do not pretend it succeeded. Don't equate "queued"/"persisted" with "delivered": `memory_send_message` returns success on persistence regardless of whether any subscriber is live (see `learning_5c447278b1848667`). When you need delivery confirmation, check `live_subscribers` in the response (once `backlog_8e1d3e45f6f1` ships) or expect the recipient to ack on their next `/go`. Subscription failures (PermissionError from inbox subscribe) are real errors, not no-ops — surface them.
+6. **Fail loud on MCP transport.** Any MCP tool call that errors, times out, or returns a partial/unexpected response surfaces to the user immediately — do not retry blindly, do not pretend it succeeded. Don't equate "queued"/"persisted" with "delivered": `memory_send_message` returns success on persistence regardless of whether any subscriber is live. Check `live_subscribers` in the response. Subscription failures (PermissionError from inbox subscribe) are real errors, not no-ops — surface them.
 
 ---
 
@@ -231,10 +246,8 @@ This applies doubly to shared-memory itself: you're the project that owns the re
 
 ## Pattern Reference
 
-The transferable park/go pattern (cross-project canon) is stored as a versioned spec at name `pattern:park-go` (current version 1.1.0). Look it up with `memory_get_spec(name="pattern:park-go")`. When other coordinators ask shared-memory how to adopt this pattern in their projects, point them there. Source pattern came from `coordinator@nimbus` 2026-04-30; migrated from `shared_patterns` doc `be4f1a9b1369b80f` (now superseded) to a spec on 2026-05-01 so future revisions don't orphan ID references.
+The transferable park/go pattern (cross-project canon) is at spec name `pattern:park-go`. Look it up with `memory_get_spec(name="pattern:park-go")`. When other coordinators ask how to adopt this pattern in their projects, point them there.
 
 ## Architecture Reference
 
-The shared-memory system tour (components, data model, all 47 tools by area, auth model, end-to-end flows, known gaps) is at spec `architecture:shared-memory-v1`. Look it up with `memory_get_spec(name="architecture:shared-memory-v1", project="shared_memory")`. When anyone asks "what is shared-memory" or "how does X work in shared-memory", point them there. Bump it whenever wire shape, data model, auth tiers, or tool surface changes — it's the load-bearing reference for adopters.
-
-When sage (or any new project) installs the cterm-inbox channel plugin, the rendered channel source string is **`cterm-inbox`** (no `plugin:` prefix — empirically verified 2026-04-30 against a live nimbus jobs-team CC, see `msg_dbed168be1b1` from CT/main). Path-loaded plugins surface differently than marketplace-registered ones. If cterm-inbox ever publishes to Anthropic's marketplace allowlist (Phase E), re-verify — string may shift to `plugin:cterm-inbox:cterm-inbox` at that point.
+The full system tour (components, data model, all tools by area, auth model, end-to-end flows, known gaps) is at spec `architecture:shared-memory-v1` (legacy name; project field migrated to `junto`). Bump it whenever wire shape, data model, auth tiers, or tool surface changes — it's the load-bearing reference for adopters.
