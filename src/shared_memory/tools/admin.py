@@ -38,7 +38,11 @@ async def memory_admin(
     """
     Admin operations: manage API keys, view audit logs, rename agents/projects.
 
-    Requires 'owner' role when auth is enabled.
+    When auth is enabled:
+      - Read-only actions (auth_status, list_keys, list_aliases, audit_log) require
+        admin or owner.
+      - Mutation actions (create_key, revoke_key, rename_agent, rename_project)
+        require owner.
 
     Actions:
         create_key   - Create a new API key (requires name, optional role + projects)
@@ -72,10 +76,17 @@ async def memory_admin(
 
     session_info = active_sessions[session_id]
 
-    # Auth check (if enabled, only owner can use admin tools)
+    # Read-tier gate: any admin or owner may enter the admin tool. Mutation
+    # actions re-check below against admin.write (owner-only).
     auth_error = require_auth(session_info, "admin")
     if auth_error:
         return json.dumps({"error": auth_error})
+
+    write_actions = {"create_key", "revoke_key", "rename_agent", "rename_project"}
+    if action in write_actions:
+        write_error = require_auth(session_info, "admin.write")
+        if write_error:
+            return json.dumps({"error": write_error})
 
     if action == "auth_status":
         return json.dumps({
