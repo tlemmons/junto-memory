@@ -29,7 +29,6 @@ from shared_memory.helpers import (
     utc_now_iso,
 )
 
-
 ALIAS_TTL_DAYS = 30
 
 
