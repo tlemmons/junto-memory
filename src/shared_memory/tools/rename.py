@@ -115,6 +115,9 @@ def _count_agent_impact(db, from_project: str, from_agent: str) -> Dict[str, int
     counts["compaction_events"] = db.compaction_events.count_documents({
         "agent": from_agent,
     })
+    counts["projects_admins"] = db.projects.count_documents({
+        "admins": from_agent,
+    })
     return counts
 
 
@@ -158,6 +161,35 @@ async def _count_chroma_agent_impact(chroma, from_project: str, from_agent: str)
 
 
 # ── Mongo updates ──────────────────────────────────────────────────────────
+
+def _rename_agent_in_projects_admins(db, from_agent: str, to_agent: str) -> int:
+    """Rename agent in every project's admins[] list. Returns count of projects touched.
+
+    A project's admins[] is a list of agent name strings (not project-qualified).
+    The list expresses "these agents may admin this project," so an agent rename
+    must be reflected here regardless of whether the agent's own project changed.
+
+    Done as find-then-pull-then-addToSet (rather than $set inline) so re-running
+    after partial completion no-ops cleanly: $pull is a no-op on absent values,
+    $addToSet won't duplicate. If to_agent is already present (e.g., a prior
+    rename added it), $addToSet leaves the list deduplicated.
+    """
+    if from_agent == to_agent:
+        return 0
+    matching = list(db.projects.find({"admins": from_agent}, {"name": 1}))
+    if not matching:
+        return 0
+    names = [p["name"] for p in matching]
+    db.projects.update_many(
+        {"name": {"$in": names}},
+        {"$pull": {"admins": from_agent}},
+    )
+    db.projects.update_many(
+        {"name": {"$in": names}},
+        {"$addToSet": {"admins": to_agent}},
+    )
+    return len(names)
+
 
 def _apply_agent_renames_mongo(
     db, from_project: str, from_agent: str,
@@ -267,6 +299,12 @@ def _apply_agent_renames_mongo(
         {"$set": {"agent": to_agent}},
     )
     results["compaction_events"] = r.modified_count
+
+    # projects.admins[] — rename the agent name in every project's admin list.
+    # See _rename_agent_in_projects_admins docstring for shape rationale.
+    results["projects_admins"] = _rename_agent_in_projects_admins(
+        db, from_agent, to_agent,
+    )
 
     return results
 
