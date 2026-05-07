@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  # Opt-in to Node.js 24 for actions still bundled on Node.js 20 (e.g., actions/checkout@v4,
+  # actions/setup-python@v5). Node 20 is deprecated on GitHub Actions runners as of 2025-09
+  # and will be forced to Node 24 by default starting 2026-06-02; pinning explicitly silences
+  # the deprecation warning until the actions ship Node-24-native versions we can pin to.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   lint:
     runs-on: ubuntu-latest
