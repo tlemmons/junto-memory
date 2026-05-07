@@ -27,28 +27,44 @@ async def memory_admin(
     projects: list = None,
     limit: int = 50,
     event_type: str = None,
+    from_project: str = None,
+    from_agent: str = None,
+    to_project: str = None,
+    to_agent: str = None,
+    dry_run: bool = True,
+    alias_type: str = None,
     ctx: Context = None,
 ) -> str:
     """
-    Admin operations: manage API keys and view audit logs.
+    Admin operations: manage API keys, view audit logs, rename agents/projects.
 
     Requires 'owner' role when auth is enabled.
 
     Actions:
-        create_key  - Create a new API key (requires name, optional role + projects)
-        revoke_key  - Revoke an API key by name
-        list_keys   - List all active API keys
-        audit_log   - View recent audit log entries (optional event_type filter)
-        auth_status - Check if auth is enabled and current session's role
+        create_key   - Create a new API key (requires name, optional role + projects)
+        revoke_key   - Revoke an API key by name
+        list_keys    - List all active API keys
+        audit_log    - View recent audit log entries (optional event_type filter)
+        auth_status  - Check if auth is enabled and current session's role
+        rename_agent - Rename an agent across all stores. Args: from_project,
+                       from_agent, to_project, to_agent, dry_run (default True).
+                       Default dry_run reports impact counts without writing.
+        rename_project - Rename a whole project. Args: from_project, to_project,
+                       dry_run (default True).
+        list_aliases - List active rename aliases. Args: alias_type=agent|project|None.
 
     Args:
         session_id: Your session ID
-        action: One of: create_key, revoke_key, list_keys, audit_log, auth_status
+        action: see Actions above
         name: Key name (for create_key/revoke_key)
         role: Role for new key (owner, admin, agent, readonly). Default: agent
         projects: List of project names the key can access (empty = all projects)
         limit: Max entries for audit_log (default 50)
         event_type: Filter audit_log by event type (e.g., "auth.login", "spec.created")
+        from_project / from_agent: source identity for rename_agent / rename_project
+        to_project / to_agent: target identity
+        dry_run: rename actions default to dry_run=True; pass dry_run=False to commit
+        alias_type: filter for list_aliases ("agent" or "project")
     """
     error = require_session(session_id)
     if error:
@@ -156,7 +172,45 @@ async def memory_admin(
 
         return json.dumps({"entries": entries, "count": len(entries)}, indent=2)
 
+    elif action in ("rename_agent", "rename_project", "list_aliases"):
+        from shared_memory.clients import get_chroma, get_mongo
+        from shared_memory.tools.rename import (
+            list_aliases,
+            perform_rename_agent,
+            perform_rename_project,
+        )
+
+        db = get_mongo()
+        if db is None:
+            return json.dumps({"error": "MongoDB not available"})
+
+        actor = session_info.get("claude_instance", "unknown")
+
+        if action == "list_aliases":
+            return json.dumps({
+                "aliases": list_aliases(db, alias_type=alias_type),
+            }, indent=2, default=str)
+
+        chroma = await get_chroma()
+
+        if action == "rename_agent":
+            result = await perform_rename_agent(
+                db, chroma,
+                from_project=from_project, from_agent=from_agent,
+                to_project=to_project, to_agent=to_agent,
+                dry_run=dry_run, actor=actor, session_id=session_id,
+            )
+            return json.dumps(result, indent=2, default=str)
+
+        # rename_project
+        result = await perform_rename_project(
+            db, chroma,
+            from_project=from_project, to_project=to_project,
+            dry_run=dry_run, actor=actor, session_id=session_id,
+        )
+        return json.dumps(result, indent=2, default=str)
+
     else:
         return json.dumps({
-            "error": f"Unknown action '{action}'. Use: create_key, revoke_key, list_keys, audit_log, auth_status"
+            "error": f"Unknown action '{action}'. Use: create_key, revoke_key, list_keys, audit_log, auth_status, rename_agent, rename_project, list_aliases"
         })

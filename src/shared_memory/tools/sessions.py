@@ -124,6 +124,39 @@ async def memory_start_session(
     normalized_project = normalize_project(project)
     project = normalized_project
 
+    # ── Rename-alias redirect ──
+    # If the (project, agent) being requested has an active rename alias,
+    # transparently redirect to the new identity and surface a warning so
+    # operators see they're using a stale name. Aliases auto-expire after 30d.
+    _rename_redirect_warning = None
+    try:
+        db_for_alias = get_mongo()
+        if db_for_alias is not None:
+            from shared_memory.tools.rename import resolve_agent_alias
+            redirect = resolve_agent_alias(db_for_alias, normalized_project, claude_instance)
+            if redirect:
+                new_proj, new_agent, alias_doc = redirect
+                _rename_redirect_warning = (
+                    f"Rename alias active: '{claude_instance}@{normalized_project}' "
+                    f"redirected to '{new_agent}@{new_proj}'. "
+                    f"Update CLAUDE.md before alias expiry "
+                    f"({alias_doc.get('expires_at')})."
+                )
+                normalized_project = new_proj
+                project = new_proj
+                claude_instance = new_agent
+                try:
+                    from shared_memory.audit import log_audit
+                    log_audit("rename.alias_redirect", claude_instance, project, {
+                        "alias_id": alias_doc.get("_id") if isinstance(alias_doc, dict) else None,
+                        "from_project": alias_doc.get("from_project") if isinstance(alias_doc, dict) else None,
+                        "from_agent": alias_doc.get("from_agent") if isinstance(alias_doc, dict) else None,
+                    })
+                except Exception:
+                    pass
+    except Exception:
+        pass  # Best-effort; never block session start on alias check
+
     # ── Registry awareness ──
     _needs_role_description = False
     _registry_warning = None
@@ -291,6 +324,9 @@ async def memory_start_session(
         "session_id": session_id,
         "project": project
     }
+
+    if _rename_redirect_warning:
+        output["rename_redirect"] = _rename_redirect_warning
 
     # Get recent learnings for this project
     try:
