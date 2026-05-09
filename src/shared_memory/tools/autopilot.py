@@ -505,20 +505,14 @@ async def memory_autopilot_check_budget(
         {"project": project, "agent": agent, "logged_at": {"$gte": cutoff}}
     )
 
-    if depth_breach:
-        return json.dumps(
-            {
-                "allowed": False,
-                "reason": f"chain_depth {chain_depth} exceeds depth_cap {config['depth_cap']}",
-                "current_count": current_count,
-                "hourly_budget": config["hourly_budget"],
-                "depth_cap": config["depth_cap"],
-                "depth_breach": True,
-                "destructive_block": False,
-            }
-        )
-
     # Gate 4: budget. Auto-disable on breach.
+    #
+    # Checked BEFORE the depth_breach return below: the auto-disable side
+    # effect must fire whenever count > budget regardless of why this
+    # particular message would be blocked. Pre-2026-05-09 the depth_breach
+    # branch returned first, which silently shielded the auto-disable when
+    # an agent's traffic was uniformly depth-breach (e.g. depth_cap=1 with
+    # peer chain_depth>=2).
     budget_breached = current_count > config["hourly_budget"]
     if budget_breached:
         # Atomic flip — multiple concurrent breaches just race to set the same fields
@@ -574,9 +568,25 @@ async def memory_autopilot_check_budget(
                 "current_count": current_count,
                 "hourly_budget": config["hourly_budget"],
                 "depth_cap": config["depth_cap"],
-                "depth_breach": False,
+                "depth_breach": depth_breach,
                 "destructive_block": False,
                 "auto_disabled": True,
+            }
+        )
+
+    # Gate 3 (deferred): depth cap. Returned only after the budget gate has
+    # had its turn so the auto-disable side effect above is reachable on
+    # uniformly-depth-breach traffic.
+    if depth_breach:
+        return json.dumps(
+            {
+                "allowed": False,
+                "reason": f"chain_depth {chain_depth} exceeds depth_cap {config['depth_cap']}",
+                "current_count": current_count,
+                "hourly_budget": config["hourly_budget"],
+                "depth_cap": config["depth_cap"],
+                "depth_breach": True,
+                "destructive_block": False,
             }
         )
 
