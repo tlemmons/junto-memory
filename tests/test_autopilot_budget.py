@@ -23,12 +23,17 @@ class _FakeAutopilotEvents:
         proj = filt.get("project")
         agent = filt.get("agent")
         cutoff = filt.get("logged_at", {}).get("$gte") if isinstance(filt.get("logged_at"), dict) else None
+        # Support {"human_interacted": {"$ne": True}} — exclude rows where the field is True
+        hi_filt = filt.get("human_interacted")
         n = 0
         for d in self._docs:
             if d.get("project") != proj or d.get("agent") != agent:
                 continue
             if cutoff is not None and d.get("logged_at") < cutoff:
                 continue
+            if isinstance(hi_filt, dict) and "$ne" in hi_filt:
+                if d.get("human_interacted") == hi_filt["$ne"]:
+                    continue
             n += 1
         return n
 
@@ -217,5 +222,140 @@ async def test_budget_breach_includes_depth_breach_flag_in_response(monkeypatch)
         assert r["auto_disabled"] is True
         assert r["depth_breach"] is True
         assert r["current_count"] == 3
+    finally:
+        active_sessions.pop(sid, None)
+
+
+# ── Bug B (2026-05-09): human_interacted exclusion from budget count ────────
+
+
+async def test_human_interacted_messages_excluded_from_budget_count(monkeypatch):
+    """11 inbound messages all marked human_interacted=true on the message
+    row must NOT trip auto-disable, even at depth_cap=1, budget=10. The
+    rows are recorded for observability but excluded from the rolling-window
+    count.
+    """
+    from shared_memory.state import active_sessions
+    from shared_memory.tools import autopilot as ap_mod
+
+    sid = "_test_autopilot_bug_b_human_interacted_excluded"
+    active_sessions[sid] = {
+        "role": "agent",
+        "claude_instance": "test",
+        "project": "nimbus",
+    }
+    fake_db = _FakeDB(
+        {
+            "project": "nimbus",
+            "agent": "server-team",
+            "enabled": True,
+            "depth_cap": 1,
+            "hourly_budget": 10,
+            "destructive_gate": False,
+            "paused_at": None,
+            "paused_reason": "",
+        }
+    )
+    # Pre-populate the message rows that will be looked up
+    for i in range(11):
+        fake_db.messages._docs.append(
+            {"_id": f"msg_hi_{i:02d}", "human_interacted": True, "sent_by_human": False}
+        )
+
+    monkeypatch.setattr(ap_mod, "get_mongo", lambda: fake_db)
+
+    try:
+        for i in range(11):
+            r = json.loads(
+                await ap_mod.memory_autopilot_check_budget(
+                    session_id=sid,
+                    project="nimbus",
+                    agent="server-team",
+                    chain_depth=2,
+                    message_id=f"msg_hi_{i:02d}",
+                )
+            )
+            assert r["allowed"] is False  # depth gate still fires
+            assert r.get("auto_disabled") is not True, (
+                f"auto-disable fired on human_interacted call {i + 1}"
+            )
+            assert r["current_count"] == 0, (
+                f"human_interacted rows must be excluded from count; got {r['current_count']} at call {i + 1}"
+            )
+            assert r["human_interacted_excluded"] is True
+            assert r["depth_breach"] is True
+
+        # Row stays enabled
+        row = fake_db.agent_autopilot.find_one(
+            {"project": "nimbus", "agent": "server-team"}
+        )
+        assert row["enabled"] is True
+        assert row["paused_at"] is None
+        # No system blocker message inserted
+        assert len(fake_db.messages._docs) == 11  # only the pre-populated, no alerts
+    finally:
+        active_sessions.pop(sid, None)
+
+
+async def test_mixed_human_interacted_and_plain_traffic_counts_only_plain(
+    monkeypatch,
+):
+    """Mix: 6 human_interacted=true + 4 plain depth-breach calls. Count
+    should reflect only the 4 plain ones. No auto-disable (4 < 10).
+    """
+    from shared_memory.state import active_sessions
+    from shared_memory.tools import autopilot as ap_mod
+
+    sid = "_test_autopilot_bug_b_mixed"
+    active_sessions[sid] = {
+        "role": "agent",
+        "claude_instance": "test",
+        "project": "nimbus",
+    }
+    fake_db = _FakeDB(
+        {
+            "project": "nimbus",
+            "agent": "server-team",
+            "enabled": True,
+            "depth_cap": 1,
+            "hourly_budget": 10,
+            "destructive_gate": False,
+            "paused_at": None,
+            "paused_reason": "",
+        }
+    )
+    for i in range(6):
+        fake_db.messages._docs.append(
+            {"_id": f"msg_hi_{i:02d}", "human_interacted": True, "sent_by_human": False}
+        )
+
+    monkeypatch.setattr(ap_mod, "get_mongo", lambda: fake_db)
+
+    try:
+        # 6 human-interacted calls
+        for i in range(6):
+            await ap_mod.memory_autopilot_check_budget(
+                session_id=sid,
+                project="nimbus",
+                agent="server-team",
+                chain_depth=2,
+                message_id=f"msg_hi_{i:02d}",
+            )
+        # 4 plain calls (no message_id → no lookup → human_interacted=False)
+        last = None
+        for _ in range(4):
+            last = json.loads(
+                await ap_mod.memory_autopilot_check_budget(
+                    session_id=sid,
+                    project="nimbus",
+                    agent="server-team",
+                    chain_depth=2,
+                    message_id=None,
+                )
+            )
+        assert last is not None
+        assert last["current_count"] == 4
+        assert last.get("auto_disabled") is not True
+        assert last["human_interacted_excluded"] is False
     finally:
         active_sessions.pop(sid, None)

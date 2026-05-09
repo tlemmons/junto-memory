@@ -293,8 +293,16 @@ async def memory_autopilot_count(
     now = utc_now()
     cutoff = now - timedelta(hours=1)
 
+    # Match check_budget's count semantics: exclude human_interacted=true rows
+    # from the rolling-window count so the statusline indicator agrees with
+    # the gate that would actually fire.
     current_count = db.autopilot_events.count_documents(
-        {"project": project, "agent": agent, "logged_at": {"$gte": cutoff}}
+        {
+            "project": project,
+            "agent": agent,
+            "logged_at": {"$gte": cutoff},
+            "human_interacted": {"$ne": True},
+        }
     )
 
     return json.dumps(
@@ -396,19 +404,30 @@ async def memory_autopilot_check_budget(
     Channel plugins (e.g., ClaudeTerminal cterm-inbox) call this IMMEDIATELY
     before auto-processing a message. Returns:
         {allowed: bool, reason: str, current_count: int, hourly_budget: int,
-         depth_cap: int, depth_breach: bool, destructive_block: bool}
+         depth_cap: int, depth_breach: bool, destructive_block: bool,
+         human_interacted_excluded: bool}
 
-    The server counts every call (whether allowed or not) so observability
-    of attempted breaches is preserved. Auto-disable happens when count
-    EXCEEDS hourly_budget — server flips enabled=False, writes paused_at,
-    and sends a system blocker message to the agent's inbox.
+    The server records an autopilot_event for every call (whether allowed or
+    not) so observability of attempted breaches is preserved. Rows where
+    the inbound message had `human_interacted=true` are excluded from the
+    rolling-window budget count: the message is, by sender's assertion,
+    downstream of a recent human turn and not part of an autonomous chain.
+    Symmetric with Phase D2 chain-depth recency bypass; sender-asserted,
+    server-audited.
+
+    Auto-disable happens when the (human_interacted-filtered) count EXCEEDS
+    hourly_budget — server flips enabled=False, writes paused_at, and sends
+    a system blocker message to the agent's inbox.
 
     Decision matrix:
-      - autopilot disabled       → allowed=False, no count increment
-      - destructive_gate=True    → allowed=False if require_human (no increment)
-      - chain_depth > depth_cap  → allowed=False (counted, breach noted)
-      - count >= hourly_budget   → allowed=False, AUTO-DISABLE side-effect
-      - otherwise                → allowed=True, count incremented
+      - autopilot disabled       → allowed=False, no event recorded
+      - destructive_gate=True    → allowed=False if require_human (no event)
+      - sent_by_human (server-enforced) → allowed=True, no event (full bypass)
+      - human_interacted (sender-asserted) → event recorded with flag,
+        excluded from budget count; depth_cap still applies
+      - chain_depth > depth_cap  → allowed=False (event recorded, breach noted)
+      - count > hourly_budget    → allowed=False, AUTO-DISABLE side-effect
+      - otherwise                → allowed=True, event recorded
 
     Args:
         session_id: Your session ID
@@ -459,30 +478,42 @@ async def memory_autopilot_check_budget(
             }
         )
 
-    # Gate 2.5: sent-by-human bypass (design:human-sender-rule-v0.1).
-    # Look up the message; if it was sent by a user-tier session, bypass
-    # depth + budget gates entirely. The destructive gate above already had
-    # its turn — destructive content from a human still requires explicit
-    # human review on the receiver side. Server-enforced (forgery-resistant)
-    # rather than client-trusted: a rogue/buggy channel plugin cannot claim
-    # sent_by_human to skip gating.
+    # Look up message metadata once. Used by:
+    #   - Gate 2.5 (sent_by_human bypass: server-enforced from user-tier send)
+    #   - Gate 4 (human_interacted exclusion from budget count: sender-asserted,
+    #     audited, symmetric with Phase D2 chain-depth recency bypass)
+    msg_doc = None
     if message_id:
         msg_doc = db.messages.find_one(
-            {"_id": message_id}, {"sent_by_human": 1}
+            {"_id": message_id}, {"sent_by_human": 1, "human_interacted": 1}
         )
-        if msg_doc and msg_doc.get("sent_by_human"):
-            return json.dumps(
-                {
-                    "allowed": True,
-                    "reason": "sent_by_human bypass",
-                    "current_count": 0,
-                    "hourly_budget": config["hourly_budget"],
-                    "depth_cap": config["depth_cap"],
-                    "depth_breach": False,
-                    "destructive_block": False,
-                    "sent_by_human_bypass": True,
-                }
-            )
+
+    # Gate 2.5: sent-by-human bypass (design:human-sender-rule-v0.1).
+    # Server-enforced from user-tier session. Bypasses depth + budget gates
+    # entirely; no autopilot_event recorded. The destructive gate above
+    # already had its turn — destructive content from a human still requires
+    # explicit human review on the receiver side.
+    if msg_doc and msg_doc.get("sent_by_human"):
+        return json.dumps(
+            {
+                "allowed": True,
+                "reason": "sent_by_human bypass",
+                "current_count": 0,
+                "hourly_budget": config["hourly_budget"],
+                "depth_cap": config["depth_cap"],
+                "depth_breach": False,
+                "destructive_block": False,
+                "sent_by_human_bypass": True,
+            }
+        )
+
+    # Sender-asserted human_interacted: record the event for observability
+    # but exclude from the rolling-window budget count. Trust model is
+    # symmetric with Phase D2 chain-depth recency bypass — sender asserts,
+    # server audits, no extra cross-check. A rogue plugin lying on this flag
+    # silences its own receiver's budget counter for affected rows; the
+    # audit trail catches the pattern.
+    human_interacted = bool(msg_doc and msg_doc.get("human_interacted"))
 
     # Gate 3: depth cap (counted as an attempted auto-process)
     depth_breach = int(chain_depth or 0) > config["depth_cap"]
@@ -498,11 +529,20 @@ async def memory_autopilot_check_budget(
             "chain_depth": int(chain_depth or 0),
             "require_human": bool(require_human),
             "depth_breach": depth_breach,
+            "human_interacted": human_interacted,
             "logged_at": now,
         }
     )
+    # Exclude human_interacted=true rows from the rolling-window budget count.
+    # Pre-existing rows without this field are treated as not-True via $ne,
+    # which is correct semantically — they pre-date the feature.
     current_count = db.autopilot_events.count_documents(
-        {"project": project, "agent": agent, "logged_at": {"$gte": cutoff}}
+        {
+            "project": project,
+            "agent": agent,
+            "logged_at": {"$gte": cutoff},
+            "human_interacted": {"$ne": True},
+        }
     )
 
     # Gate 4: budget. Auto-disable on breach.
@@ -571,6 +611,7 @@ async def memory_autopilot_check_budget(
                 "depth_breach": depth_breach,
                 "destructive_block": False,
                 "auto_disabled": True,
+                "human_interacted_excluded": human_interacted,
             }
         )
 
@@ -587,6 +628,7 @@ async def memory_autopilot_check_budget(
                 "depth_cap": config["depth_cap"],
                 "depth_breach": True,
                 "destructive_block": False,
+                "human_interacted_excluded": human_interacted,
             }
         )
 
@@ -600,5 +642,6 @@ async def memory_autopilot_check_budget(
             "depth_cap": config["depth_cap"],
             "depth_breach": False,
             "destructive_block": False,
+            "human_interacted_excluded": human_interacted,
         }
     )
