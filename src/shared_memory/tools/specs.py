@@ -35,11 +35,11 @@ async def memory_define_spec(
     """
     Define or update a versioned spec with owner-only enforcement.
 
-    Use this for:
-    - Interface contracts between systems
-    - API specifications
-    - Data schemas
-    - Requirements documents
+    Use this for any long-lived shared document with an owner and version:
+    interface contracts, API specifications, data schemas, requirements,
+    architecture overviews, agent state, design decisions, research notes,
+    cross-project patterns. Tooling for `memory_list_specs` etc. filters
+    by spec_type, so consistent tagging helps discovery.
 
     Owner Enforcement:
     - First definition sets the owner
@@ -58,7 +58,13 @@ async def memory_define_spec(
         content: The spec content (markdown, JSON, any text)
         owner: Owner identifier (defaults to session's claude_instance)
         version: Version string (semver). Omit to auto-increment
-        spec_type: Type of spec (interface, api, schema, requirement)
+        spec_type: Free-form category string for the spec. The server does
+            NOT enforce an accept-list — any value works and `memory_list_specs`
+            can filter by it. Canonical values in active use today:
+            `interface`, `api`, `schema`, `requirement`, `architecture`,
+            `agent_state`, `design`, `decision`, `pattern`, `research`.
+            Introduce new values when the existing ones don't fit; new
+            categories show up cleanly in `memory_list_specs(spec_type=...)`.
         project: Project this belongs to (omit for shared specs)
         json_schema: Optional JSON schema for validation
         tags: Tags for categorization
@@ -337,7 +343,8 @@ async def memory_list_specs(
         session_id: Your session ID
         project: Filter by project (omit for shared + all projects)
         include_versions: Include previous version numbers
-        spec_type: Filter by spec type (interface, api, schema, requirement)
+        spec_type: Filter by spec type (free-form string; see
+            memory_define_spec for canonical values in active use)
     """
     error = require_session(session_id)
     if error:
