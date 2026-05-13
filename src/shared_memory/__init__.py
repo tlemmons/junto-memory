@@ -5,4 +5,4 @@ A centralized knowledge base and coordination system for multiple Claude instanc
 working across projects.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.29.0"

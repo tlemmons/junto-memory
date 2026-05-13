@@ -11,6 +11,7 @@ from shared_memory.tools import (  # noqa: F401
     backlog,
     checklists,
     database,
+    diagnostics,
     functions,
     guidelines,
     lifecycle,
