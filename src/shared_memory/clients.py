@@ -117,8 +117,11 @@ def get_mongo():
         return _mongo_db
 
     try:
-        # Build connection string with auth
-        mongo_uri = f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{MONGO_DB}"
+        # Build connection string with auth. authSource=admin because mongo's
+        # root user (created via MONGO_INITDB_ROOT_USERNAME) lives in the admin
+        # database regardless of MONGO_INITDB_DATABASE; without this, pymongo
+        # defaults authSource to MONGO_DB and authentication fails.
+        mongo_uri = f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{MONGO_DB}?authSource=admin"
         _mongo_client = MongoClient(
             mongo_uri,
             serverSelectionTimeoutMS=5000
