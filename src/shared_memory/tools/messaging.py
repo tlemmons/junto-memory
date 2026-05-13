@@ -611,8 +611,12 @@ async def memory_get_messages(
         session_id: Your session ID
         include_delivered: Include already delivered notes (default False)
         limit: Maximum notes to return (default 20)
-        message_id: Fetch a specific note by ID (admin/coordinator only)
-        for_instance: View notes for a different agent in your project (admin/coordinator only)
+        message_id: Fetch a specific note by ID. Admin/user-tier roles and
+            project admins can fetch any message; other agents can only fetch
+            messages addressed to themselves.
+        for_instance: View notes for a different agent in your project. Admin/
+            user-tier roles and project admins only. Passing for_instance equal
+            to your own agent name is always allowed (self-read).
         cursor: Pagination cursor (created_at ISO string from a previous call's
             next_cursor). Returns the next page of OLDER messages (created_at < cursor).
     """
@@ -623,14 +627,20 @@ async def memory_get_messages(
     session_info = active_sessions[session_id]
     my_instance = session_info["claude_instance"]
     my_project = normalize_project(session_info.get("project", ""))
+    my_role = session_info.get("role", "agent")
 
     db = get_mongo()
     if db is None:
         return json.dumps({"count": 0, "messages": [], "error": "MongoDB unavailable"})
 
+    # Admin-equivalent for inbox reads: cross-project roles 'admin'/'user' OR
+    # named project-admin. Mirrors _check_inbox_authz so the subscribe-side
+    # and read-side authorization are consistent (a user-tier session that
+    # can subscribe to inbox://X/Y can also read it via memory_get_messages).
+    is_admin = (my_role in ("admin", "user")) or _is_project_admin(db, my_project, my_instance)
+
     # ── Direct message lookup by ID (admin/coordinator only) ──
     if message_id:
-        is_admin = _is_project_admin(db, my_project, my_instance)
         doc = db.messages.find_one({"_id": message_id})
         if not doc:
             return json.dumps({"error": f"Message '{message_id}' not found"})
@@ -667,11 +677,12 @@ async def memory_get_messages(
             entry["in_response_to"] = doc["in_response_to"]
         return json.dumps({"count": 1, "messages": [entry]})
 
-    # ── Admin/coordinator querying for another agent's messages ──
+    # ── Querying for another agent's messages ──
+    # Self-read (for_instance == my_instance) is always allowed.
+    # Otherwise requires admin-equivalent role (see is_admin computed above).
     target_instance = my_instance
     if for_instance:
-        is_admin = _is_project_admin(db, my_project, my_instance)
-        if not is_admin:
+        if for_instance != my_instance and not is_admin:
             return json.dumps({"error": "Permission denied. Only admins/coordinators can view other agents' messages."})
         target_instance = for_instance
 
