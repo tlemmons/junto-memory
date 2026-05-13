@@ -8,6 +8,7 @@ from mcp import types as _mcp_types
 from mcp.server.fastmcp import FastMCP
 
 from shared_memory.clients import app_lifespan
+from shared_memory.intent import build_call_tool_handler_with_intent
 
 # Allow connections from any host (for remote access via IP or proxy)
 # stateless_http=False (the default): persistent client sessions, required
@@ -41,6 +42,22 @@ def _get_capabilities_with_subscribe(notification_options, experimental_capabili
     return caps
 
 mcp._mcp_server.get_capabilities = _get_capabilities_with_subscribe
+
+
+# ── __intent_id MCP-layer extraction ──
+# Every tool call routes through the lowlevel server's CallToolRequest handler
+# (FastMCP registers it at __init__, mcp/server/fastmcp/server.py:308), so it's
+# the right chokepoint for client-supplied reconciliation UUIDs. See
+# shared_memory.intent for why and how.
+#
+# Critical: replacing mcp.call_tool itself would NOT work — the lowlevel server
+# captures self.call_tool as a bound method at FastMCP init time, so a later
+# reassignment is invisible to the registered handler. Replacing the dict entry
+# is the only way to interpose.
+_orig_call_tool_handler = mcp._mcp_server.request_handlers[_mcp_types.CallToolRequest]
+mcp._mcp_server.request_handlers[_mcp_types.CallToolRequest] = (
+    build_call_tool_handler_with_intent(_orig_call_tool_handler)
+)
 
 
 def create_app():

@@ -5,4 +5,8 @@ A centralized knowledge base and coordination system for multiple Claude instanc
 working across projects.
 """
 
-__version__ = "1.29.0"
+from shared_memory.intent import get_current_intent_id
+
+__version__ = "1.30.0"
+
+__all__ = ["get_current_intent_id"]
