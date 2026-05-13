@@ -117,8 +117,16 @@ def get_mongo():
         return _mongo_db
 
     try:
-        # Build connection string with auth
-        mongo_uri = f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{MONGO_DB}"
+        # Mongo runs as a single-node replica set (rs0) so we get multi-document
+        # transactions and change streams. PyMongo with `replicaSet=rs0` does
+        # member discovery via the seed; the replica set advertises members by
+        # the docker-network hostname `mongodb`, so this URI works from inside
+        # the docker network. Host-side debugging via localhost:27019 needs
+        # `?directConnection=true` instead.
+        mongo_uri = (
+            f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}"
+            f"/{MONGO_DB}?replicaSet=rs0"
+        )
         _mongo_client = MongoClient(
             mongo_uri,
             serverSelectionTimeoutMS=5000
