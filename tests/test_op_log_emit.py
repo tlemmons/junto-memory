@@ -1,0 +1,194 @@
+"""Unit tests for `emit_op_log` + the memory_record_learning canary.
+
+Covers `design:local-first-junto-v0-mvp` v0.4.0 §4.3.a — best-effort
+sequential append for Chroma-backed mutation tools.
+
+The contract under test:
+- On success: an op-log entry lands with the expected shape (op_type,
+  origin, seq monotonic, intent_id stamped, schema_version=1).
+- On invalid op_type: emit returns None, no insert attempted.
+- On Mongo unavailable (db=None): emit returns None, logged.
+- On Mongo insert raising: emit returns None, source write unaffected.
+- intent_id auto-pulled from the contextvar via `emit_op_log_from_context`.
+"""
+
+import pytest
+
+from shared_memory import op_log
+from shared_memory.intent import _set_intent_id, _reset_intent_id
+
+
+class _FakeOpLogCollection:
+    """Records inserts so tests can assert on shape."""
+
+    def __init__(self, raise_on_insert: Exception | None = None):
+        self.inserts: list[dict] = []
+        self._raise = raise_on_insert
+
+    def insert_one(self, doc):
+        if self._raise is not None:
+            raise self._raise
+        self.inserts.append(doc)
+
+    def create_index(self, *args, **kwargs):
+        pass  # not exercised here
+
+
+class _FakeMetaCollection:
+    """Implements just enough of find_one_and_update for next_seq."""
+
+    def __init__(self):
+        self._meta: dict[str, int] = {}
+
+    def find_one_and_update(self, filt, update, upsert=False, return_document=None, session=None):
+        origin = filt["_id"]
+        delta = update.get("$inc", {}).get("seq", 0)
+        if origin not in self._meta:
+            if not upsert:
+                return None
+            self._meta[origin] = 0
+        self._meta[origin] += delta
+        return {"_id": origin, "seq": self._meta[origin]}
+
+    def create_index(self, *args, **kwargs):
+        pass
+
+
+class _FakeDB:
+    def __init__(self, raise_on_insert: Exception | None = None):
+        self._cols = {
+            op_log.OPLOG_COLLECTION: _FakeOpLogCollection(raise_on_insert),
+            op_log.OPLOG_META_COLLECTION: _FakeMetaCollection(),
+        }
+
+    def __getitem__(self, name):
+        if name not in self._cols:
+            self._cols[name] = _FakeOpLogCollection()
+        return self._cols[name]
+
+
+def _actor():
+    return {"agent": "memory", "project": "junto", "session_id": "test_session"}
+
+
+def _ref():
+    return {"collection": "shared_patterns", "doc_id": "learning_abc123"}
+
+
+def test_emit_op_log_success_shape():
+    db = _FakeDB()
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="learning.recorded",
+        actor=_actor(),
+        ref=_ref(),
+        payload={"title": "t", "details": "d", "tags": []},
+        intent_id=None,
+    )
+    assert entry is not None
+    assert entry["op_type"] == "learning.recorded"
+    assert entry["seq"] == 1
+    assert entry["intent_id"] is None
+    assert entry["schema_version"] == 1
+    assert entry["_id"].startswith("op_")
+    assert entry["origin"]  # ORIGIN_SERVER_ID env default is "central"
+    assert entry["actor"] == _actor()
+    assert entry["ref"] == _ref()
+
+    inserts = db[op_log.OPLOG_COLLECTION].inserts
+    assert len(inserts) == 1
+    assert inserts[0] is entry
+
+
+def test_emit_op_log_monotonic_seq():
+    db = _FakeDB()
+    e1 = op_log.emit_op_log(db, "learning.recorded", _actor(), _ref(), {})
+    e2 = op_log.emit_op_log(db, "learning.recorded", _actor(), _ref(), {})
+    e3 = op_log.emit_op_log(db, "message.sent", _actor(), _ref(), {})
+    assert e1["seq"] == 1
+    assert e2["seq"] == 2
+    assert e3["seq"] == 3
+
+
+def test_emit_op_log_with_intent_id():
+    db = _FakeDB()
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="learning.recorded",
+        actor=_actor(),
+        ref=_ref(),
+        payload={},
+        intent_id="11111111-2222-3333-4444-555555555555",
+    )
+    assert entry["intent_id"] == "11111111-2222-3333-4444-555555555555"
+
+
+def test_emit_op_log_rejects_invalid_op_type():
+    db = _FakeDB()
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="not_a_real_op_type",
+        actor=_actor(),
+        ref=_ref(),
+        payload={},
+    )
+    assert entry is None
+    # No insert should have been attempted; no seq increment either.
+    assert db[op_log.OPLOG_COLLECTION].inserts == []
+    assert db[op_log.OPLOG_META_COLLECTION]._meta == {}
+
+
+def test_emit_op_log_handles_none_db():
+    # Mongo unavailable (clients.get_mongo() returned None). Must not raise.
+    entry = op_log.emit_op_log(
+        db=None,
+        op_type="learning.recorded",
+        actor=_actor(),
+        ref=_ref(),
+        payload={},
+    )
+    assert entry is None
+
+
+def test_emit_op_log_swallows_insert_exception():
+    # The realistic §4.3.a failure: Mongo's network blip while Chroma is fine.
+    # The source write has already landed; emit must NOT raise — it logs and
+    # returns None so the calling tool returns success to the user.
+    db = _FakeDB(raise_on_insert=RuntimeError("simulated mongo unavailability"))
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="learning.recorded",
+        actor=_actor(),
+        ref=_ref(),
+        payload={},
+    )
+    assert entry is None
+
+
+def test_emit_op_log_from_context_reads_contextvar():
+    db = _FakeDB()
+    token = _set_intent_id("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    try:
+        entry = op_log.emit_op_log_from_context(
+            db=db,
+            op_type="learning.recorded",
+            actor=_actor(),
+            ref=_ref(),
+            payload={},
+        )
+    finally:
+        _reset_intent_id(token)
+    assert entry["intent_id"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+
+def test_emit_op_log_from_context_no_intent_default():
+    db = _FakeDB()
+    # No contextvar set → intent_id should be None on the entry.
+    entry = op_log.emit_op_log_from_context(
+        db=db,
+        op_type="learning.recorded",
+        actor=_actor(),
+        ref=_ref(),
+        payload={},
+    )
+    assert entry["intent_id"] is None

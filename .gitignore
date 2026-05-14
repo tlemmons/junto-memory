@@ -11,6 +11,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.venv/
+venv/
 
 # Monolith backup
 server_monolith.py

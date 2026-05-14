@@ -6,7 +6,7 @@ from typing import Dict, List
 from mcp.server.fastmcp import Context
 
 from shared_memory.app import mcp
-from shared_memory.clients import get_chroma
+from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import MAX_CONTENT_SIZE, MEMORY_TYPES
 from shared_memory.helpers import (
     calculate_expiry,
@@ -21,6 +21,7 @@ from shared_memory.helpers import (
     require_session,
     utc_now_iso,
 )
+from shared_memory.op_log import emit_op_log_from_context
 from shared_memory.state import active_sessions
 
 
@@ -250,8 +251,10 @@ async def memory_record_learning(
     if project:
         project = normalize_project(project)
         collection = await get_project_collection(chroma, project)
+        chroma_collection_name = f"proj_{project}"
     else:
         collection = await get_shared_collection(chroma, "patterns")
+        chroma_collection_name = "shared_patterns"
 
     doc_id = f"learning_{generate_doc_id(title, 'learning')}"
 
@@ -268,6 +271,27 @@ async def memory_record_learning(
             "created": now,
             "updated": now
         }]
+    )
+
+    # Phase 1 #2 canary: emit op-log entry per §4.3.a (best-effort).
+    # Chroma write already landed; emit_op_log_from_context logs + swallows
+    # any Mongo-side failure so the tool response is unaffected. Reconciliation
+    # (§4.7) backfills gaps on next startup.
+    emit_op_log_from_context(
+        db=get_mongo(),
+        op_type="learning.recorded",
+        actor={
+            "agent": session_info["claude_instance"],
+            "project": project,
+            "session_id": session_id,
+        },
+        ref={"collection": chroma_collection_name, "doc_id": doc_id},
+        payload={
+            "title": title,
+            "details": details,
+            "tags": tags,
+            "created": now,
+        },
     )
 
     return json.dumps({"status": "recorded", "id": doc_id[:12]})

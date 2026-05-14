@@ -1,17 +1,33 @@
 """Op-log primitives — Phase 1 foundation for local-first sync.
 
-This module is the schema + collection + indexes + seq-counter foundation
-that Phase 1 #2 (per-tool instrumentation) will build on. Today nothing
-writes to op_log; this module's job is to make sure the collection and
-its indexes exist on startup, define the closed op_type enumeration that
-instrumentation must obey, and provide the atomic per-origin sequence
-counter that op-log writers will consume from inside a Mongo transaction.
+Schema + collection + indexes + seq counter + write helpers. Phase 1 #1
+shipped the foundation; Phase 1 #2 instruments mutation tools to emit
+op-log rows via the helpers below.
 
-See `design:local-first-junto-v0-mvp` v0.3.0 §4.1 (taxonomy), §4.2 (schema),
-§4.5 (per-server seq + origin id), and §4.6 (intent-id reconciliation).
+Two emission patterns per `design:local-first-junto-v0-mvp` v0.4.0 §4.3:
+
+- §4.3.a `emit_op_log()` — best-effort sequential append for Chroma-backed
+  mutations. Logs failures, returns None on error, never raises. The
+  source-collection write has already landed by the time this is called;
+  any op-log gap is closed by the §4.7 reconciliation pass.
+- §4.3.b transactional emission via `with_op_log()` — Mongo-only, wraps
+  source write + next_seq + op_log_append in a single rs0 transaction.
+  (Implemented when the first Mongo-backed canary lands.)
+
+See spec §4.1 (taxonomy), §4.2 (schema), §4.5 (per-server seq + origin id),
+§4.6 (intent-id reconciliation), §4.7 (reconciliation pass).
 """
 
+import logging
+import uuid
+
 from pymongo import ASCENDING, ReturnDocument
+
+from shared_memory.config import ORIGIN_SERVER_ID
+from shared_memory.helpers import utc_now_iso
+from shared_memory.intent import get_current_intent_id
+
+logger = logging.getLogger(__name__)
 
 OPLOG_COLLECTION = "op_log"
 OPLOG_META_COLLECTION = "op_log_meta"
@@ -117,3 +133,100 @@ def next_seq(db, origin: str, session=None) -> int:
         session=session,
     )
     return int(result["seq"])
+
+
+def emit_op_log(
+    db,
+    op_type: str,
+    actor: dict,
+    ref: dict,
+    payload: dict,
+    intent_id: str | None = None,
+) -> dict | None:
+    """Best-effort op-log append (§4.3.a, Chroma-backed mutations).
+
+    Call AFTER the source-collection (Chroma) write has succeeded. The
+    contract is "never raise" — the source write already landed, and any
+    failure here creates an op-log gap that the §4.7 reconciliation pass
+    will backfill on next startup. Errors are logged loudly.
+
+    Args:
+        db: Mongo database handle (from `get_mongo()`). May be None if
+            Mongo is unavailable; we log + return None in that case.
+        op_type: Must be in the §4.1 catalog (`is_valid_op_type` check).
+        actor: `{"agent": str, "project": str, "session_id": str}`.
+        ref: `{"collection": str, "doc_id": str}` — points back at the
+            source row that this op materializes.
+        payload: Data needed to materialize this op on a peer (full row
+            content for append-only, the delta for mutable).
+        intent_id: From `get_current_intent_id()`. Pass None to omit.
+
+    Returns:
+        The inserted op-log document on success; None if validation failed,
+        Mongo was unavailable, or insert raised.
+    """
+    if db is None:
+        logger.error(
+            "op_log.emit skipped: mongo db handle is None",
+            extra={"op_type": op_type, "ref": ref},
+        )
+        return None
+
+    if not is_valid_op_type(op_type):
+        logger.error(
+            "op_log.emit rejected invalid op_type %s",
+            op_type,
+            extra={"op_type": op_type, "ref": ref},
+        )
+        return None
+
+    try:
+        seq = next_seq(db, ORIGIN_SERVER_ID)
+        entry = {
+            "_id": f"op_{uuid.uuid4().hex}",
+            "seq": seq,
+            "ts": utc_now_iso(),
+            "origin": ORIGIN_SERVER_ID,
+            "intent_id": intent_id,
+            "actor": actor,
+            "op_type": op_type,
+            "ref": ref,
+            "payload": payload,
+            "schema_version": OPLOG_SCHEMA_VERSION,
+        }
+        db[OPLOG_COLLECTION].insert_one(entry)
+        return entry
+    except Exception as exc:
+        # The source write already landed. Log loudly; reconciliation
+        # (§4.7) will backfill this row on next startup scan.
+        logger.error(
+            "op_log.emit failed for %s ref=%s: %s",
+            op_type,
+            ref,
+            exc,
+            exc_info=True,
+        )
+        return None
+
+
+def emit_op_log_from_context(
+    db,
+    op_type: str,
+    actor: dict,
+    ref: dict,
+    payload: dict,
+) -> dict | None:
+    """`emit_op_log` with `intent_id` auto-pulled from the request contextvar.
+
+    Convenience wrapper for the common case: a tool handler running inside
+    the MCP request scope where `__intent_id` has been stripped + stashed
+    on the contextvar by `intent.build_call_tool_handler_with_intent`.
+    """
+    return emit_op_log(
+        db=db,
+        op_type=op_type,
+        actor=actor,
+        ref=ref,
+        payload=payload,
+        intent_id=get_current_intent_id(),
+    )
