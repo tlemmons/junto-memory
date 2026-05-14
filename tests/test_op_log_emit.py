@@ -573,3 +573,92 @@ def test_backlog_added_and_updated_both_in_catalog():
     """Both op_types must be valid catalog entries — guards against drift."""
     assert op_log.is_valid_op_type("backlog.added")
     assert op_log.is_valid_op_type("backlog.updated")
+
+
+# --- Canary 11-12: archive_by_tag + restore_by_tag → store.tagged -------------
+
+
+def test_store_tagged_archive_payload():
+    """memory_archive_by_tag emits store.tagged with operation=archive and
+    full state-transition fields so replay can re-apply the archive."""
+    db = _FakeDB()
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="store.tagged",
+        actor=_actor(),
+        ref={"collection": "proj_junto", "doc_id": "learning_abc123"},
+        payload={
+            "title": "Learning about v5",
+            "tag": "v5",
+            "operation": "archive",
+            "status": "archived",
+            "previous_status": "active",
+            "archive_reason": "Bulk archive by tag: v5",
+            "archived_at": "2026-05-14T15:00:00+00:00",
+            "archived_by": "junto_memory_abc",
+        },
+    )
+    assert entry["op_type"] == "store.tagged"
+    assert entry["payload"]["operation"] == "archive"
+    assert entry["payload"]["status"] == "archived"
+
+
+def test_store_tagged_restore_payload():
+    """memory_restore_by_tag emits store.tagged with operation=restore and
+    the resolved previous_status — replay restores to that exact state."""
+    db = _FakeDB()
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="store.tagged",
+        actor=_actor(),
+        ref={"collection": "shared_patterns", "doc_id": "pattern_xyz"},
+        payload={
+            "title": "Pattern for v5",
+            "tag": "v5",
+            "operation": "restore",
+            "status": "active",
+            "restored_at": "2026-05-14T16:00:00+00:00",
+            "restored_by": "junto_memory_abc",
+        },
+    )
+    assert entry["op_type"] == "store.tagged"
+    assert entry["payload"]["operation"] == "restore"
+    assert entry["payload"]["status"] == "active"
+
+
+def test_store_tagged_bulk_emits_per_touched_doc():
+    """The bulk tools fan out per-doc rather than collapsing the N-row mutation
+    into one op-log entry. seq monotonic across touched docs."""
+    db = _FakeDB()
+    e1 = op_log.emit_op_log(
+        db=db,
+        op_type="store.tagged",
+        actor=_actor(),
+        ref={"collection": "proj_junto", "doc_id": "learning_1"},
+        payload={"tag": "v5", "operation": "archive"},
+    )
+    e2 = op_log.emit_op_log(
+        db=db,
+        op_type="store.tagged",
+        actor=_actor(),
+        ref={"collection": "proj_junto", "doc_id": "learning_2"},
+        payload={"tag": "v5", "operation": "archive"},
+    )
+    e3 = op_log.emit_op_log(
+        db=db,
+        op_type="store.tagged",
+        actor=_actor(),
+        ref={"collection": "shared_patterns", "doc_id": "pattern_3"},
+        payload={"tag": "v5", "operation": "archive"},
+    )
+    assert [e1["seq"], e2["seq"], e3["seq"]] == [1, 2, 3]
+    assert {e1["ref"]["doc_id"], e2["ref"]["doc_id"], e3["ref"]["doc_id"]} == {
+        "learning_1",
+        "learning_2",
+        "pattern_3",
+    }
+
+
+def test_store_tagged_in_catalog():
+    """Guards against renaming store.tagged out from under the bulk tools."""
+    assert op_log.is_valid_op_type("store.tagged")

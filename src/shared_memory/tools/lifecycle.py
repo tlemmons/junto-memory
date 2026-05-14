@@ -6,7 +6,7 @@ from typing import List
 from mcp.server.fastmcp import Context
 
 from shared_memory.app import mcp
-from shared_memory.clients import get_chroma
+from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import DOC_STATUSES, WORK_STATUSES
 from shared_memory.helpers import (
     get_project_collection,
@@ -15,6 +15,7 @@ from shared_memory.helpers import (
     require_session,
     utc_now_iso,
 )
+from shared_memory.op_log import emit_op_log_from_context
 from shared_memory.state import active_sessions, active_signals
 
 
@@ -254,6 +255,7 @@ async def memory_archive_by_tag(
         return error
 
     chroma = await get_chroma()
+    session_info = active_sessions[session_id]
     now = utc_now_iso()
     archived_count = 0
     archived_docs = []
@@ -300,6 +302,33 @@ async def memory_archive_by_tag(
                 meta["previous_status"] = meta.get("status", "active")
 
                 await col.update(ids=[doc_id], metadatas=[meta])
+
+                # Phase 1 #2 canary: one op-log entry per touched doc. Keeps
+                # granularity uniform with single-doc mutation tools and lets
+                # peers replay archive-by-tag as N independent tagging ops.
+                # actor.project = session's project (cross-collection scan is
+                # intentional; per-doc home collection is in ref.collection).
+                emit_op_log_from_context(
+                    db=get_mongo(),
+                    op_type="store.tagged",
+                    actor={
+                        "agent": session_info["claude_instance"],
+                        "project": session_info.get("project"),
+                        "session_id": session_id,
+                    },
+                    ref={"collection": col.name, "doc_id": doc_id},
+                    payload={
+                        "title": meta.get("title", "Untitled"),
+                        "tag": tag,
+                        "operation": "archive",
+                        "status": "archived",
+                        "previous_status": meta.get("previous_status", "active"),
+                        "archive_reason": meta.get("archive_reason"),
+                        "archived_at": now,
+                        "archived_by": session_id,
+                    },
+                )
+
                 archived_count += 1
                 archived_docs.append({
                     "id": doc_id,
@@ -340,6 +369,7 @@ async def memory_restore_by_tag(
         return error
 
     chroma = await get_chroma()
+    session_info = active_sessions[session_id]
     now = utc_now_iso()
     restored_count = 0
     restored_docs = []
@@ -382,6 +412,27 @@ async def memory_restore_by_tag(
                 meta["restored_by"] = session_id
 
                 await col.update(ids=[doc_id], metadatas=[meta])
+
+                # Phase 1 #2 canary: one op-log entry per touched doc.
+                emit_op_log_from_context(
+                    db=get_mongo(),
+                    op_type="store.tagged",
+                    actor={
+                        "agent": session_info["claude_instance"],
+                        "project": session_info.get("project"),
+                        "session_id": session_id,
+                    },
+                    ref={"collection": col.name, "doc_id": doc_id},
+                    payload={
+                        "title": meta.get("title", "Untitled"),
+                        "tag": tag,
+                        "operation": "restore",
+                        "status": previous_status,
+                        "restored_at": now,
+                        "restored_by": session_id,
+                    },
+                )
+
                 restored_count += 1
                 restored_docs.append({
                     "id": doc_id,
