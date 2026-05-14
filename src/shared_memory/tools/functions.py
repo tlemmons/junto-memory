@@ -616,6 +616,7 @@ async def memory_enrich_function(
         return error
 
     chroma = await get_chroma()
+    session_info = active_sessions[session_id]
     now = utc_now_iso()
 
     # Find the function in any collection
@@ -682,6 +683,35 @@ async def memory_enrich_function(
                     ids=[func_id],
                     documents=[doc],
                     metadatas=[meta]
+                )
+
+                # Phase 1 #2 canary 4/13: emit op-log entry per §4.3.a.
+                # Chroma update already landed. chroma_collection_name comes
+                # from the discovered collection name (col.name), not pre-
+                # computed, because enrich finds the doc by scanning. Actor
+                # project comes from the session, not the doc — op-log
+                # records who performed the write, not the doc's home.
+                emit_op_log_from_context(
+                    db=get_mongo(),
+                    op_type="function.enriched",
+                    actor={
+                        "agent": session_info["claude_instance"],
+                        "project": session_info.get("project"),
+                        "session_id": session_id,
+                    },
+                    ref={"collection": col.name, "doc_id": func_id},
+                    payload={
+                        "signature": signature,
+                        "parameters": parameters,
+                        "returns": returns,
+                        "calls": calls,
+                        "called_by": called_by,
+                        "side_effects": side_effects,
+                        "complexity": complexity,
+                        "additional_gotchas": additional_gotchas,
+                        "search_summary": search_summary,
+                        "enriched_at": now,
+                    },
                 )
 
                 # Mark as enriched in queue

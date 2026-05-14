@@ -337,3 +337,65 @@ def test_emit_op_log_monotonic_across_three_canary_ops_so_far():
     e2 = op_log.emit_op_log(db, "store.created", _actor(), _ref(), {})
     e3 = op_log.emit_op_log(db, "function.registered", _actor(), _ref(), {})
     assert [e1["seq"], e2["seq"], e3["seq"]] == [1, 2, 3]
+
+
+# --- Canary 4/13: memory_enrich_function → function.enriched ------------------
+
+
+def test_function_enriched_accepted_and_shape():
+    """function.enriched carries the librarian-analysis fields. Sync replay
+    re-applies them on top of the function.registered row that landed
+    earlier in the same op-log sequence."""
+    db = _FakeDB()
+    payload = {
+        "signature": "def parse_email(raw: bytes) -> Email:",
+        "parameters": [
+            {"name": "raw", "type": "bytes", "description": "Raw RFC822 bytes"},
+        ],
+        "returns": "Email — structured fields, attachments parsed",
+        "calls": ["decode_mime", "extract_attachments"],
+        "called_by": ["triage_inbox"],
+        "side_effects": [],
+        "complexity": "O(n) over message body",
+        "additional_gotchas": "Returns Email with empty body when MIME parse fails",
+        "search_summary": "Parses raw email into structured Email object",
+        "enriched_at": "2026-05-14T13:30:00+00:00",
+    }
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="function.enriched",
+        actor=_actor(),
+        ref={"collection": "proj_emailtriage", "doc_id": "func_abc123def456"},
+        payload=payload,
+    )
+    assert entry is not None
+    assert entry["op_type"] == "function.enriched"
+    assert entry["payload"]["search_summary"].startswith("Parses raw email")
+    assert entry["payload"]["calls"] == ["decode_mime", "extract_attachments"]
+
+
+def test_function_enriched_partial_payload_allowed():
+    """Librarian may call enrich_function with only a subset of fields
+    populated. Payload fields are None when unprovided; the op-log doesn't
+    care — it just records what was passed."""
+    db = _FakeDB()
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="function.enriched",
+        actor=_actor(),
+        ref={"collection": "shared_patterns", "doc_id": "func_999"},
+        payload={
+            "signature": None,
+            "parameters": None,
+            "returns": None,
+            "calls": None,
+            "called_by": None,
+            "side_effects": None,
+            "complexity": None,
+            "additional_gotchas": None,
+            "search_summary": "ML pipeline for email classification",
+            "enriched_at": "2026-05-14T13:30:00+00:00",
+        },
+    )
+    assert entry["payload"]["search_summary"]
+    assert entry["payload"]["signature"] is None
