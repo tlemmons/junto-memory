@@ -7,7 +7,7 @@ from typing import List
 from mcp.server.fastmcp import Context
 
 from shared_memory.app import mcp
-from shared_memory.clients import get_chroma
+from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import BACKLOG_PRIORITIES, BACKLOG_STATUSES, PROJECT_PREFIX, SHARED_PREFIX
 from shared_memory.helpers import (
     get_project_collection,
@@ -16,6 +16,7 @@ from shared_memory.helpers import (
     require_session,
     utc_now_iso,
 )
+from shared_memory.op_log import emit_op_log_from_context
 from shared_memory.state import active_sessions
 
 
@@ -70,8 +71,10 @@ async def memory_add_backlog_item(
     # Store in project collection if specified, otherwise shared
     if project:
         collection = await get_project_collection(chroma, project)
+        chroma_collection_name = f"{PROJECT_PREFIX}{project}"
     else:
         collection = await get_shared_collection(chroma, "work")
+        chroma_collection_name = f"{SHARED_PREFIX}work"
 
     # Generate ID
     backlog_id = f"backlog_{hashlib.sha256(f'{title}:{now}'.encode()).hexdigest()[:12]}"
@@ -98,6 +101,29 @@ async def memory_add_backlog_item(
         ids=[backlog_id],
         documents=[content],
         metadatas=[metadata]
+    )
+
+    # Phase 1 #2 canary: emit op-log entry per §4.3.a (best-effort).
+    emit_op_log_from_context(
+        db=get_mongo(),
+        op_type="backlog.added",
+        actor={
+            "agent": session_info["claude_instance"],
+            "project": project,
+            "session_id": session_id,
+        },
+        ref={"collection": chroma_collection_name, "doc_id": backlog_id},
+        payload={
+            "title": title,
+            "description": description,
+            "priority": priority,
+            "project": project or "",
+            "assigned_to": assigned_to or "",
+            "tags": tags,
+            "target_version": target_version or "",
+            "deferred_reason": deferred_reason or "",
+            "created": now,
+        },
     )
 
     return json.dumps({
@@ -328,12 +354,39 @@ async def memory_update_backlog_item(
                         metadatas=[meta]
                     )
                     await col.delete(ids=[item_id])
+                    op_collection_name = f"{PROJECT_PREFIX}{project}"
                 else:
                     await col.update(
                         ids=[item_id],
                         documents=[doc] if (title or description) else None,
                         metadatas=[meta]
                     )
+                    op_collection_name = col.name
+
+                # Phase 1 #2 canary: emit op-log entry per §4.3.a (best-effort).
+                # ref.collection is the doc's CURRENT home — for a move, that's
+                # the new project's collection; the old collection is in payload.
+                emit_op_log_from_context(
+                    db=get_mongo(),
+                    op_type="backlog.updated",
+                    actor={
+                        "agent": session_info["claude_instance"],
+                        "project": meta.get("project") or None,
+                        "session_id": session_id,
+                    },
+                    ref={"collection": op_collection_name, "doc_id": item_id},
+                    payload={
+                        "title": meta.get("title"),
+                        "backlog_status": meta.get("backlog_status"),
+                        "priority": meta.get("priority"),
+                        "assigned_to": meta.get("assigned_to") or "",
+                        "target_version": meta.get("target_version") or "",
+                        "deferred_reason": meta.get("deferred_reason") or "",
+                        "moved_from_collection": col.name if project else None,
+                        "edit_count": meta.get("edit_count"),
+                        "updated": now,
+                    },
+                )
 
                 found = True
                 return json.dumps({
@@ -406,6 +459,29 @@ async def memory_complete_backlog_item(
                     ids=[item_id],
                     documents=[doc],
                     metadatas=[meta]
+                )
+
+                # Phase 1 #2 canary: emit op-log entry per §4.3.a.
+                # Completing IS an update — new_status (done/wont_do) lives in
+                # payload.backlog_status. Same op_type as memory_update_backlog_item
+                # because replay should treat both identically.
+                emit_op_log_from_context(
+                    db=get_mongo(),
+                    op_type="backlog.updated",
+                    actor={
+                        "agent": session_info["claude_instance"],
+                        "project": meta.get("project") or None,
+                        "session_id": session_id,
+                    },
+                    ref={"collection": col.name, "doc_id": item_id},
+                    payload={
+                        "title": meta.get("title"),
+                        "backlog_status": new_status,
+                        "completed_at": now,
+                        "completed_by": session_info["claude_instance"],
+                        "resolution": resolution or "",
+                        "updated": now,
+                    },
                 )
 
                 return json.dumps({
@@ -482,8 +558,10 @@ async def memory_batch_backlog(
 
                 if project:
                     col = await get_project_collection(chroma, project)
+                    op_collection_name = f"{PROJECT_PREFIX}{project}"
                 else:
                     col = await get_shared_collection(chroma, "work")
+                    op_collection_name = f"{SHARED_PREFIX}work"
 
                 metadata = {
                     "title": title,
@@ -502,6 +580,32 @@ async def memory_batch_backlog(
                 }
 
                 await col.add(ids=[batch_id], documents=[content], metadatas=[metadata])
+
+                # Phase 1 #2 canary: one op-log entry per touched doc (keeps
+                # granularity uniform with single-item memory_add_backlog_item).
+                emit_op_log_from_context(
+                    db=get_mongo(),
+                    op_type="backlog.added",
+                    actor={
+                        "agent": session_info["claude_instance"],
+                        "project": project or None,
+                        "session_id": session_id,
+                    },
+                    ref={"collection": op_collection_name, "doc_id": batch_id},
+                    payload={
+                        "title": title,
+                        "description": description,
+                        "priority": priority,
+                        "project": project,
+                        "assigned_to": item.get("assigned_to", ""),
+                        "tags": item.get("tags", []),
+                        "target_version": item.get("target_version", ""),
+                        "deferred_reason": "",
+                        "created": now,
+                        "batch_index": i,
+                    },
+                )
+
                 results["succeeded"] += 1
                 results["ids"].append(batch_id)
             except Exception as e:
@@ -545,6 +649,29 @@ async def memory_batch_backlog(
                             meta["edit_count"] = meta.get("edit_count", 0) + 1
 
                             await col.update(ids=[update_id], documents=[doc], metadatas=[meta])
+
+                            # Phase 1 #2 canary: one op-log entry per item.
+                            emit_op_log_from_context(
+                                db=get_mongo(),
+                                op_type="backlog.updated",
+                                actor={
+                                    "agent": session_info["claude_instance"],
+                                    "project": meta.get("project") or None,
+                                    "session_id": session_id,
+                                },
+                                ref={"collection": col.name, "doc_id": update_id},
+                                payload={
+                                    "title": meta.get("title"),
+                                    "backlog_status": meta.get("backlog_status"),
+                                    "priority": meta.get("priority"),
+                                    "assigned_to": meta.get("assigned_to") or "",
+                                    "target_version": meta.get("target_version") or "",
+                                    "edit_count": meta.get("edit_count"),
+                                    "updated": now,
+                                    "batch_index": i,
+                                },
+                            )
+
                             results["succeeded"] += 1
                             results["ids"].append(update_id)
                             found = True
@@ -592,6 +719,29 @@ async def memory_batch_backlog(
                                 doc += f"\n\n## Resolution\n{resolution}"
 
                             await col.update(ids=[complete_id], documents=[doc], metadatas=[meta])
+
+                            # Phase 1 #2 canary: complete IS an update on the
+                            # backlog row — same op_type as the update branch.
+                            emit_op_log_from_context(
+                                db=get_mongo(),
+                                op_type="backlog.updated",
+                                actor={
+                                    "agent": session_info["claude_instance"],
+                                    "project": meta.get("project") or None,
+                                    "session_id": session_id,
+                                },
+                                ref={"collection": col.name, "doc_id": complete_id},
+                                payload={
+                                    "title": meta.get("title"),
+                                    "backlog_status": new_status,
+                                    "completed_at": now,
+                                    "completed_by": session_info["claude_instance"],
+                                    "resolution": resolution or "",
+                                    "updated": now,
+                                    "batch_index": i,
+                                },
+                            )
+
                             results["succeeded"] += 1
                             results["ids"].append(complete_id)
                             found = True

@@ -464,3 +464,112 @@ def test_function_enriched_partial_payload_allowed():
     )
     assert entry["payload"]["search_summary"]
     assert entry["payload"]["signature"] is None
+
+
+# --- Canary 7-10: backlog tools → backlog.added / backlog.updated -------------
+
+
+def test_backlog_added_accepted_and_shape():
+    """memory_add_backlog_item emits backlog.added with the full registration
+    payload so peers can replay the doc."""
+    db = _FakeDB()
+    payload = {
+        "title": "Verify Chroma embedding determinism",
+        "description": "Mechanical pre-Phase-2 work.",
+        "priority": "high",
+        "project": "junto",
+        "assigned_to": "memory",
+        "tags": ["phase-2", "chroma"],
+        "target_version": "local-first-v0-phase-2",
+        "deferred_reason": "",
+        "created": "2026-05-14T14:00:00+00:00",
+    }
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="backlog.added",
+        actor=_actor(),
+        ref={"collection": "proj_junto", "doc_id": "backlog_abc123def456"},
+        payload=payload,
+    )
+    assert entry is not None
+    assert entry["op_type"] == "backlog.added"
+    assert entry["ref"]["doc_id"].startswith("backlog_")
+    assert entry["payload"]["priority"] == "high"
+    assert entry["payload"]["assigned_to"] == "memory"
+
+
+def test_backlog_updated_carries_status_transition():
+    """memory_update_backlog_item / complete_backlog_item / batch update all
+    share backlog.updated. Payload.backlog_status disambiguates the new state
+    for replay."""
+    db = _FakeDB()
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="backlog.updated",
+        actor=_actor(),
+        ref={"collection": "proj_junto", "doc_id": "backlog_abc"},
+        payload={
+            "title": "Verify Chroma embedding determinism",
+            "backlog_status": "done",
+            "completed_at": "2026-05-14T15:00:00+00:00",
+            "completed_by": "memory",
+            "resolution": "Verified across both deployments.",
+            "updated": "2026-05-14T15:00:00+00:00",
+        },
+    )
+    assert entry["op_type"] == "backlog.updated"
+    assert entry["payload"]["backlog_status"] == "done"
+
+
+def test_backlog_move_records_origin_collection_in_payload():
+    """memory_update_backlog_item project-move case: ref.collection is the
+    NEW home (where the doc lives now); payload.moved_from_collection
+    preserves the source for replay."""
+    db = _FakeDB()
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="backlog.updated",
+        actor=_actor(),
+        ref={"collection": "proj_nimbus", "doc_id": "backlog_xyz"},
+        payload={
+            "title": "Cross-team alerts",
+            "backlog_status": "open",
+            "priority": "medium",
+            "moved_from_collection": "proj_junto",
+            "edit_count": 2,
+            "updated": "2026-05-14T15:00:00+00:00",
+        },
+    )
+    assert entry["ref"]["collection"] == "proj_nimbus"
+    assert entry["payload"]["moved_from_collection"] == "proj_junto"
+
+
+def test_backlog_batch_index_threaded_through_payload():
+    """memory_batch_backlog emits one op-log entry per item, with batch_index
+    in the payload so replay can correlate to the original batch call."""
+    db = _FakeDB()
+    e1 = op_log.emit_op_log(
+        db=db,
+        op_type="backlog.added",
+        actor=_actor(),
+        ref={"collection": "proj_junto", "doc_id": "backlog_b1"},
+        payload={"title": "Item 1", "batch_index": 0, "created": "2026-05-14T15:00:00+00:00"},
+    )
+    e2 = op_log.emit_op_log(
+        db=db,
+        op_type="backlog.added",
+        actor=_actor(),
+        ref={"collection": "proj_junto", "doc_id": "backlog_b2"},
+        payload={"title": "Item 2", "batch_index": 1, "created": "2026-05-14T15:00:00+00:00"},
+    )
+    assert e1["payload"]["batch_index"] == 0
+    assert e2["payload"]["batch_index"] == 1
+    # Cross-item monotonic seq is the structural guarantee that the batch
+    # produced N entries in order.
+    assert e2["seq"] == e1["seq"] + 1
+
+
+def test_backlog_added_and_updated_both_in_catalog():
+    """Both op_types must be valid catalog entries — guards against drift."""
+    assert op_log.is_valid_op_type("backlog.added")
+    assert op_log.is_valid_op_type("backlog.updated")
