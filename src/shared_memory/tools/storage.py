@@ -227,7 +227,7 @@ async def memory_store(
         },
     )
 
-    result = {"status": "stored", "id": doc_id[:12]}
+    result = {"status": "stored", "id": doc_id}
     if memory_type == "interface" and interface_name:
         result["interface_name"] = interface_name
         result["interface_version"] = interface_version
@@ -331,4 +331,4 @@ async def memory_record_learning(
         },
     )
 
-    return json.dumps({"status": "recorded", "id": doc_id[:12]})
+    return json.dumps({"status": "recorded", "id": doc_id})

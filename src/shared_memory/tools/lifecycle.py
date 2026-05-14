@@ -302,7 +302,7 @@ async def memory_archive_by_tag(
                 await col.update(ids=[doc_id], metadatas=[meta])
                 archived_count += 1
                 archived_docs.append({
-                    "id": doc_id[:12],
+                    "id": doc_id,
                     "title": meta.get("title", "Untitled"),
                     "collection": col.name
                 })
@@ -384,7 +384,7 @@ async def memory_restore_by_tag(
                 await col.update(ids=[doc_id], metadatas=[meta])
                 restored_count += 1
                 restored_docs.append({
-                    "id": doc_id[:12],
+                    "id": doc_id,
                     "title": meta.get("title", "Untitled"),
                     "collection": col.name
                 })
