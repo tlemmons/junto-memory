@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 from mcp.server.fastmcp import Context
 
 from shared_memory.app import mcp
-from shared_memory.clients import get_chroma
+from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import PROJECT_PREFIX, SHARED_PREFIX
 from shared_memory.helpers import (
     MIN_RELEVANCE_THRESHOLD,
@@ -21,6 +21,7 @@ from shared_memory.helpers import (
     update_access_stats,
     utc_now_iso,
 )
+from shared_memory.op_log import emit_op_log_from_context
 from shared_memory.state import active_sessions
 
 # Enrichment queue for librarian processing (in-memory, processed async)
@@ -99,11 +100,15 @@ async def memory_register_function(
     if project:
         project = normalize_project(project)
 
-    # Determine collection
+    # Determine collection. chroma_collection_name mirrors get_*_collection
+    # output so op-log `ref.collection` matches what §5.1 sync replay and
+    # §4.7 reconciliation will look up.
     if project:
         collection = await get_project_collection(chroma, project)
+        chroma_collection_name = f"proj_{project}"
     else:
         collection = await get_shared_collection(chroma, "patterns")
+        chroma_collection_name = "shared_patterns"
 
     # Generate stable ID based on project + file + name
     id_base = f"{project or 'shared'}:{file}:{name}"
@@ -175,6 +180,34 @@ async def memory_register_function(
         ids=[func_id],
         documents=[content],
         metadatas=[metadata]
+    )
+
+    # Phase 1 #2 canary 3/13: emit op-log entry per §4.3.a (best-effort).
+    # First-registration and re-registration both go through the same upsert
+    # and emit the same op_type — `is_update` is replay-side state, not part
+    # of the op. Code is included in payload so sync replay can rebuild the
+    # exact document content; enrichment merge (when is_update) is reapplied
+    # by a subsequent function.enriched op in the same log.
+    emit_op_log_from_context(
+        db=get_mongo(),
+        op_type="function.registered",
+        actor={
+            "agent": session_info["claude_instance"],
+            "project": project,
+            "session_id": session_id,
+        },
+        ref={"collection": chroma_collection_name, "doc_id": func_id},
+        payload={
+            "name": name,
+            "file": file,
+            "purpose": purpose,
+            "gotchas": gotchas,
+            "prefer_over": prefer_over,
+            "requires": requires,
+            "has_code": bool(code),
+            "code": code,
+            "registered_at": now,
+        },
     )
 
     # Add to enrichment queue for librarian

@@ -267,3 +267,73 @@ def test_op_types_catalog_size_is_v1_locked():
     assert "store.created" in op_log.OP_TYPES
     assert "learning.recorded" in op_log.OP_TYPES
     assert "message.sent" in op_log.OP_TYPES
+
+
+# --- Canary 3/13: memory_register_function → function.registered --------------
+
+
+def test_function_registered_accepted_and_shape():
+    """memory_register_function's canary op_type must round-trip and carry
+    the full registration args so a peer replay can reconstruct the doc."""
+    db = _FakeDB()
+    payload = {
+        "name": "parse_email",
+        "file": "src/parser.py:145",
+        "purpose": "Parse raw email into structured fields",
+        "gotchas": "Use over v1 — attachment-handling bug",
+        "prefer_over": "parse_email_v1",
+        "requires": ["init_parser"],
+        "has_code": True,
+        "code": "def parse_email(raw):\n    ...",
+        "registered_at": "2026-05-14T13:00:00+00:00",
+    }
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="function.registered",
+        actor=_actor(),
+        ref={"collection": "proj_junto", "doc_id": "func_abc123def456"},
+        payload=payload,
+    )
+    assert entry is not None
+    assert entry["op_type"] == "function.registered"
+    assert entry["ref"]["collection"] == "proj_junto"
+    assert entry["ref"]["doc_id"].startswith("func_")
+    assert entry["payload"]["code"] == "def parse_email(raw):\n    ..."
+    assert entry["payload"]["has_code"] is True
+
+
+def test_function_registered_no_code_path():
+    """Minimal registration (no `code` arg) — payload.code is None, has_code
+    False. Sync replay won't rebuild a code block but the registration row
+    itself replays correctly."""
+    db = _FakeDB()
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="function.registered",
+        actor=_actor(),
+        ref={"collection": "shared_patterns", "doc_id": "func_999"},
+        payload={
+            "name": "get_user",
+            "file": "src/users.py:45",
+            "purpose": "Fetch user by ID",
+            "gotchas": None,
+            "prefer_over": None,
+            "requires": [],
+            "has_code": False,
+            "code": None,
+            "registered_at": "2026-05-14T13:00:00+00:00",
+        },
+    )
+    assert entry["payload"]["has_code"] is False
+    assert entry["payload"]["code"] is None
+    assert entry["ref"]["collection"] == "shared_patterns"
+
+
+def test_emit_op_log_monotonic_across_three_canary_ops_so_far():
+    """Cross-type monotonic seq across the three Chroma canaries shipped to
+    date: learning.recorded, store.created, function.registered."""
+    db = _FakeDB()
+    e1 = op_log.emit_op_log(db, "learning.recorded", _actor(), _ref(), {})
+    e2 = op_log.emit_op_log(db, "store.created", _actor(), _ref(), {})
+    e3 = op_log.emit_op_log(db, "function.registered", _actor(), _ref(), {})
+    assert [e1["seq"], e2["seq"], e3["seq"]] == [1, 2, 3]
