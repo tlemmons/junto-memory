@@ -192,3 +192,78 @@ def test_emit_op_log_from_context_no_intent_default():
         payload={},
     )
     assert entry["intent_id"] is None
+
+
+# --- Canary 2/13: memory_store → store.created --------------------------------
+
+
+def test_store_created_accepted_and_shape():
+    """memory_store's canary op_type must round-trip through the helper."""
+    db = _FakeDB()
+    payload = {
+        "title": "API spec for /foo",
+        "content": "## Foo\nbody...",
+        "memory_type": "api_spec",
+        "tags": ["api", "foo"],
+        "files_related": ["src/foo.py"],
+        "interface_name": None,
+        "interface_version": None,
+        "interface_owner": None,
+        "interface_schema": None,
+        "expires_at": None,
+        "content_hash": "abcd" * 8,
+        "created": "2026-05-14T12:00:00+00:00",
+    }
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="store.created",
+        actor=_actor(),
+        ref={"collection": "proj_junto", "doc_id": "doc_abc"},
+        payload=payload,
+    )
+    assert entry is not None
+    assert entry["op_type"] == "store.created"
+    assert entry["ref"] == {"collection": "proj_junto", "doc_id": "doc_abc"}
+    assert entry["payload"] is payload  # full payload threaded for sync replay
+
+
+def test_store_created_interface_path_collection_name():
+    """The interface-upsert path lands rows in the shared_patterns bucket
+    when no project is given. The op-log ref.collection must match."""
+    db = _FakeDB()
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="store.created",
+        actor=_actor(),
+        ref={"collection": "shared_patterns", "doc_id": "interface_mqtt_frame_status"},
+        payload={
+            "title": "MQTT frame-status contract",
+            "memory_type": "interface",
+            "interface_name": "mqtt:frame-status",
+            "interface_version": "1.2",
+            "interface_owner": "frames-team",
+        },
+    )
+    assert entry["ref"]["collection"] == "shared_patterns"
+    assert entry["payload"]["interface_name"] == "mqtt:frame-status"
+
+
+def test_emit_op_log_monotonic_across_three_canary_types():
+    """Cross-type monotonic seq spanning the two Chroma canaries + the
+    Mongo canary still on deck. Locks in that the counter is global per
+    origin, not partitioned by op_type."""
+    db = _FakeDB()
+    e1 = op_log.emit_op_log(db, "learning.recorded", _actor(), _ref(), {})
+    e2 = op_log.emit_op_log(db, "store.created", _actor(), _ref(), {})
+    e3 = op_log.emit_op_log(db, "store.created", _actor(), _ref(), {})
+    e4 = op_log.emit_op_log(db, "message.sent", _actor(), _ref(), {})
+    assert [e1["seq"], e2["seq"], e3["seq"], e4["seq"]] == [1, 2, 3, 4]
+
+
+def test_op_types_catalog_size_is_v1_locked():
+    """§4.1 is closed at 26 entries for MVP. Adding a 27th requires a
+    documented amendment. This guards against silent catalog drift."""
+    assert len(op_log.OP_TYPES) == 26
+    assert "store.created" in op_log.OP_TYPES
+    assert "learning.recorded" in op_log.OP_TYPES
+    assert "message.sent" in op_log.OP_TYPES

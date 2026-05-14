@@ -101,14 +101,20 @@ async def memory_store(
     if project:
         project = normalize_project(project)
 
-    # Determine collection
+    # Determine collection. chroma_collection_name mirrors what
+    # get_*_collection produces (PROJECT_PREFIX + project / SHARED_PREFIX +
+    # shared bucket) so the op-log `ref.collection` carries the same
+    # identifier a §5.1 sync replay or §4.7 reconciliation pass will use.
     if project:
         collection = await get_project_collection(chroma, project)
+        chroma_collection_name = f"proj_{project}"
     else:
         if memory_type in ["pattern", "code_snippet", "solution", "interface"]:
             collection = await get_shared_collection(chroma, "patterns")
+            chroma_collection_name = "shared_patterns"
         else:
             collection = await get_shared_collection(chroma, "context")
+            chroma_collection_name = "shared_context"
 
     # Check for duplicates (unless force_store or interface update)
     duplicate_warning = None
@@ -189,6 +195,37 @@ async def memory_store(
             documents=[content],
             metadatas=[metadata]
         )
+
+    # Phase 1 #2 canary 2/13: emit op-log entry per §4.3.a (best-effort).
+    # Chroma write already landed; emit_op_log_from_context logs + swallows
+    # any Mongo-side failure so the tool response is unaffected. Both the
+    # add path and the interface-upsert path emit the same op_type — replay
+    # re-derives the right Chroma path from payload.memory_type +
+    # payload.interface_name. Reconciliation (§4.7) backfills gaps.
+    emit_op_log_from_context(
+        db=get_mongo(),
+        op_type="store.created",
+        actor={
+            "agent": session_info["claude_instance"],
+            "project": project,
+            "session_id": session_id,
+        },
+        ref={"collection": chroma_collection_name, "doc_id": doc_id},
+        payload={
+            "title": title,
+            "content": content,
+            "memory_type": memory_type,
+            "tags": tags,
+            "files_related": files_related,
+            "interface_name": interface_name,
+            "interface_version": interface_version,
+            "interface_owner": interface_owner,
+            "interface_schema": interface_schema,
+            "expires_at": expires_at,
+            "content_hash": content_hash,
+            "created": now,
+        },
+    )
 
     result = {"status": "stored", "id": doc_id[:12]}
     if memory_type == "interface" and interface_name:
