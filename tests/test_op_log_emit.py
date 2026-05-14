@@ -374,6 +374,71 @@ def test_function_enriched_accepted_and_shape():
     assert entry["payload"]["calls"] == ["decode_mime", "extract_attachments"]
 
 
+# --- Canary 5/13: memory_define_spec → spec.defined / spec.updated ------------
+
+
+def test_spec_defined_on_first_version():
+    """First call to memory_define_spec(name=X) emits spec.defined with
+    previous_version=None."""
+    db = _FakeDB()
+    payload = {
+        "spec_name": "mqtt:frame-status",
+        "version": "1.0.0",
+        "previous_version": None,
+        "owner": "frames-team",
+        "spec_type": "interface",
+        "content": "# Frame status contract\n...",
+        "tags": ["mqtt", "frames"],
+        "json_schema": None,
+        "project": "nimbus",
+        "updated_at": "2026-05-14T14:00:00+00:00",
+    }
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="spec.defined",
+        actor=_actor(),
+        ref={"collection": "proj_nimbus", "doc_id": "spec_mqtt_frame-status"},
+        payload=payload,
+    )
+    assert entry["op_type"] == "spec.defined"
+    assert entry["payload"]["previous_version"] is None
+    assert entry["payload"]["version"] == "1.0.0"
+
+
+def test_spec_updated_carries_previous_version():
+    """Subsequent calls emit spec.updated with previous_version set so peers
+    can run §7.2 fast-forward conflict detection."""
+    db = _FakeDB()
+    entry = op_log.emit_op_log(
+        db=db,
+        op_type="spec.updated",
+        actor=_actor(),
+        ref={"collection": "proj_junto", "doc_id": "spec_state_memory"},
+        payload={
+            "spec_name": "state:memory",
+            "version": "1.0.22",
+            "previous_version": "1.0.21",
+            "owner": "memory",
+            "spec_type": "agent_state",
+            "content": "## Current Task\n...",
+            "tags": [],
+            "json_schema": None,
+            "project": "junto",
+            "updated_at": "2026-05-14T14:00:00+00:00",
+        },
+    )
+    assert entry["op_type"] == "spec.updated"
+    assert entry["payload"]["previous_version"] == "1.0.21"
+    assert entry["payload"]["version"] == "1.0.22"
+
+
+def test_spec_defined_and_spec_updated_both_in_catalog():
+    """Both op_types must be valid catalog entries — guards against
+    accidentally renaming one and breaking the other."""
+    assert op_log.is_valid_op_type("spec.defined")
+    assert op_log.is_valid_op_type("spec.updated")
+
+
 def test_function_enriched_partial_payload_allowed():
     """Librarian may call enrich_function with only a subset of fields
     populated. Payload fields are None when unprovided; the op-log doesn't

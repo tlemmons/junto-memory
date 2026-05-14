@@ -6,7 +6,7 @@ from typing import List
 from mcp.server.fastmcp import Context
 
 from shared_memory.app import mcp
-from shared_memory.clients import get_chroma
+from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import MAX_CONTENT_SIZE, PROJECT_PREFIX
 from shared_memory.helpers import (
     get_project_collection,
@@ -15,6 +15,7 @@ from shared_memory.helpers import (
     require_session,
     utc_now_iso,
 )
+from shared_memory.op_log import emit_op_log_from_context
 from shared_memory.state import active_sessions
 
 
@@ -95,13 +96,16 @@ async def memory_define_spec(
     # Normalize spec name for doc_id
     spec_doc_id = f"spec_{name.replace(':', '_').replace('/', '_')}"
 
-    # Determine collection
+    # Determine collection. chroma_collection_name mirrors get_*_collection
+    # output so op-log `ref.collection` matches §5.1 sync / §4.7 reconciliation.
     if project:
         collection = await get_project_collection(chroma, project)
         location = f"project:{project}"
+        chroma_collection_name = f"proj_{project}"
     else:
         collection = await get_shared_collection(chroma, "patterns")
         location = "shared:patterns"
+        chroma_collection_name = "shared_patterns"
 
     # Check if spec already exists
     existing = None
@@ -215,6 +219,40 @@ async def memory_define_spec(
         ids=[spec_doc_id],
         documents=[content],
         metadatas=[metadata]
+    )
+
+    # Phase 1 #2 canary 5/13: emit op-log entry per §4.3.a (best-effort).
+    # Two op_types map to memory_define_spec's two write modes:
+    #   action="created"  → spec.defined  (first version of this name)
+    #   action="updated"  → spec.updated  (subsequent version; conflict target per §7.2)
+    # `previous_version` only meaningful on the updated path; peers consume
+    # it to detect §7.2 fast-forward conflicts. The history-collection
+    # archive write (lines above) is NOT separately logged — peers
+    # reconstruct version history from the sequence of spec.defined /
+    # spec.updated ops in the same log.
+    spec_op_type = "spec.defined" if action == "created" else "spec.updated"
+    previous_version = existing["metadata"].get("spec_version") if existing else None
+    emit_op_log_from_context(
+        db=get_mongo(),
+        op_type=spec_op_type,
+        actor={
+            "agent": session_info["claude_instance"],
+            "project": project,
+            "session_id": session_id,
+        },
+        ref={"collection": chroma_collection_name, "doc_id": spec_doc_id},
+        payload={
+            "spec_name": name,
+            "version": version,
+            "previous_version": previous_version,
+            "owner": owner,
+            "spec_type": spec_type,
+            "content": content,
+            "tags": tags,
+            "json_schema": json_schema,
+            "project": project,
+            "updated_at": now,
+        },
     )
 
     # Audit log for spec changes
