@@ -87,6 +87,11 @@ services:
       - CHROMA_PORT=8000
       - MONGO_HOST=mongodb
       - MONGO_PORT=27017
+      # Op-log origin identifier (Phase 1, design v0.3.0 §4.5). This tags
+      # every op-log entry this server writes. MUST be unique-per-deployment
+      # once Phase 2 lands and LAN-local instances appear; today the
+      # central singleton uses `central`.
+      - ORIGIN_SERVER_ID=${ORIGIN_SERVER_ID:-central}
     ports:
       - "8080:8080"
     ulimits:

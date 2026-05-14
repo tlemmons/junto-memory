@@ -214,6 +214,13 @@ def get_mongo():
         messages_col.create_index("chain_depth")
         messages_col.create_index("in_response_to")
 
+        # Op-log (Phase 1 foundation, design v0.3.0 §4.2). Collection +
+        # indexes only — no writers yet. Phase 1 #2 instruments mutation
+        # tools to append here inside a Mongo transaction alongside their
+        # source-collection write.
+        from shared_memory.op_log import ensure_op_log_indexes
+        ensure_op_log_indexes(_mongo_db)
+
         print(f"Connected to MongoDB at {MONGO_HOST}:{MONGO_PORT}/{MONGO_DB}")
         return _mongo_db
 

@@ -23,6 +23,15 @@ MONGO_DB = os.getenv("MONGO_DB", "mcp_orchestrator")
 MONGO_USER = os.getenv("MONGO_USER", "mcp_orch")
 MONGO_PASSWORD = os.getenv("MONGO_PASSWORD", "")
 
+# Op-log origin identifier (Phase 1). Stable per-deployment string that
+# tags every op-log entry written by this server. Used by sync_pull/push
+# to maintain per-origin monotonic seq cursors. Per design v0.3.0 §4.5
+# this MUST be operator-configured to a stable, unique-per-deployment
+# value before Phase 1 instrumentation lands. Default `central` is a
+# placeholder for the singleton-deployment case; a future LAN-local
+# deployment MUST override (e.g. `lan-spg-office`).
+ORIGIN_SERVER_ID = os.getenv("ORIGIN_SERVER_ID", "central")
+
 # Database registry - external databases available for querying
 # Built dynamically from environment variables with prefix DB_<NAME>_*
 # Example: DB_MYDB_TYPE=mssql, DB_MYDB_HOST=server.com, DB_MYDB_PORT=1433, etc.
