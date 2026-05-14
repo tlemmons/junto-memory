@@ -123,9 +123,17 @@ def get_mongo():
         # the docker-network hostname `mongodb`, so this URI works from inside
         # the docker network. Host-side debugging via localhost:27019 needs
         # `?directConnection=true` instead.
+        #
+        # authSource=admin is required because the root user created via
+        # MONGO_INITDB_ROOT_USERNAME lives in the admin database regardless
+        # of MONGO_INITDB_DATABASE. Without this, PyMongo defaults authSource
+        # to MONGO_DB and authentication fails on fresh installs — server
+        # comes up but every mongo-backed call (guidelines, agent_directory,
+        # messages, audit_log, op_log, autopilot) silently returns empty.
+        # See PR #1 / Issue tlemmons-lvt for the install-time repro.
         mongo_uri = (
             f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}"
-            f"/{MONGO_DB}?replicaSet=rs0"
+            f"/{MONGO_DB}?replicaSet=rs0&authSource=admin"
         )
         _mongo_client = MongoClient(
             mongo_uri,
