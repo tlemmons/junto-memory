@@ -270,7 +270,10 @@ async def fetch_embedding_for_op_log(collection, doc_id):
         return None
 
     embeddings = result.get("embeddings") if isinstance(result, dict) else None
-    if not embeddings:
+    # Chroma's typed async client returns `embeddings` as a numpy 2D array, not
+    # a Python list-of-lists. `if not embeddings:` raises ambiguity. Check None
+    # + length explicitly so numpy containers are handled safely.
+    if embeddings is None or len(embeddings) == 0:
         return None
 
     emb = embeddings[0]

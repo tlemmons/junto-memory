@@ -735,3 +735,44 @@ async def test_fetch_embedding_handles_none_embedding_entry():
     col = _FakeChromaCollection(embeddings_by_id={"doc_abc": None})
     emb = await op_log.fetch_embedding_for_op_log(col, "doc_abc")
     assert emb is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_embedding_handles_numpy_outer_container():
+    """Real Chroma's typed async client returns the OUTER `embeddings` value as
+    a numpy 2D array (shape (n, dim)), not a Python list-of-lists. `if not arr`
+    raises ambiguity on a multi-element numpy array. Regression guard for the
+    2026-05-15 A-path deploy outage."""
+
+    class _NumpyLikeOuter:
+        """Mimics numpy 2D array: indexable, has len(), raises on bool()."""
+        def __init__(self, rows):
+            self._rows = rows
+
+        def __len__(self):
+            return len(self._rows)
+
+        def __getitem__(self, idx):
+            return self._rows[idx]
+
+        def __bool__(self):
+            raise ValueError(
+                "The truth value of an array with more than one element is ambiguous."
+            )
+
+    class _NumpyLikeRow:
+        def __init__(self, values):
+            self._values = values
+
+        def tolist(self):
+            return list(self._values)
+
+    class _Collection:
+        async def get(self, ids, include=None):
+            return {
+                "ids": list(ids),
+                "embeddings": _NumpyLikeOuter([_NumpyLikeRow([0.7, 0.8, 0.9])]),
+            }
+
+    emb = await op_log.fetch_embedding_for_op_log(_Collection(), "doc_abc")
+    assert emb == [0.7, 0.8, 0.9]
