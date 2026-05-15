@@ -21,7 +21,7 @@ from shared_memory.helpers import (
     require_session,
     utc_now_iso,
 )
-from shared_memory.op_log import emit_op_log_from_context
+from shared_memory.op_log import emit_op_log_from_context, fetch_embedding_for_op_log
 from shared_memory.state import active_sessions
 
 
@@ -202,6 +202,11 @@ async def memory_store(
     # add path and the interface-upsert path emit the same op_type — replay
     # re-derives the right Chroma path from payload.memory_type +
     # payload.interface_name. Reconciliation (§4.7) backfills gaps.
+    #
+    # Phase 2 A-path: capture the Chroma-computed embedding into payload so
+    # peers pin the same vector on replay — avoids cross-server vector-skew
+    # (backlog_f0cb1ba24496). Helper is best-effort: None on fetch failure.
+    embedding = await fetch_embedding_for_op_log(collection, doc_id)
     emit_op_log_from_context(
         db=get_mongo(),
         op_type="store.created",
@@ -224,6 +229,7 @@ async def memory_store(
             "expires_at": expires_at,
             "content_hash": content_hash,
             "created": now,
+            "embedding": embedding,
         },
     )
 
@@ -314,6 +320,7 @@ async def memory_record_learning(
     # Chroma write already landed; emit_op_log_from_context logs + swallows
     # any Mongo-side failure so the tool response is unaffected. Reconciliation
     # (§4.7) backfills gaps on next startup.
+    embedding = await fetch_embedding_for_op_log(collection, doc_id)
     emit_op_log_from_context(
         db=get_mongo(),
         op_type="learning.recorded",
@@ -328,6 +335,7 @@ async def memory_record_learning(
             "details": details,
             "tags": tags,
             "created": now,
+            "embedding": embedding,
         },
     )
 

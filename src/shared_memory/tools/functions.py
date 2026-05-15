@@ -21,7 +21,7 @@ from shared_memory.helpers import (
     update_access_stats,
     utc_now_iso,
 )
-from shared_memory.op_log import emit_op_log_from_context
+from shared_memory.op_log import emit_op_log_from_context, fetch_embedding_for_op_log
 from shared_memory.state import active_sessions
 
 # Enrichment queue for librarian processing (in-memory, processed async)
@@ -188,6 +188,7 @@ async def memory_register_function(
     # of the op. Code is included in payload so sync replay can rebuild the
     # exact document content; enrichment merge (when is_update) is reapplied
     # by a subsequent function.enriched op in the same log.
+    embedding = await fetch_embedding_for_op_log(collection, func_id)
     emit_op_log_from_context(
         db=get_mongo(),
         op_type="function.registered",
@@ -207,6 +208,7 @@ async def memory_register_function(
             "has_code": bool(code),
             "code": code,
             "registered_at": now,
+            "embedding": embedding,
         },
     )
 
@@ -691,6 +693,7 @@ async def memory_enrich_function(
                 # computed, because enrich finds the doc by scanning. Actor
                 # project comes from the session, not the doc — op-log
                 # records who performed the write, not the doc's home.
+                embedding = await fetch_embedding_for_op_log(col, func_id)
                 emit_op_log_from_context(
                     db=get_mongo(),
                     op_type="function.enriched",
@@ -711,6 +714,7 @@ async def memory_enrich_function(
                         "additional_gotchas": additional_gotchas,
                         "search_summary": search_summary,
                         "enriched_at": now,
+                        "embedding": embedding,
                     },
                 )
 

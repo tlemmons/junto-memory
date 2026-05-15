@@ -235,6 +235,54 @@ def emit_op_log_from_context(
     )
 
 
+async def fetch_embedding_for_op_log(collection, doc_id):
+    """Fetch the just-written Chroma embedding for an op-log payload (A-path).
+
+    Implements `design:local-first-junto-v0-mvp` Phase 2 §10 OQ#2 "Path A":
+    after the source `collection.add` / `upsert` / `update(documents=...)`
+    lands, read back the embedding Chroma computed and stash it in the
+    op-log payload. Peers replay by applying the embedding directly,
+    eliminating cross-server vector-skew risk (`backlog_f0cb1ba24496`).
+
+    Contract:
+    - Returns a JSON-serializable list of floats on success.
+    - Returns None if Chroma reports no embedding, or the fetch raises.
+    - Never raises. The source write already landed; an embedding-fetch
+      gap is closed by §4.7 reconciliation (or accepted as a benign
+      determinism-fallback row for that op).
+
+    Args:
+        collection: An AsyncCollection (from `get_chroma().get_collection()`
+            or the helpers in clients.py).
+        doc_id: The id just written. Must be a single string.
+
+    Returns:
+        list[float] | None
+    """
+    try:
+        result = await collection.get(ids=[doc_id], include=["embeddings"])
+    except Exception as exc:
+        logger.error(
+            "op_log.fetch_embedding_for_op_log: get failed for doc_id=%s: %s",
+            doc_id,
+            exc,
+        )
+        return None
+
+    embeddings = result.get("embeddings") if isinstance(result, dict) else None
+    if not embeddings:
+        return None
+
+    emb = embeddings[0]
+    if emb is None:
+        return None
+
+    # Chroma returns numpy arrays under typed client; .tolist() makes JSON-safe.
+    if hasattr(emb, "tolist"):
+        return emb.tolist()
+    return list(emb)
+
+
 @contextmanager
 def with_op_log(db):
     """Transactional op-log emission (§4.3.b, Mongo-backed mutations).

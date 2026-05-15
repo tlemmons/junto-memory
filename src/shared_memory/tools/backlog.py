@@ -16,7 +16,7 @@ from shared_memory.helpers import (
     require_session,
     utc_now_iso,
 )
-from shared_memory.op_log import emit_op_log_from_context
+from shared_memory.op_log import emit_op_log_from_context, fetch_embedding_for_op_log
 from shared_memory.state import active_sessions
 
 
@@ -104,6 +104,7 @@ async def memory_add_backlog_item(
     )
 
     # Phase 1 #2 canary: emit op-log entry per §4.3.a (best-effort).
+    embedding = await fetch_embedding_for_op_log(collection, backlog_id)
     emit_op_log_from_context(
         db=get_mongo(),
         op_type="backlog.added",
@@ -123,6 +124,7 @@ async def memory_add_backlog_item(
             "target_version": target_version or "",
             "deferred_reason": deferred_reason or "",
             "created": now,
+            "embedding": embedding,
         },
     )
 
@@ -355,6 +357,7 @@ async def memory_update_backlog_item(
                     )
                     await col.delete(ids=[item_id])
                     op_collection_name = f"{PROJECT_PREFIX}{project}"
+                    op_collection = new_collection
                 else:
                     await col.update(
                         ids=[item_id],
@@ -362,10 +365,14 @@ async def memory_update_backlog_item(
                         metadatas=[meta]
                     )
                     op_collection_name = col.name
+                    op_collection = col
 
                 # Phase 1 #2 canary: emit op-log entry per §4.3.a (best-effort).
                 # ref.collection is the doc's CURRENT home — for a move, that's
                 # the new project's collection; the old collection is in payload.
+                # Phase 2 A-path: fetch the embedding from the doc's CURRENT
+                # home (post-move if applicable) so peers pin the same vector.
+                embedding = await fetch_embedding_for_op_log(op_collection, item_id)
                 emit_op_log_from_context(
                     db=get_mongo(),
                     op_type="backlog.updated",
@@ -385,6 +392,7 @@ async def memory_update_backlog_item(
                         "moved_from_collection": col.name if project else None,
                         "edit_count": meta.get("edit_count"),
                         "updated": now,
+                        "embedding": embedding,
                     },
                 )
 
@@ -465,6 +473,7 @@ async def memory_complete_backlog_item(
                 # Completing IS an update — new_status (done/wont_do) lives in
                 # payload.backlog_status. Same op_type as memory_update_backlog_item
                 # because replay should treat both identically.
+                embedding = await fetch_embedding_for_op_log(col, item_id)
                 emit_op_log_from_context(
                     db=get_mongo(),
                     op_type="backlog.updated",
@@ -481,6 +490,7 @@ async def memory_complete_backlog_item(
                         "completed_by": session_info["claude_instance"],
                         "resolution": resolution or "",
                         "updated": now,
+                        "embedding": embedding,
                     },
                 )
 
@@ -583,6 +593,10 @@ async def memory_batch_backlog(
 
                 # Phase 1 #2 canary: one op-log entry per touched doc (keeps
                 # granularity uniform with single-item memory_add_backlog_item).
+                # Phase 2 A-path: per-item embedding fetch. Large batches pay
+                # N extra Chroma round-trips; acceptable for v1 since adds
+                # already serialize. Bulk-fetch optimization deferred.
+                embedding = await fetch_embedding_for_op_log(col, batch_id)
                 emit_op_log_from_context(
                     db=get_mongo(),
                     op_type="backlog.added",
@@ -603,6 +617,7 @@ async def memory_batch_backlog(
                         "deferred_reason": "",
                         "created": now,
                         "batch_index": i,
+                        "embedding": embedding,
                     },
                 )
 
@@ -651,6 +666,7 @@ async def memory_batch_backlog(
                             await col.update(ids=[update_id], documents=[doc], metadatas=[meta])
 
                             # Phase 1 #2 canary: one op-log entry per item.
+                            embedding = await fetch_embedding_for_op_log(col, update_id)
                             emit_op_log_from_context(
                                 db=get_mongo(),
                                 op_type="backlog.updated",
@@ -669,6 +685,7 @@ async def memory_batch_backlog(
                                     "edit_count": meta.get("edit_count"),
                                     "updated": now,
                                     "batch_index": i,
+                                    "embedding": embedding,
                                 },
                             )
 
@@ -722,6 +739,7 @@ async def memory_batch_backlog(
 
                             # Phase 1 #2 canary: complete IS an update on the
                             # backlog row — same op_type as the update branch.
+                            embedding = await fetch_embedding_for_op_log(col, complete_id)
                             emit_op_log_from_context(
                                 db=get_mongo(),
                                 op_type="backlog.updated",
@@ -739,6 +757,7 @@ async def memory_batch_backlog(
                                     "resolution": resolution or "",
                                     "updated": now,
                                     "batch_index": i,
+                                    "embedding": embedding,
                                 },
                             )
 

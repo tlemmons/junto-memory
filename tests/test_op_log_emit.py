@@ -662,3 +662,76 @@ def test_store_tagged_bulk_emits_per_touched_doc():
 def test_store_tagged_in_catalog():
     """Guards against renaming store.tagged out from under the bulk tools."""
     assert op_log.is_valid_op_type("store.tagged")
+
+
+# --- Phase 2 A-path: fetch_embedding_for_op_log -------------------------------
+
+
+class _FakeChromaCollection:
+    """Just enough of AsyncCollection.get to drive fetch_embedding tests."""
+
+    def __init__(self, embeddings_by_id=None, raise_exc=None):
+        self._embeddings = embeddings_by_id or {}
+        self._raise = raise_exc
+
+    async def get(self, ids, include=None):
+        if self._raise is not None:
+            raise self._raise
+        out_ids = []
+        out_embs = []
+        for doc_id in ids:
+            if doc_id in self._embeddings:
+                out_ids.append(doc_id)
+                out_embs.append(self._embeddings[doc_id])
+        result = {"ids": out_ids}
+        if include and "embeddings" in include:
+            result["embeddings"] = out_embs
+        return result
+
+
+@pytest.mark.asyncio
+async def test_fetch_embedding_returns_list_of_floats():
+    col = _FakeChromaCollection(embeddings_by_id={"doc_abc": [0.1, 0.2, 0.3]})
+    emb = await op_log.fetch_embedding_for_op_log(col, "doc_abc")
+    assert emb == [0.1, 0.2, 0.3]
+
+
+@pytest.mark.asyncio
+async def test_fetch_embedding_handles_numpy_array():
+    """Chroma returns embeddings as numpy arrays under the typed client.
+    Helper must convert to plain list-of-floats for JSON/Mongo storage."""
+    class _ArrayLike:
+        def __init__(self, values):
+            self._values = values
+        def tolist(self):
+            return list(self._values)
+    col = _FakeChromaCollection(embeddings_by_id={"doc_abc": _ArrayLike([0.5, 0.6])})
+    emb = await op_log.fetch_embedding_for_op_log(col, "doc_abc")
+    assert emb == [0.5, 0.6]
+
+
+@pytest.mark.asyncio
+async def test_fetch_embedding_returns_none_on_missing_doc():
+    """If the doc isn't found in Chroma (race condition: deleted before fetch),
+    helper returns None instead of raising."""
+    col = _FakeChromaCollection(embeddings_by_id={})
+    emb = await op_log.fetch_embedding_for_op_log(col, "doc_missing")
+    assert emb is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_embedding_swallows_exception():
+    """Source write already landed. Embedding fetch failing must NOT raise —
+    return None so the op-log emission can proceed with embedding=None and
+    §4.7 reconciliation handles it."""
+    col = _FakeChromaCollection(raise_exc=RuntimeError("simulated chroma down"))
+    emb = await op_log.fetch_embedding_for_op_log(col, "doc_abc")
+    assert emb is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_embedding_handles_none_embedding_entry():
+    """Chroma can return an embeddings list with None entries (defensive)."""
+    col = _FakeChromaCollection(embeddings_by_id={"doc_abc": None})
+    emb = await op_log.fetch_embedding_for_op_log(col, "doc_abc")
+    assert emb is None

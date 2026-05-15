@@ -15,7 +15,7 @@ from shared_memory.helpers import (
     require_session,
     utc_now_iso,
 )
-from shared_memory.op_log import emit_op_log_from_context
+from shared_memory.op_log import emit_op_log_from_context, fetch_embedding_for_op_log
 from shared_memory.state import active_sessions
 
 
@@ -230,8 +230,13 @@ async def memory_define_spec(
     # archive write (lines above) is NOT separately logged — peers
     # reconstruct version history from the sequence of spec.defined /
     # spec.updated ops in the same log.
+    #
+    # Phase 2 A-path: embedding is for the CURRENT spec row only. The history
+    # archive write (history_collection.add above) re-embeds on the peer side
+    # too — if vector skew there matters, §4.7 reconciliation backfills it.
     spec_op_type = "spec.defined" if action == "created" else "spec.updated"
     previous_version = existing["metadata"].get("spec_version") if existing else None
+    embedding = await fetch_embedding_for_op_log(collection, spec_doc_id)
     emit_op_log_from_context(
         db=get_mongo(),
         op_type=spec_op_type,
@@ -252,6 +257,7 @@ async def memory_define_spec(
             "json_schema": json_schema,
             "project": project,
             "updated_at": now,
+            "embedding": embedding,
         },
     )
 
