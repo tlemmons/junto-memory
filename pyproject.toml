@@ -42,6 +42,9 @@ dev = [
 [project.urls]
 Repository = "https://github.com/tlemmons/mcp-shared-memory"
 
+[project.scripts]
+junto-sync-engine = "shared_memory.sync_engine:cli_main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
