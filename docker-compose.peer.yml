@@ -1,0 +1,162 @@
+# docker-compose.peer.yml — Junto peer (LAN-local junto-memory) deployment recipe.
+#
+# This compose file brings up a *peer* server: a second junto-memory instance
+# that replicates from the *primary* (the canonical EC2/Tailscale server) via
+# the sync engine. See design:local-first-junto-v0-mvp §3 for the
+# primary/peer/remote-mode/federated terminology.
+#
+# Use this on:
+#   - An office Linux box on the same LAN as your federated agents.
+#   - A single-machine convenience deployment (standalone peer).
+# Do NOT use this for the primary — the primary uses docker-compose.yml.
+#
+# What's different from docker-compose.yml (primary):
+#   1. ORIGIN_SERVER_ID is REQUIRED (no default). Every peer must have a
+#      globally-unique origin string. The primary defaults to "central".
+#   2. New `sync-engine` service runs the peer-side replication daemon
+#      (pulls from primary, pushes own writes to primary).
+#   3. Volumes are NOT external. A fresh `docker compose -f docker-compose.peer.yml up -d`
+#      creates new chroma + mongo data dirs in this project's namespace.
+#      Primary recovered its volumes from a 2026-04-14 incident; peers start clean.
+#   4. Sync-engine credentials are required (JUNTO_SYNC_PRIMARY_KEY,
+#      JUNTO_SYNC_LOCAL_KEY) — admin-tier API keys on each side.
+#
+# Required environment (in .env or shell):
+#   ORIGIN_SERVER_ID            unique peer name, e.g. "peer-spg-office"
+#   JUNTO_SYNC_PRIMARY_URL      e.g. "https://primary.your-tailnet.ts.net/mcp"
+#   JUNTO_SYNC_PRIMARY_KEY      admin-tier key on the PRIMARY
+#   JUNTO_SYNC_LOCAL_KEY        admin-tier key on THIS peer
+#   MONGO_USER, MONGO_PASSWORD, MONGO_DB  (same shape as primary .env)
+#
+# See docs/peer-deployment.md for the full walkthrough.
+
+services:
+  chromadb:
+    # Same digest as the primary (docker-compose.yml). Embedding model
+    # determinism across primary↔peer requires bit-identical chroma binaries.
+    # See design:local-first-junto-v0-mvp §10 resolved-risks 2026-05-15.
+    image: chromadb/chroma:1.2.4@sha256:70c20dbcb64edbfad111a87149e7828348510246d1bb67c727f6aea926d3db7a
+    container_name: junto-peer-chromadb
+    volumes:
+      - chroma-data:/data
+    ports:
+      - "${CHROMA_PORT:-8001}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/8000'"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  mongodb:
+    # Same image + rs0 single-node replica set as the primary. Required for
+    # Mongo-backed op-log transactions (§4.3.b). Each peer generates its own
+    # keyfile (mode 400, owned by UID 999); sharing the primary's keyfile is
+    # not required — replica-set auth is local to each Mongo instance.
+    image: mongo:7.0
+    container_name: junto-peer-mongodb
+    command:
+      - "mongod"
+      - "--replSet"
+      - "rs0"
+      - "--keyFile"
+      - "/etc/mongo/keyfile"
+      - "--bind_ip_all"
+    volumes:
+      - mongo-data:/data/db
+      - ./secrets/mongo-keyfile:/etc/mongo/keyfile:ro
+    ports:
+      - "${MONGO_PORT:-27019}:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-mcp_orch}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-changeme}
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-mcp_orchestrator}
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--norc", "mongodb://localhost:27017/?directConnection=true", "--eval", "db.adminCommand('ping').ok"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  mcp-server:
+    build: .
+    container_name: junto-peer-mcp-server
+    depends_on:
+      chromadb:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - MONGO_HOST=mongodb
+      - MONGO_PORT=27017
+      # REQUIRED: every peer must declare its own unique origin id. This tags
+      # every op-log row this server writes; the primary uses ORIGIN_SERVER_ID
+      # to dedupe pushed ops by (origin, seq). No default — fail fast if unset.
+      - ORIGIN_SERVER_ID=${ORIGIN_SERVER_ID:?ORIGIN_SERVER_ID must be set in .env (e.g. peer-spg-office)}
+    ports:
+      - "${MCP_PORT:-8080}:8080"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  sync-engine:
+    # Peer-side replication daemon. Same `build: .` as mcp-server so the
+    # daemon re-uses installed dependencies + src/shared_memory/. Compose
+    # builds the context once and tags both services off it; we do NOT pin
+    # an `image:` here because the resulting tag depends on the compose
+    # project name (cwd basename) and that's brittle across hosts.
+    #
+    # Invoked via `python -m` because the Dockerfile does not `pip install .`,
+    # so the `junto-sync-engine` console script is not on PATH inside the
+    # container. PYTHONPATH=/app/src is set by the Dockerfile so the module
+    # path resolves.
+    build: .
+    container_name: junto-peer-sync-engine
+    depends_on:
+      mcp-server:
+        condition: service_healthy
+    environment:
+      # Primary endpoint (the canonical junto-memory you're replicating from).
+      # Typically over Tailscale: https://primary.your-tailnet.ts.net/mcp.
+      - JUNTO_SYNC_PRIMARY_URL=${JUNTO_SYNC_PRIMARY_URL:?JUNTO_SYNC_PRIMARY_URL must be set (e.g. https://primary.your-tailnet.ts.net/mcp)}
+      - JUNTO_SYNC_PRIMARY_KEY=${JUNTO_SYNC_PRIMARY_KEY:?JUNTO_SYNC_PRIMARY_KEY must be an admin-tier key on the primary}
+      # Local endpoint (this peer's own MCP server, on the docker network).
+      - JUNTO_SYNC_LOCAL_URL=http://mcp-server:8080/mcp
+      - JUNTO_SYNC_LOCAL_KEY=${JUNTO_SYNC_LOCAL_KEY:?JUNTO_SYNC_LOCAL_KEY must be an admin-tier key on this peer}
+      # Cursor file lives on a named volume so it survives container restarts.
+      # Default path inside container matches `~/.junto/sync-cursors.json`
+      # convention used outside docker.
+      - JUNTO_SYNC_CURSOR_PATH=/var/lib/junto/sync-cursors.json
+      # Cadence per design §5.2 MQTT-offline (v1 cadence; MQTT-eager triggers
+      # land in Phase 2.5).
+      - JUNTO_SYNC_PULL_INTERVAL=${JUNTO_SYNC_PULL_INTERVAL:-10.0}
+      - JUNTO_SYNC_PUSH_INTERVAL=${JUNTO_SYNC_PUSH_INTERVAL:-5.0}
+      - JUNTO_SYNC_PULL_JITTER=${JUNTO_SYNC_PULL_JITTER:-3.0}
+      - JUNTO_SYNC_PUSH_JITTER=${JUNTO_SYNC_PUSH_JITTER:-2.0}
+      - JUNTO_SYNC_LIMIT=${JUNTO_SYNC_LIMIT:-500}
+    volumes:
+      - sync-cursors:/var/lib/junto
+    command: ["python", "-m", "shared_memory.sync_engine"]
+    restart: unless-stopped
+
+volumes:
+  # Peer volumes are NOT external. A fresh `up -d` creates them in this
+  # project's namespace; cold-sync (§5.3) populates them from the primary.
+  # If you destroy them, the peer cold-syncs again on next start (15-30 min
+  # at MVP scale per §5.3).
+  chroma-data:
+  mongo-data:
+  sync-cursors:
