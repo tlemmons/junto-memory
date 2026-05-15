@@ -15,6 +15,8 @@ from shared_memory.audit import log_audit
 from shared_memory.clients import get_mongo
 from shared_memory.config import MESSAGE_CATEGORIES, MESSAGE_PRIORITIES, MESSAGE_STATUSES
 from shared_memory.helpers import normalize_project, parse_timestamp, require_session, utc_now
+from shared_memory.intent import get_current_intent_id
+from shared_memory.op_log import with_op_log
 from shared_memory.state import active_sessions, mcp_session_to_app
 from shared_memory.tools.projects import _fuzzy_match_agent, _is_project_admin
 
@@ -540,7 +542,24 @@ async def memory_send_message(
         "completed_at": None,
     }
 
-    db.messages.insert_one(msg_doc)
+    # Phase 1 #2 canary 13/13: §4.3.b transactional emission. The message
+    # insert and its op_log entry land atomically. If commit fails, neither
+    # write is observable to peers or readers — no half-state to reconcile.
+    # First user of with_op_log(); pattern reusable for other Mongo-backed
+    # mutations (autopilot events, agent heartbeats, locks).
+    with with_op_log(db) as (session, append):
+        db.messages.insert_one(msg_doc, session=session)
+        append(
+            op_type="message.sent",
+            actor={
+                "agent": session_info["claude_instance"],
+                "project": from_project,
+                "session_id": session_id,
+            },
+            ref={"collection": "messages", "doc_id": message_id},
+            payload=msg_doc,
+            intent_id=get_current_intent_id(),
+        )
 
     # ── Phase D2: outbound recency bump ──
     # If the sender asserts human_interacted=True (and is not itself user-tier

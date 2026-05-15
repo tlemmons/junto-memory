@@ -12,7 +12,9 @@ Two emission patterns per `design:local-first-junto-v0-mvp` v0.4.0 §4.3:
   any op-log gap is closed by the §4.7 reconciliation pass.
 - §4.3.b transactional emission via `with_op_log()` — Mongo-only, wraps
   source write + next_seq + op_log_append in a single rs0 transaction.
-  (Implemented when the first Mongo-backed canary lands.)
+  First user: memory_send_message (canary 13). On clean exit the caller's
+  Mongo write and the op_log append land atomically; on exception both
+  abort and the exception propagates.
 
 See spec §4.1 (taxonomy), §4.2 (schema), §4.5 (per-server seq + origin id),
 §4.6 (intent-id reconciliation), §4.7 (reconciliation pass).
@@ -20,6 +22,7 @@ See spec §4.1 (taxonomy), §4.2 (schema), §4.5 (per-server seq + origin id),
 
 import logging
 import uuid
+from contextlib import contextmanager
 
 from pymongo import ASCENDING, ReturnDocument
 
@@ -230,3 +233,76 @@ def emit_op_log_from_context(
         payload=payload,
         intent_id=get_current_intent_id(),
     )
+
+
+@contextmanager
+def with_op_log(db):
+    """Transactional op-log emission (§4.3.b, Mongo-backed mutations).
+
+    Context manager that opens a Mongo session + transaction and yields
+    `(session, append)`. The caller does its mutation write with
+    `session=session` and calls `append(...)` one or more times to record
+    op-log entries inside the same transaction.
+
+    Usage::
+
+        with with_op_log(db) as (session, append):
+            db.messages.insert_one(msg_doc, session=session)
+            append(
+                op_type="message.sent",
+                actor={"agent": ..., "project": ..., "session_id": ...},
+                ref={"collection": "messages", "doc_id": message_id},
+                payload={...},
+                intent_id=get_current_intent_id(),
+            )
+
+    Semantics:
+    - Clean exit: transaction commits — the caller's write and all
+      appended op_log rows land atomically.
+    - Exception inside the `with` block (including from `append`):
+      transaction aborts, exception propagates. No partial state lands
+      on either the source collection or op_log.
+
+    Args:
+        db: Mongo database handle (from `get_mongo()`). Must not be None;
+            callers should check for Mongo availability upstream and fall
+            back to a non-transactional path or error if Mongo is down.
+
+    Raises:
+        OpLogError: from `append` if an invalid op_type is supplied, or
+            from this function if `db` is None.
+        Any exception from the caller body or Mongo: propagates after the
+            transaction aborts.
+
+    Note:
+        Requires Mongo configured as a replica set (rs0). Single-node
+        installs without `--replSet` will raise OperationFailure from
+        PyMongo at `start_transaction`. See clients.py for the URI shape.
+    """
+    if db is None:
+        raise OpLogError("with_op_log requires a live Mongo db handle")
+
+    with db.client.start_session() as session:
+        with session.start_transaction():
+            def append(op_type, actor, ref, payload, intent_id=None):
+                if not is_valid_op_type(op_type):
+                    raise OpLogError(
+                        f"with_op_log.append rejected invalid op_type: {op_type!r}"
+                    )
+                seq = next_seq(db, ORIGIN_SERVER_ID, session=session)
+                entry = {
+                    "_id": f"op_{uuid.uuid4().hex}",
+                    "seq": seq,
+                    "ts": utc_now_iso(),
+                    "origin": ORIGIN_SERVER_ID,
+                    "intent_id": intent_id,
+                    "actor": actor,
+                    "op_type": op_type,
+                    "ref": ref,
+                    "payload": payload,
+                    "schema_version": OPLOG_SCHEMA_VERSION,
+                }
+                db[OPLOG_COLLECTION].insert_one(entry, session=session)
+                return entry
+
+            yield session, append
