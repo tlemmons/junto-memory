@@ -7,7 +7,7 @@ from mcp.server.fastmcp import Context
 
 from shared_memory.app import mcp
 from shared_memory.clients import get_chroma, get_mongo
-from shared_memory.config import MAX_CONTENT_SIZE, PROJECT_PREFIX
+from shared_memory.config import MAX_CONTENT_SIZE, ORIGIN_SERVER_ID, PROJECT_PREFIX
 from shared_memory.helpers import (
     get_project_collection,
     get_shared_collection,
@@ -15,7 +15,11 @@ from shared_memory.helpers import (
     require_session,
     utc_now_iso,
 )
-from shared_memory.op_log import emit_op_log_from_context, fetch_embedding_for_op_log
+from shared_memory.op_log import (
+    claim_or_verify_state_owner,
+    emit_op_log_from_context,
+    fetch_embedding_for_op_log,
+)
 from shared_memory.state import active_sessions
 
 
@@ -118,6 +122,33 @@ async def memory_define_spec(
             }
     except Exception:
         pass
+
+    # §7.4 — state-spec multi-instance detection. Every state-spec write
+    # registers (project, owner) → ORIGIN_SERVER_ID on first write; later
+    # writes from a different origin (i.e., a peer pushed a state spec
+    # claiming the same identity earlier) are refused with a critical alert.
+    # See design:local-first-junto-v0-mvp v0.5.0 §7.4 + op_log.claim_or_verify_state_owner.
+    if spec_type == "agent_state" and project:
+        mongo_db_for_state = get_mongo()
+        if mongo_db_for_state is not None:
+            outcome, registered = claim_or_verify_state_owner(
+                mongo_db_for_state, project, owner, ORIGIN_SERVER_ID
+            )
+            if outcome == "mismatch":
+                return json.dumps({
+                    "error": "State-spec multi-instance detected (§7.4)",
+                    "spec_name": name,
+                    "project": project,
+                    "agent": owner,
+                    "this_origin": ORIGIN_SERVER_ID,
+                    "registered_origin": registered,
+                    "suggestion": (
+                        "Another origin has previously claimed this (project, agent) "
+                        "state spec. Refusing the local write to prevent silent "
+                        "divergence. If this is a recovery scenario, manually "
+                        "reconcile the agent_state_owner collection first."
+                    ),
+                })
 
     # Version history collection (shared for all specs)
     history_collection = await get_shared_collection(chroma, "context")
@@ -237,6 +268,24 @@ async def memory_define_spec(
     spec_op_type = "spec.defined" if action == "created" else "spec.updated"
     previous_version = existing["metadata"].get("spec_version") if existing else None
     embedding = await fetch_embedding_for_op_log(collection, spec_doc_id)
+    spec_payload = {
+        "spec_name": name,
+        "version": version,
+        "previous_version": previous_version,
+        "owner": owner,
+        "spec_type": spec_type,
+        "content": content,
+        "tags": tags,
+        "json_schema": json_schema,
+        "project": project,
+        "updated_at": now,
+        "embedding": embedding,
+    }
+    # §7.4 — state-spec ops carry origin_server_id so peers can enforce the
+    # multi-instance check on receive. Only state specs need this field today
+    # (see design:local-first-junto-v0-mvp v0.5.0 §7.4).
+    if spec_type == "agent_state":
+        spec_payload["origin_server_id"] = ORIGIN_SERVER_ID
     emit_op_log_from_context(
         db=get_mongo(),
         op_type=spec_op_type,
@@ -246,19 +295,7 @@ async def memory_define_spec(
             "session_id": session_id,
         },
         ref={"collection": chroma_collection_name, "doc_id": spec_doc_id},
-        payload={
-            "spec_name": name,
-            "version": version,
-            "previous_version": previous_version,
-            "owner": owner,
-            "spec_type": spec_type,
-            "content": content,
-            "tags": tags,
-            "json_schema": json_schema,
-            "project": project,
-            "updated_at": now,
-            "embedding": embedding,
-        },
+        payload=spec_payload,
     )
 
     # Audit log for spec changes

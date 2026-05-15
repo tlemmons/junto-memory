@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 OPLOG_COLLECTION = "op_log"
 OPLOG_META_COLLECTION = "op_log_meta"
+AGENT_STATE_OWNER_COLLECTION = "agent_state_owner"
 
 OPLOG_SCHEMA_VERSION = 1
 
@@ -112,6 +113,17 @@ def ensure_op_log_indexes(db) -> None:
     # The meta collection is keyed by origin (_id is the origin string),
     # so the default unique _id index is the only index needed.
     db[OPLOG_META_COLLECTION]
+
+    # §7.4 agent_state_owner — tracks which origin owns each (project, agent)
+    # state spec. First-ever state-spec write for a (project, agent) registers
+    # the writing origin as owner; subsequent writes from a different origin
+    # are rejected. Cheap to add now; hard to retrofit after corruption.
+    owner = db[AGENT_STATE_OWNER_COLLECTION]
+    owner.create_index(
+        [("project", ASCENDING), ("agent", ASCENDING)],
+        unique=True,
+        name="project_agent_unique",
+    )
 
 
 def next_seq(db, origin: str, session=None) -> int:
@@ -284,6 +296,64 @@ async def fetch_embedding_for_op_log(collection, doc_id):
     if hasattr(emb, "tolist"):
         return emb.tolist()
     return list(emb)
+
+
+def claim_or_verify_state_owner(
+    db, project: str, agent: str, origin: str, session=None
+) -> tuple[str, str | None]:
+    """§7.4 — claim a (project, agent) state-spec slot or verify existing claim.
+
+    Two-purpose helper:
+    - **Emit side** (origin = `ORIGIN_SERVER_ID`): call before writing a state
+      spec locally. On `mismatch`, the caller MUST refuse the write — the
+      local origin has been displaced by a peer claiming the same identity.
+    - **Receive side** (origin = inbound op's `payload.origin_server_id`):
+      call from the materializer when applying `spec.defined`/`spec.updated`
+      with `spec_type == "agent_state"`. On `mismatch`, the materializer
+      MUST reject the op (`rejected_origin_owner`).
+
+    Returns:
+        ("registered", None)               — this call created the entry.
+        ("matches", existing_origin)       — entry already matches `origin`.
+        ("mismatch", existing_origin)      — entry exists with a different origin.
+
+    Idempotent: re-calling with the same (project, agent, origin) yields
+    `matches` after the first call.
+    """
+    if db is None:
+        raise OpLogError("claim_or_verify_state_owner requires a live Mongo db handle")
+    if not project or not agent or not origin:
+        raise OpLogError(
+            "claim_or_verify_state_owner requires non-empty project, agent, origin"
+        )
+
+    coll = db[AGENT_STATE_OWNER_COLLECTION]
+    existing = coll.find_one({"project": project, "agent": agent}, session=session)
+    if existing is None:
+        try:
+            coll.insert_one(
+                {
+                    "project": project,
+                    "agent": agent,
+                    "registered_origin": origin,
+                    "registered_at": utc_now_iso(),
+                },
+                session=session,
+            )
+            return ("registered", None)
+        except Exception:
+            # Race: another writer claimed the slot between find and insert.
+            # Re-read and treat as match-or-mismatch.
+            existing = coll.find_one(
+                {"project": project, "agent": agent}, session=session
+            )
+            if existing is None:
+                raise
+
+    registered = existing.get("registered_origin")
+    if registered == origin:
+        return ("matches", registered)
+    return ("mismatch", registered)
 
 
 @contextmanager

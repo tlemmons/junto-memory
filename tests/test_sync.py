@@ -400,29 +400,7 @@ def test_pull_tool_rejects_invalid_limit():
 
 
 # ───────────────────────────────────────────────────────────────────
-# memory_sync_push: stub behavior
+# memory_sync_push: covered in tests/test_sync_push.py against the
+# materializer. The stub-era test that lived here was retired when the
+# materializer shipped (commit landing this).
 # ───────────────────────────────────────────────────────────────────
-
-
-def test_push_returns_not_implemented_stub():
-    from shared_memory import state
-
-    state.active_sessions["push_test"] = {
-        "claude_instance": "memory",
-        "project": "junto",
-        "role": "admin",
-    }
-    try:
-        raw = asyncio.run(
-            sync_tool.memory_sync_push(
-                session_id="push_test",
-                ops=[{"_id": "op_dummy", "seq": 1}],
-            )
-        )
-    finally:
-        del state.active_sessions["push_test"]
-
-    parsed = json.loads(raw)
-    assert parsed["error"] == "not_implemented"
-    assert parsed["endpoint"] == "memory_sync_push"
-    assert parsed["ops_received"] == 1
