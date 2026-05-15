@@ -231,26 +231,76 @@ def _validate_shape(op: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _dedupe_seq(db, origin: str, seq: int) -> bool:
-    """True if (origin, seq) already exists in our op_log."""
-    return db[OPLOG_COLLECTION].count_documents({"origin": origin, "seq": seq}) > 0
+def _preload_dedupe_state(
+    db, ops: List[Dict[str, Any]]
+) -> tuple[set, set, Dict[str, int]]:
+    """One-pass batch dedupe preload.
 
+    For an incoming batch of N ops, the old per-op `count_documents` path
+    cost 2N Mongo round-trips just on dedupe (one per op for (origin, seq),
+    one per op for intent_id). Cold sync of 80k rows × ~5ms/query ≈ 13 min
+    of pure dedupe overhead.
 
-def _dedupe_intent(db, intent_id: Optional[str]) -> bool:
-    """True if intent_id is non-null AND already present in our op_log."""
-    if not intent_id:
-        return False
-    return db[OPLOG_COLLECTION].count_documents({"intent_id": intent_id}) > 0
+    This pre-loads:
+    - `seq_hits`: set of `(origin, seq)` tuples already present in our
+      op_log that match any incoming op. One $in query per distinct
+      origin in the batch — uses the (origin, seq) unique compound index.
+    - `intent_hits`: set of `intent_id` strings already present, from a
+      single $in query over the sparse intent_id index.
+    - `max_seq_by_origin`: largest local seq per incoming origin, used
+      for monotonicity. Mutated in-place as ops apply so later ops in
+      the same batch see the freshly-applied seq as the new ceiling.
 
+    Race protection is unchanged: the op_log `(origin, seq)` unique index
+    still catches concurrent pushes that committed the same row between
+    pre-load and apply (the apply path's `insert_one` catches the
+    DuplicateKeyError and routes the op to `deduped_seq`).
+    """
+    seq_hits: set = set()
+    intent_hits: set = set()
+    max_seq_by_origin: Dict[str, int] = {}
 
-def _max_seq_for_origin(db, origin: str) -> int:
-    """Largest seq we've seen from `origin`, or 0 if we've never seen it."""
-    rows = list(
-        db[OPLOG_COLLECTION].find({"origin": origin}).sort([("seq", -1)]).limit(1)
-    )
-    if not rows:
-        return 0
-    return int(rows[0]["seq"])
+    if not ops:
+        return seq_hits, intent_hits, max_seq_by_origin
+
+    # Group incoming (origin, seq) by origin so the $in queries each
+    # land within a single origin's index slice.
+    by_origin: Dict[str, list] = {}
+    intent_ids: set = set()
+    origins: set = set()
+    for op in ops:
+        origin = op.get("origin")
+        seq = op.get("seq")
+        if origin and isinstance(seq, int):
+            by_origin.setdefault(origin, []).append(seq)
+            origins.add(origin)
+        intent = op.get("intent_id")
+        if intent:
+            intent_ids.add(intent)
+
+    op_log_coll = db[OPLOG_COLLECTION]
+
+    for origin, seqs in by_origin.items():
+        for row in op_log_coll.find(
+            {"origin": origin, "seq": {"$in": seqs}},
+            {"origin": 1, "seq": 1, "_id": 0},
+        ):
+            seq_hits.add((row["origin"], row["seq"]))
+
+    if intent_ids:
+        for row in op_log_coll.find(
+            {"intent_id": {"$in": list(intent_ids)}},
+            {"intent_id": 1, "_id": 0},
+        ):
+            intent_hits.add(row["intent_id"])
+
+    for origin in origins:
+        rows = list(
+            op_log_coll.find({"origin": origin}).sort([("seq", -1)]).limit(1)
+        )
+        max_seq_by_origin[origin] = int(rows[0]["seq"]) if rows else 0
+
+    return seq_hits, intent_hits, max_seq_by_origin
 
 
 async def _push_ops(
@@ -275,6 +325,10 @@ async def _push_ops(
     deduped_count = 0
     halted = False
     halt_reason: Optional[str] = None
+
+    # One-pass batch preload. Replaces 2N Mongo round-trips with a small
+    # constant number of $in queries — see _preload_dedupe_state.
+    seq_hits, intent_hits, max_seq_by_origin = _preload_dedupe_state(db, ops)
 
     for op in ops:
         if halted:
@@ -332,8 +386,8 @@ async def _push_ops(
             rejected_count += 1
             continue
 
-        # ── Dedupe (origin, seq) ──
-        if _dedupe_seq(db, op["origin"], op["seq"]):
+        # ── Dedupe (origin, seq) — set lookup, O(1) ──
+        if (op["origin"], op["seq"]) in seq_hits:
             results.append({
                 "op_id": op["_id"],
                 "disposition": "deduped_seq",
@@ -341,8 +395,8 @@ async def _push_ops(
             deduped_count += 1
             continue
 
-        # ── Dedupe intent_id (§4.6) ──
-        if _dedupe_intent(db, op.get("intent_id")):
+        # ── Dedupe intent_id (§4.6) — set lookup, O(1) ──
+        if op.get("intent_id") and op["intent_id"] in intent_hits:
             results.append({
                 "op_id": op["_id"],
                 "disposition": "deduped_intent",
@@ -351,7 +405,10 @@ async def _push_ops(
             continue
 
         # ── Monotonicity (§4.3.a sequence-skip tolerance) ──
-        current_max = _max_seq_for_origin(db, op["origin"])
+        # max_seq_by_origin is updated in-batch after each successful
+        # apply so consecutive ops from the same origin see the correct
+        # ceiling without a round-trip.
+        current_max = max_seq_by_origin.get(op["origin"], 0)
         if op["seq"] <= current_max:
             # (origin, seq) dedupe already covered the exact-replay case;
             # this is a smaller-seq op_id we've never seen, which means
@@ -438,6 +495,14 @@ async def _push_ops(
             record.setdefault("flags", {}).update(apply_result["flags"])
         results.append(record)
         applied_count += 1
+
+        # Update in-batch dedupe state so later ops in this same batch
+        # see this row as already-applied (avoids the read-after-write
+        # race that would otherwise need another round-trip to detect).
+        seq_hits.add((op["origin"], op["seq"]))
+        if op.get("intent_id"):
+            intent_hits.add(op["intent_id"])
+        max_seq_by_origin[op["origin"]] = op["seq"]
 
     return {
         "results": results,

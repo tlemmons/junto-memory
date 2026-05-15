@@ -62,8 +62,16 @@ class _FakeMongoCollection:
                 return dict(d)
         return None
 
-    def find(self, query: Optional[Dict[str, Any]] = None, session=None):
+    def find(
+        self,
+        query: Optional[Dict[str, Any]] = None,
+        projection: Optional[Dict[str, Any]] = None,
+        session=None,
+    ):
         rows = [dict(d) for d in self._docs if _match(d, query or {})]
+        # The fake ignores projection (returns full docs) — callers that
+        # depend on field-narrowing for correctness shouldn't; the real
+        # driver respects it for wire-size, not for semantics.
         return _FakeCursor(rows)
 
     def update_one(
@@ -665,6 +673,27 @@ def test_push_intent_id_null_does_not_dedupe():
     db = _FakeMongoDB()
     chroma = _FakeChroma()
     ops = [_learning_op(1, intent_id=None), _learning_op(2, intent_id=None)]
+    result = _push(db, chroma, ops)
+    assert _dispositions(result) == ["applied", "applied"]
+
+
+def test_push_batch_dedupe_in_same_call():
+    """Duplicate ops within a single batch dedupe against the first."""
+    db = _FakeMongoDB()
+    chroma = _FakeChroma()
+    op_a = _learning_op(1)
+    op_b = _learning_op(1, op_id="op_dup")  # same (origin, seq), different _id
+    op_c = _learning_op(2)
+    result = _push(db, chroma, [op_a, op_b, op_c])
+    # First applies, second is caught by in-batch dedupe state, third applies.
+    assert _dispositions(result) == ["applied", "deduped_seq", "applied"]
+
+
+def test_push_batch_consecutive_ops_share_monotonicity_state():
+    """Two ops in the same batch from the same origin both pass monotonicity."""
+    db = _FakeMongoDB()
+    chroma = _FakeChroma()
+    ops = [_learning_op(1), _learning_op(2)]  # consecutive seqs, same batch
     result = _push(db, chroma, ops)
     assert _dispositions(result) == ["applied", "applied"]
 
