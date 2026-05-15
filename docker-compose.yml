@@ -1,13 +1,22 @@
 services:
   chromadb:
-    # Chroma 1.x (Rust rewrite). The image ID we use locally is sha256:501769453712...
-    # which corresponds to the public tag chromadb/chroma:1.2.4 (released 2025-12-12).
-    # Adopters get the same bits via Docker Hub.
+    # Chroma 1.x (Rust rewrite). Public tag chromadb/chroma:1.2.4 (released
+    # 2025-12-12). The local Image ID is sha256:501769453712...; the registry
+    # manifest digest is sha256:70c20dbcb64e... — that's the digest pinned
+    # below so Docker Hub cannot silently re-tag 1.2.4 to a different image.
+    #
+    # The model (all-MiniLM-L6-v2) is statically baked into the 487MB chroma
+    # binary inside this image — no HuggingFace download at runtime. Empirical
+    # determinism verified 2026-05-15: 10 diverse texts × 384 dims = 3840/3840
+    # floats bit-equal between two fresh instances of this digest on x86_64.
+    # See tests/test_chroma_determinism.py — that test pins the (text, vector)
+    # baseline; if you upgrade this image, regenerate the test baseline AND
+    # be aware all stored embeddings must be considered cross-version-incompatible.
     #
     # Do NOT downgrade to 0.6.x — different SQLite schema, can't read 1.x data
     # (verified 2026-04-17 during migration: 0 collections visible after downgrade).
     # When upgrading to a newer 1.x point release, test on a volume COPY first.
-    image: chromadb/chroma:1.2.4
+    image: chromadb/chroma:1.2.4@sha256:70c20dbcb64edbfad111a87149e7828348510246d1bb67c727f6aea926d3db7a
     container_name: mcp-chromadb
     # Chroma 1.x persists to /data by default. The previous mount at
     # /chroma/chroma was silently ignored, causing the Apr 2026 data loss
