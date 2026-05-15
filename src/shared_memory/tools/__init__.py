@@ -23,4 +23,5 @@ from shared_memory.tools import (  # noqa: F401
     sessions,
     specs,
     storage,
+    sync,
 )

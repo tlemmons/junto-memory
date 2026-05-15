@@ -50,6 +50,10 @@ PERMISSIONS: Dict[str, List[str]] = {
     "guidelines":       ["admin", "owner"],
     "admin":            ["admin", "owner"],
     "admin.write":      ["owner"],
+    # Sync endpoints (memory_sync_pull / memory_sync_push) are server-to-
+    # server replication primitives — LAN-local junto-memory instances pull
+    # from central. Operator-tier credentials only.
+    "sync":             ["admin", "owner"],
 }
 
 

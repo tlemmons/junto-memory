@@ -2,13 +2,13 @@
 
 
 def test_all_tools_register():
-    """All 48 tools are registered with the MCP server."""
+    """All 50 tools are registered with the MCP server."""
     from shared_memory.app import create_app
 
     mcp = create_app()
     tools = mcp._tool_manager._tools
 
-    assert len(tools) == 48, f"Expected 48 tools, got {len(tools)}: {sorted(tools.keys())}"
+    assert len(tools) == 50, f"Expected 50 tools, got {len(tools)}: {sorted(tools.keys())}"
 
 
 def test_expected_tools_present():
@@ -37,6 +37,9 @@ def test_expected_tools_present():
         "memory_autopilot_count",
         # Phase 0 local-first band-aid (no-session diagnostic)
         "memory_health",
+        # Phase 2 replication endpoints (sync_push is a stub until the
+        # next session ships materialization machinery)
+        "memory_sync_pull", "memory_sync_push",
     }
 
     missing = expected - tools
