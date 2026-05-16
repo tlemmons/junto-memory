@@ -742,6 +742,45 @@ async def _run_supervisor(
     return sup_stats
 
 
+# Patterns matched by the supervisor's asyncio exception handler. These
+# come from MCP SDK / anyio's async-generator cleanup when an inner task
+# dies inside a poisoned cancel scope — they are cosmetic (the supervisor
+# already handled the underlying failure), not actionable.
+_QUIET_EXCEPTION_MESSAGES = (
+    "Task exception was never retrieved",
+    "an error occurred during closing of asynchronous generator",
+)
+_QUIET_EXCEPTION_TYPES = (
+    "Attempted to exit cancel scope in a different task than it was entered in",
+)
+
+
+def _supervisor_exception_handler(loop, context):
+    """asyncio exception handler that suppresses cosmetic cancel-scope
+    cleanup noise from dead inner tasks while letting everything else
+    through to the default handler.
+
+    The MCP SDK's `streamable_http_client` uses anyio task groups whose
+    cancel scopes get garbage-collected after an inner task dies. The GC
+    path complains about cross-task scope exits and never-retrieved task
+    exceptions even though the supervisor has already caught and handled
+    the originating failure.
+    """
+    msg = context.get("message", "")
+    exc = context.get("exception")
+    exc_msg = str(exc) if exc is not None else ""
+    if any(p in msg for p in _QUIET_EXCEPTION_MESSAGES):
+        return
+    if any(p in exc_msg for p in _QUIET_EXCEPTION_TYPES):
+        return
+    if isinstance(exc, asyncio.CancelledError):
+        # An inner task got cancelled and we already handled it on the
+        # supervisor side. Default handler would print a stack trace
+        # per dead task; this is just noise.
+        return
+    loop.default_exception_handler(context)
+
+
 async def _amain(args: argparse.Namespace) -> int:
     """CLI entry: wire signal handlers and call _run_supervisor."""
     if not args.primary_url:
@@ -751,6 +790,7 @@ async def _amain(args: argparse.Namespace) -> int:
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+    loop.set_exception_handler(_supervisor_exception_handler)
     for sig_name in ("SIGINT", "SIGTERM"):
         try:
             loop.add_signal_handler(

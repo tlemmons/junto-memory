@@ -330,6 +330,114 @@ The Tailscale-drop acceptance test is the §13 "Phase 2 done" gate. Once it
 passes against a deployed peer with active federated agents, Phase 2 is
 complete and the deployment is production-ready for the originating LAN.
 
+## 14. Running the sync engine outside docker
+
+The docker-compose recipe above bundles the engine with mongo + chroma +
+mcp-server. For deployments where docker isn't appropriate (single-user
+laptop, embedded device, host where the rest of the stack is managed by
+the OS package manager), the engine can run as a standalone Python
+process against an already-running junto-memory mcp-server.
+
+The supervisor introduced in commit `0e3f2df` makes the engine
+self-healing across transport-loss events without depending on docker's
+`restart: unless-stopped` policy. Native deployments inherit the same
+in-process recovery; the only added concern is the surrounding process
+manager.
+
+### 14.1 Direct invocation (development / one-off)
+
+```bash
+# From the junto-memory checkout root.
+JUNTO_SYNC_PRIMARY_URL=http://primary.tailnet.ts.net:8080/mcp \
+JUNTO_SYNC_PRIMARY_KEY=smk_...      # admin-tier on primary \
+JUNTO_SYNC_LOCAL_URL=http://localhost:8080/mcp \
+JUNTO_SYNC_LOCAL_KEY=smk_...        # admin-tier on this peer \
+JUNTO_SYNC_CURSOR_PATH=~/.junto/sync-cursors.json \
+python -m shared_memory.sync_engine
+```
+
+All env vars from the module docstring in
+`src/shared_memory/sync_engine.py` are honored. `--help` prints the
+full CLI.
+
+The engine handles SIGINT/SIGTERM cleanly — it sets the supervisor's
+`stop_event`, finishes the current iteration, and exits. No risk of
+half-applied batches; everything atomic via the op-log transaction
+boundary on the receiving side.
+
+### 14.2 systemd unit (production native)
+
+A minimal systemd unit at `/etc/systemd/system/junto-sync-engine.service`:
+
+```ini
+[Unit]
+Description=Junto peer-side sync engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=junto
+Group=junto
+WorkingDirectory=/opt/junto-memory
+EnvironmentFile=/etc/junto/sync-engine.env
+ExecStart=/opt/junto-memory/.venv/bin/python -m shared_memory.sync_engine
+Restart=on-failure
+RestartSec=5
+# Defense-in-depth only. The engine's in-process supervisor catches
+# transport-loss inline (see src/shared_memory/sync_engine.py
+# _run_supervisor); this Restart= only kicks in if the engine itself
+# crashes hard (OOM, segfault, unhandled BaseException above the
+# supervisor). Don't use Restart=always — a config-error crash should
+# stay down so you notice.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`/etc/junto/sync-engine.env` (mode 0640, owned by junto:junto):
+
+```
+JUNTO_SYNC_PRIMARY_URL=http://primary.tailnet.ts.net:8080/mcp
+JUNTO_SYNC_PRIMARY_KEY=smk_...
+JUNTO_SYNC_LOCAL_URL=http://localhost:8080/mcp
+JUNTO_SYNC_LOCAL_KEY=smk_...
+JUNTO_SYNC_CURSOR_PATH=/var/lib/junto/sync-cursors.json
+```
+
+Install + start:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now junto-sync-engine
+sudo journalctl -u junto-sync-engine -f
+```
+
+### 14.3 Why `Restart=on-failure` and not `always`
+
+The in-process supervisor already retries every `CancelledError` /
+`_TransportError` with bounded backoff (5s → 60s capped). Docker's
+`restart: unless-stopped` was the *only* recovery mechanism before
+the supervisor landed, but with the fix in place it's now a backstop
+for catastrophic crashes (true segfault, OOM kill, panic above the
+asyncio loop). `Restart=on-failure` matches that semantic: recover from
+crashes, but stop if the engine exits cleanly (e.g., systemctl stop)
+or hits a config error that returns non-zero from main.
+
+If you want absolute uptime — auto-restart even on clean exit — use
+`Restart=always`, but be aware that a misconfiguration (bad
+`JUNTO_SYNC_PRIMARY_URL`, missing key) will then loop silently.
+
+### 14.4 Cursor file location
+
+The cursor file (default `~/.junto/sync-cursors.json` for direct
+invocation, `/var/lib/junto/sync-cursors.json` for systemd-managed)
+is the only durable state the engine carries. Survives across
+restarts; safe to delete only if you intend to cold-sync from scratch
+(the receiving side is idempotent via op-log `(origin, seq)` dedupe).
+
 ---
 
 Questions? File against `junto-memory` on GitHub or `memory_send_message
