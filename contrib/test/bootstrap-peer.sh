@@ -19,10 +19,14 @@
 #   4. Writes initial .env with LOCAL_KEY=placeholder (sync-engine will not
 #      be started yet).
 #   5. Brings up chromadb + mongodb + mcp-server.
-#   6. Waits for /health.
-#   7. Issues this peer's admin API key (JUNTO_SYNC_LOCAL_KEY).
-#   8. Rewrites .env with the real LOCAL_KEY and starts sync-engine.
-#   9. Tails sync-engine logs briefly so you see pull/push loop start.
+#   6. Runs rs.initiate() on mongodb if rs0 isn't yet initialized. Required
+#      on fresh installs: the mongo:7.0 image's entrypoint does NOT auto-
+#      initiate the replica set, and writes will fail with "No primary
+#      exists" until this runs (even though docker's healthcheck passes).
+#   7. Waits for /health.
+#   8. Issues this peer's admin API key (JUNTO_SYNC_LOCAL_KEY).
+#   9. Rewrites .env with the real LOCAL_KEY and starts sync-engine.
+#  10. Tails sync-engine logs briefly so you see pull/push loop start.
 
 set -euo pipefail
 
@@ -35,7 +39,7 @@ ORIGIN_SERVER_ID="${ORIGIN_SERVER_ID:-peer-xavier-1}"
 log() { printf '[bootstrap-peer] %s\n' "$*" >&2; }
 
 step1_prereqs() {
-  log "step 1/9: checking prerequisites"
+  log "step 1/10: checking prerequisites"
   command -v docker >/dev/null || { log "docker not found"; exit 1; }
   docker compose version >/dev/null || { log "docker compose v2 not found"; exit 1; }
   command -v git >/dev/null || { log "git not found"; exit 1; }
@@ -47,7 +51,7 @@ step1_prereqs() {
 }
 
 step2_primary_reachable() {
-  log "step 2/9: verifying primary URL reachable"
+  log "step 2/10: verifying primary URL reachable"
   local health_url="${JUNTO_SYNC_PRIMARY_URL%/mcp}/health"
   if curl -fsS --max-time 10 "$health_url" >/dev/null 2>&1; then
     log "  primary /health OK at $health_url"
@@ -58,7 +62,7 @@ step2_primary_reachable() {
 }
 
 step3_keyfile() {
-  log "step 3/9: ensuring Mongo keyfile"
+  log "step 3/10: ensuring Mongo keyfile"
   mkdir -p "$REPO_DIR/secrets"
   if [[ ! -s "$REPO_DIR/secrets/mongo-keyfile" ]]; then
     openssl rand -base64 756 > "$REPO_DIR/secrets/mongo-keyfile"
@@ -71,7 +75,7 @@ step3_keyfile() {
 }
 
 step4_env_initial() {
-  log "step 4/9: writing initial .env (LOCAL_KEY=placeholder)"
+  log "step 4/10: writing initial .env (LOCAL_KEY=placeholder)"
   if [[ -f "$REPO_DIR/.env" ]]; then
     log "  .env exists — leaving untouched (delete to re-generate)"
     return
@@ -96,13 +100,59 @@ EOF
 }
 
 step5_compose_up() {
-  log "step 5/9: bringing up chromadb + mongodb + mcp-server"
+  log "step 5/10: bringing up chromadb + mongodb + mcp-server"
   cd "$REPO_DIR"
   docker compose -f docker-compose.peer.yml up -d --build chromadb mongodb mcp-server
 }
 
-step6_wait_health() {
-  log "step 6/9: waiting for /health"
+# Idempotently initiate the rs0 single-node replica set. See identical step
+# in bootstrap-primary.sh for the full why — the short version: mongo:7.0's
+# entrypoint doesn't call rs.initiate(), docker's healthcheck passes anyway
+# (it uses directConnection=true), but writes fail with "No primary exists".
+step6_initiate_rs() {
+  log "step 6/10: ensuring rs0 replica set is initiated"
+  # shellcheck disable=SC1091
+  set -a; source "$REPO_DIR/.env"; set +a
+  local primary_host="${MONGO_RS_HOST:-mongodb}"
+  local n=0
+  until docker exec junto-peer-mongodb mongosh --quiet --norc \
+    "mongodb://${MONGO_USER}:${MONGO_PASSWORD}@localhost:27017/?directConnection=true&authSource=admin" \
+    --eval "
+      try {
+        const s = rs.status();
+        if (s.ok && s.members && s.members.some(m => m.stateStr === 'PRIMARY')) {
+          print('rs0 already initialized with primary');
+          quit(0);
+        }
+      } catch (e) {
+        if (e.codeName !== 'NotYetInitialized' && e.code !== 94) {
+          print('rs.status failed: ' + e.message);
+          quit(1);
+        }
+        const r = rs.initiate({_id: 'rs0', members: [{_id: 0, host: '${primary_host}:27017'}]});
+        if (!r.ok) { print('rs.initiate failed: ' + JSON.stringify(r)); quit(1); }
+        print('rs0 initiated');
+      }
+      for (let i = 0; i < 30; i++) {
+        try {
+          if (db.hello().isWritablePrimary) { print('primary elected after ' + i + 's'); quit(0); }
+        } catch (e) {}
+        sleep(1000);
+      }
+      print('primary never elected'); quit(1);
+    " >/dev/null 2>&1; do
+    n=$((n+1))
+    if (( n > 12 )); then
+      log "  rs.initiate never succeeded — check 'docker logs junto-peer-mongodb'"
+      exit 1
+    fi
+    sleep 5
+  done
+  log "  rs0 ready"
+}
+
+step7_wait_health() {
+  log "step 7/10: waiting for /health"
   local n=0
   until curl -fsS http://localhost:8080/health >/dev/null 2>&1; do
     n=$((n+1))
@@ -115,8 +165,19 @@ step6_wait_health() {
   log "  /health OK after ~$((n*2))s"
 }
 
-step7_issue_local_key() {
-  log "step 7/9: issuing this peer's admin API key"
+step8_issue_local_key() {
+  log "step 8/10: issuing this peer's admin API key"
+  # Idempotency guard: if .env already has a non-placeholder LOCAL_KEY, a
+  # prior run already minted one. The raw key can't be recovered from Mongo,
+  # so creating a same-named replacement would just hit api_keys.name's
+  # unique index. Reuse whatever's already in .env.
+  local current_key
+  current_key="$(awk -F= '/^JUNTO_SYNC_LOCAL_KEY=/{sub(/^JUNTO_SYNC_LOCAL_KEY=/,""); print; exit}' "$REPO_DIR/.env" 2>/dev/null)"
+  if [[ -n "$current_key" && "$current_key" != "placeholder" ]]; then
+    log "  .env already has a real JUNTO_SYNC_LOCAL_KEY — leaving untouched."
+    log "  Delete .env (and revoke the old key in mongo) to regenerate."
+    return
+  fi
   local raw
   raw="$(docker exec junto-peer-mcp-server python -c "
 from shared_memory.auth import create_api_key
@@ -129,14 +190,14 @@ print(raw)
   log "  LOCAL_KEY set in .env"
 }
 
-step8_start_sync_engine() {
-  log "step 8/9: starting sync-engine"
+step9_start_sync_engine() {
+  log "step 9/10: starting sync-engine"
   cd "$REPO_DIR"
   docker compose -f docker-compose.peer.yml up -d --force-recreate sync-engine
 }
 
-step9_tail_logs() {
-  log "step 9/9: brief log tail (Ctrl-C is safe; sync-engine keeps running)"
+step10_tail_logs() {
+  log "step 10/10: brief log tail (Ctrl-C is safe; sync-engine keeps running)"
   log "  expect: 'starting pull loop' + 'starting push loop' within ~10s"
   # 15s tail then exit, so the script terminates cleanly in non-interactive runs.
   timeout 15 docker logs -f junto-peer-sync-engine 2>&1 || true
@@ -152,7 +213,8 @@ step2_primary_reachable
 step3_keyfile
 step4_env_initial
 step5_compose_up
-step6_wait_health
-step7_issue_local_key
-step8_start_sync_engine
-step9_tail_logs
+step6_initiate_rs
+step7_wait_health
+step8_issue_local_key
+step9_start_sync_engine
+step10_tail_logs

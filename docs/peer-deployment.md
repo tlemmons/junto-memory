@@ -102,18 +102,44 @@ The first start does a few things:
 1. Pulls the digest-pinned `chromadb/chroma:1.2.4@sha256:70c2…` image.
    This is the same digest as the primary — required for cross-server
    embedding determinism (design spec §4.3.a + §10 risk 5).
-2. Initializes Mongo as a single-node replica set named `rs0`. The
-   container entrypoint waits for `rs.initiate()`; the healthcheck won't
-   pass until that happens. Give it ~20s.
+2. Starts Mongo with `--replSet rs0` and creates the root user from
+   `MONGO_INITDB_ROOT_USERNAME`. The image's entrypoint does NOT call
+   `rs.initiate()`, so the replica set has no primary yet — Docker's
+   healthcheck still reports healthy because it uses
+   `directConnection=true` to bypass replica-set discovery, but every
+   write fails with "No primary exists currently" until you initiate
+   the set (next step).
 3. Boots the MCP server on port `MCP_PORT` (default 8080) with
-   `ORIGIN_SERVER_ID` from your `.env`.
+   `ORIGIN_SERVER_ID` from your `.env`. Until step 4a runs, mongo-backed
+   tools (everything except chroma-only memory_query) will error out.
 
-Sanity check:
+### 4a. Initiate the rs0 replica set (one-time, mandatory)
+
+```bash
+# Load the mongo creds from .env into your shell.
+set -a; source .env; set +a
+
+docker exec junto-peer-mongodb mongosh --quiet --norc \
+  "mongodb://${MONGO_USER}:${MONGO_PASSWORD}@localhost:27017/?directConnection=true&authSource=admin" \
+  --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "mongodb:27017"}]})'
+# { "ok" : 1 }
+```
+
+Wait ~5s for primary election, then sanity-check:
 
 ```bash
 curl -fsS http://localhost:8080/health
 # {"status":"healthy","chroma":"healthy"}
+
+docker exec junto-peer-mongodb mongosh --quiet --norc \
+  "mongodb://${MONGO_USER}:${MONGO_PASSWORD}@localhost:27017/?directConnection=true&authSource=admin" \
+  --eval 'print(db.isMaster().ismaster)'
+# true
 ```
+
+Re-running `rs.initiate()` after the set is already initialized returns
+`AlreadyInitialized` — safe to ignore. (The `contrib/test/bootstrap-peer.sh`
+helper does this idempotently.)
 
 ## 5. Generate this peer's admin-tier key and finish wiring the sync engine
 

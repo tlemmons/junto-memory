@@ -11,8 +11,11 @@
 #   3. Writes .env with random Mongo password + ORIGIN_SERVER_ID=test-primary-1
 #      and placeholder JUNTO_SYNC_* values (sync-engine is NOT started here).
 #   4. Brings up chromadb + mongodb + mcp-server (skips sync-engine).
-#   5. Waits for /health, then issues an admin API key for the peer to use.
-#   6. Writes the peer's-view-of-primary key to ./peer-credentials.txt.
+#   5. Runs rs.initiate() on mongodb if rs0 isn't yet initialized. The
+#      mongo:7.0 image's entrypoint does NOT auto-initiate the replica set —
+#      writes will fail with "No primary exists" until this runs.
+#   6. Waits for /health, then issues an admin API key for the peer to use.
+#   7. Writes the peer's-view-of-primary key to ./peer-credentials.txt.
 #
 # Exits non-zero on any step's failure. Output is meant to be paste-back-able.
 
@@ -78,13 +81,64 @@ EOF
 }
 
 step4_compose_up() {
-  log "step 4/6: bringing up chromadb + mongodb + mcp-server"
+  log "step 4/7: bringing up chromadb + mongodb + mcp-server"
   cd "$REPO_DIR"
   docker compose -f docker-compose.peer.yml up -d --build chromadb mongodb mcp-server
 }
 
-step5_wait_health() {
-  log "step 5/6: waiting for /health"
+# Idempotently initiate the rs0 single-node replica set. The mongo:7.0 image
+# starts the daemon with --replSet rs0 but does NOT run rs.initiate(); without
+# it there's no primary and every write fails with "No primary exists currently"
+# even though docker's healthcheck (which uses directConnection=true to bypass
+# replica-set discovery) reports healthy. Sage's prod deployment was initiated
+# manually in the distant past and the data volume preserves rs0 config — so
+# this gap only surfaces on truly fresh installs (this script, peer-deployment.md
+# adopters, anyone restoring without a mongo-data backup).
+step5_initiate_rs() {
+  log "step 5/7: ensuring rs0 replica set is initiated"
+  # shellcheck disable=SC1091
+  set -a; source "$REPO_DIR/.env"; set +a
+  local primary_host="${MONGO_RS_HOST:-mongodb}"
+  local n=0
+  until docker exec junto-peer-mongodb mongosh --quiet --norc \
+    "mongodb://${MONGO_USER}:${MONGO_PASSWORD}@localhost:27017/?directConnection=true&authSource=admin" \
+    --eval "
+      try {
+        const s = rs.status();
+        if (s.ok && s.members && s.members.some(m => m.stateStr === 'PRIMARY')) {
+          print('rs0 already initialized with primary');
+          quit(0);
+        }
+      } catch (e) {
+        if (e.codeName !== 'NotYetInitialized' && e.code !== 94) {
+          print('rs.status failed: ' + e.message);
+          quit(1);
+        }
+        const r = rs.initiate({_id: 'rs0', members: [{_id: 0, host: '${primary_host}:27017'}]});
+        if (!r.ok) { print('rs.initiate failed: ' + JSON.stringify(r)); quit(1); }
+        print('rs0 initiated');
+      }
+      // wait up to 30s for primary election
+      for (let i = 0; i < 30; i++) {
+        try {
+          if (db.hello().isWritablePrimary) { print('primary elected after ' + i + 's'); quit(0); }
+        } catch (e) {}
+        sleep(1000);
+      }
+      print('primary never elected'); quit(1);
+    " >/dev/null 2>&1; do
+    n=$((n+1))
+    if (( n > 12 )); then
+      log "  rs.initiate never succeeded — check 'docker logs junto-peer-mongodb'"
+      exit 1
+    fi
+    sleep 5
+  done
+  log "  rs0 ready"
+}
+
+step6_wait_health() {
+  log "step 6/7: waiting for /health"
   local n=0
   until curl -fsS http://localhost:8080/health >/dev/null 2>&1; do
     n=$((n+1))
@@ -97,8 +151,17 @@ step5_wait_health() {
   log "  /health OK after ~$((n*2))s"
 }
 
-step6_issue_key() {
-  log "step 6/6: issuing admin API key for peer to use"
+step7_issue_key() {
+  log "step 7/7: issuing admin API key for peer to use"
+  # Idempotency guard: if peer-credentials.txt exists, the operator has the
+  # raw key from a prior run. Creating a same-named key would hit the
+  # api_keys.name unique index; the raw value can't be recovered from Mongo
+  # (only the hash is stored). Leave the existing file untouched.
+  if [[ -s "$CREDS_OUT" ]] && grep -q '^JUNTO_SYNC_PRIMARY_KEY=' "$CREDS_OUT"; then
+    log "  $CREDS_OUT already present with a key — leaving untouched."
+    log "  Delete $CREDS_OUT (and revoke the old key in mongo) to regenerate."
+    return
+  fi
   local raw
   raw="$(docker exec junto-peer-mcp-server python -c "
 from shared_memory.auth import create_api_key
@@ -132,5 +195,6 @@ step1_prereqs
 step2_keyfile
 step3_env
 step4_compose_up
-step5_wait_health
-step6_issue_key
+step5_initiate_rs
+step6_wait_health
+step7_issue_key
