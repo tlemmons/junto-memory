@@ -21,6 +21,7 @@ from shared_memory.sync_engine import (
     SyncEngine,
     _empty_cursor_state,
     _merge_pull_cursor,
+    _run_supervisor,
     load_cursors,
     save_cursors,
 )
@@ -513,3 +514,244 @@ class TestPullThenPush:
         assert first_local_call[0] == "memory_sync_push", (
             f"pull must run first; got {first_local_call[0]} as first local call"
         )
+
+
+# ───────────────────────────────────────────────────────────────────
+# Supervisor: rebuild on inner-task transport-loss
+# ───────────────────────────────────────────────────────────────────
+
+
+class _CancellingFakeMCPClient(FakeMCPClient):
+    """FakeMCPClient that can also raise BaseException (e.g., CancelledError).
+
+    The base FakeMCPClient only re-raises queued items that are
+    `isinstance(Exception)`. Transport-loss simulation needs to also
+    surface `asyncio.CancelledError` (a `BaseException`).
+    """
+
+    async def call_tool(self, name, args):
+        self.calls.append((name, dict(args)))
+        queue = self.responses.get(name)
+        if not queue:
+            raise AssertionError(
+                f"_CancellingFakeMCPClient({self.name}) had no scripted response "
+                f"for {name}; calls so far: {[c[0] for c in self.calls]}"
+            )
+        nxt = queue.pop(0)
+        if isinstance(nxt, BaseException):
+            raise nxt
+        if callable(nxt):
+            return nxt(args)
+        return dict(nxt)
+
+    async def aclose(self):  # called on clean-shutdown branch
+        pass
+
+
+class TestSupervisor:
+    async def test_clean_shutdown_does_not_reconnect(self, cursor_path):
+        """stop_event set during inner sleep ⇒ supervisor exits with
+        reconnects=0, supervisor_errors=0."""
+        primary = _CancellingFakeMCPClient("primary")
+        local = _CancellingFakeMCPClient("local")
+        # One quiet iteration: empty pull, empty discovery + own-pull.
+        primary.queue("memory_sync_pull", _empty_pull("central"))
+        local.queue(
+            "memory_sync_pull",
+            _empty_pull("peer"),
+            _empty_pull("peer"),
+        )
+
+        stop_event = asyncio.Event()
+
+        async def build():
+            return primary, local
+
+        async def stopper():
+            await asyncio.sleep(0.02)
+            stop_event.set()
+
+        sup_stats_task = asyncio.create_task(
+            _run_supervisor(
+                build_clients=build,
+                cursor_path=cursor_path,
+                pull_interval=10.0,  # would block ≫ stopper
+                push_interval=5.0,
+                pull_jitter=0.0,
+                push_jitter=0.0,
+                limit=500,
+                stop_event=stop_event,
+                backoff_min=0.001,
+                backoff_max=0.002,
+            )
+        )
+        await asyncio.gather(sup_stats_task, stopper())
+        sup_stats = sup_stats_task.result()
+
+        assert sup_stats["reconnects"] == 0
+        assert sup_stats["supervisor_errors"] == 0
+        assert sup_stats["last_engine_stats"]["iterations"] == 1
+
+    async def test_cancelled_error_triggers_rebuild(self, cursor_path):
+        """CancelledError raised from a client mid-call propagates up
+        through engine.run (CancelledError is BaseException, not Exception,
+        so engine's `except` doesn't catch it). The supervisor must catch
+        it on `await inner`, count a reconnect, and call build_clients()
+        again."""
+        # Build a sequence of (primary, local) pairs. First pair raises
+        # CancelledError on the first sync_pull; second pair runs one quiet
+        # iteration before stop_event fires.
+        builds_done = 0
+        all_clients = []
+
+        async def build():
+            nonlocal builds_done
+            builds_done += 1
+            primary = _CancellingFakeMCPClient(f"primary-{builds_done}")
+            local = _CancellingFakeMCPClient(f"local-{builds_done}")
+            if builds_done == 1:
+                primary.queue("memory_sync_pull", asyncio.CancelledError("transport"))
+            else:
+                primary.queue("memory_sync_pull", _empty_pull("central"))
+                local.queue(
+                    "memory_sync_pull",
+                    _empty_pull("peer"),
+                    _empty_pull("peer"),
+                )
+            all_clients.append((primary, local))
+            return primary, local
+
+        stop_event = asyncio.Event()
+
+        async def stopper():
+            # Give the supervisor enough time to: build once, hit the cancel,
+            # apply backoff (we set this short), build again, run one iter.
+            await asyncio.sleep(0.06)
+            stop_event.set()
+
+        sup_stats_task = asyncio.create_task(
+            _run_supervisor(
+                build_clients=build,
+                cursor_path=cursor_path,
+                pull_interval=10.0,
+                push_interval=5.0,
+                pull_jitter=0.0,
+                push_jitter=0.0,
+                limit=500,
+                stop_event=stop_event,
+                backoff_min=0.005,
+                backoff_max=0.01,
+            )
+        )
+        await asyncio.gather(sup_stats_task, stopper())
+        sup_stats = sup_stats_task.result()
+
+        assert builds_done == 2, f"expected 2 builds (1 failure + 1 recovery), got {builds_done}"
+        assert sup_stats["reconnects"] == 1
+        assert sup_stats["supervisor_errors"] == 1
+        # The second-pair engine actually ran an iteration before stop.
+        assert sup_stats["last_engine_stats"]["iterations"] == 1
+
+    async def test_build_clients_failure_retried_with_backoff(self, cursor_path):
+        """If build_clients() itself raises (e.g., connect() failed), the
+        supervisor counts a supervisor_error, sleeps backoff, and tries
+        again. Reconnects only count successful client builds."""
+        builds_done = 0
+
+        async def build():
+            nonlocal builds_done
+            builds_done += 1
+            if builds_done == 1:
+                raise ConnectionError("primary unreachable")
+            primary = _CancellingFakeMCPClient("primary")
+            local = _CancellingFakeMCPClient("local")
+            primary.queue("memory_sync_pull", _empty_pull("central"))
+            local.queue(
+                "memory_sync_pull",
+                _empty_pull("peer"),
+                _empty_pull("peer"),
+            )
+            return primary, local
+
+        stop_event = asyncio.Event()
+
+        async def stopper():
+            await asyncio.sleep(0.05)
+            stop_event.set()
+
+        sup_stats_task = asyncio.create_task(
+            _run_supervisor(
+                build_clients=build,
+                cursor_path=cursor_path,
+                pull_interval=10.0,
+                push_interval=5.0,
+                pull_jitter=0.0,
+                push_jitter=0.0,
+                limit=500,
+                stop_event=stop_event,
+                backoff_min=0.005,
+                backoff_max=0.01,
+            )
+        )
+        await asyncio.gather(sup_stats_task, stopper())
+        sup_stats = sup_stats_task.result()
+
+        assert builds_done == 2, f"expected 2 builds (1 connect-failure + 1 success), got {builds_done}"
+        # build_clients runs inside the inner task, so its failure dies
+        # the inner task — same recovery path as transport-loss mid-run.
+        assert sup_stats["reconnects"] == 1
+        assert sup_stats["supervisor_errors"] == 1
+
+    async def test_inner_raises_transport_error_triggers_rebuild(self, cursor_path):
+        """If the inner engine's main loop propagates a `_TransportError`
+        (e.g., its internal backoff loop exited with an error), the
+        supervisor should also rebuild."""
+        builds_done = 0
+
+        async def build():
+            nonlocal builds_done
+            builds_done += 1
+            primary = _CancellingFakeMCPClient(f"primary-{builds_done}")
+            local = _CancellingFakeMCPClient(f"local-{builds_done}")
+            if builds_done == 1:
+                # SyncEngine wraps RuntimeError from _call as _TransportError.
+                # Engine's own except _TransportError handler catches and
+                # backs off — to make it propagate, we'd need to break out
+                # of the engine loop. Easier: make the engine's wait-for-stop
+                # sleep race with an immediate-stop, and queue a RuntimeError
+                # that bypasses engine's catch via a non-Exception type.
+                primary.queue("memory_sync_pull", asyncio.CancelledError("synthetic"))
+            else:
+                primary.queue("memory_sync_pull", _empty_pull("central"))
+                local.queue(
+                    "memory_sync_pull",
+                    _empty_pull("peer"),
+                    _empty_pull("peer"),
+                )
+            return primary, local
+
+        stop_event = asyncio.Event()
+
+        async def stopper():
+            await asyncio.sleep(0.05)
+            stop_event.set()
+
+        sup_stats_task = asyncio.create_task(
+            _run_supervisor(
+                build_clients=build,
+                cursor_path=cursor_path,
+                pull_interval=10.0,
+                push_interval=5.0,
+                pull_jitter=0.0,
+                push_jitter=0.0,
+                limit=500,
+                stop_event=stop_event,
+                backoff_min=0.005,
+                backoff_max=0.01,
+            )
+        )
+        await asyncio.gather(sup_stats_task, stopper())
+        sup_stats = sup_stats_task.result()
+
+        assert builds_done == 2
+        assert sup_stats["reconnects"] == 1

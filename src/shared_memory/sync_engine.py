@@ -20,7 +20,11 @@ Per loop iteration:
        last-pushed-cursor via `local.memory_sync_pull(since={local_origin: X})`.
        Send via `primary.memory_sync_push(ops)`. Drain `has_more`.
     3. Sleep `pull_interval ± jitter` seconds.
-    4. On transport error: exponential backoff, reconnect, retry.
+    4. On transport error: SyncEngine catches `_TransportError` and applies
+       per-iteration exponential backoff with the SAME client. This works
+       for transient blips. For persistent failures (session terminated,
+       DNS failure causing CancelledError) the supervisor in `_amain`
+       discards the dead client and rebuilds.
 
 v1 simplifications (per state:memory and §5.2):
     - Always runs the MQTT-offline cadence (10s pull, 5s push).
@@ -105,12 +109,16 @@ class MCPClient(Protocol):
 class HTTPMCPClient:
     """Streamable-HTTP MCP client with session lifecycle + auth.
 
-    Holds an open MCP session for the engine's lifetime; reconnects on
-    transport errors. `call_tool` returns the parsed JSON-decoded body
-    of the first content block (matches every junto-memory tool's
-    `return json.dumps(...)` convention).
+    Holds an open MCP session for the engine's lifetime. Does NOT
+    reconnect on transport errors — once the underlying streamable_http
+    cancel scope poisons (DNS failure, mid-stream connection loss),
+    this instance must be discarded and a new one built. The supervisor
+    in `_amain` handles that lifecycle; do not try to call `connect()`
+    again on a poisoned instance. `call_tool` returns the parsed
+    JSON-decoded body of the first content block (matches every
+    junto-memory tool's `return json.dumps(...)` convention).
 
-    `start_session` claims a server-side `session_id` via
+    `connect()` claims a server-side `session_id` via
     `memory_start_session`, which the engine then threads on every
     subsequent call.
     """
@@ -302,13 +310,14 @@ class SyncEngine:
         self._sleep = sleep or asyncio.sleep
         self.cursors: Dict[str, Dict[str, int]] = load_cursors(cursor_path)
         self.local_origin: Optional[str] = None
-        # Stats counters surface in logs and tests.
+        # Stats counters surface in logs and tests. `reconnects` lives on
+        # the supervisor (in _amain), not here — an individual SyncEngine
+        # instance is born after a reconnect and dies before the next one.
         self.stats = {
             "iterations": 0,
             "pulled": 0,
             "pushed": 0,
             "errors": 0,
-            "transport_reconnects": 0,
         }
 
     # ─── public ───────────────────────────────────────────────────
@@ -573,52 +582,174 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+SUPERVISOR_BACKOFF_MIN = 5.0
+SUPERVISOR_BACKOFF_MAX = 60.0
+
+
+async def _supervisor_sleep(stop_event: asyncio.Event, seconds: float) -> None:
+    """Sleep up to `seconds`, returning early if stop_event fires."""
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=seconds)
+    except asyncio.TimeoutError:
+        pass
+
+
+async def _run_supervisor(
+    *,
+    build_clients,  # Callable[[], Awaitable[Tuple[MCPClient, MCPClient]]]
+    cursor_path: Path,
+    pull_interval: float,
+    push_interval: float,
+    pull_jitter: float,
+    push_jitter: float,
+    limit: int,
+    stop_event: asyncio.Event,
+    backoff_min: float = SUPERVISOR_BACKOFF_MIN,
+    backoff_max: float = SUPERVISOR_BACKOFF_MAX,
+    sleep_fn=None,  # Callable[[float], Awaitable[None]]
+) -> Dict[str, Any]:
+    """Supervisor loop. Returns final supervisor stats dict.
+
+    The MCP SDK's `streamable_http_client` wraps its httpx connection in
+    an anyio task group. When the underlying transport fails (e.g., the
+    tailnet hostname stops resolving because the link dropped, or the
+    remote process gets killed), the task group cancels and surfaces an
+    `asyncio.CancelledError` to whatever coroutine is awaiting on
+    `call_tool`. CancelledError is a `BaseException` (not `Exception`),
+    so SyncEngine's `except Exception` does not catch it; the engine's
+    task dies. Worse, the cancel scope remains poisoned for the
+    duration of the task that owns it — subsequent awaits in the same
+    task get cancelled too.
+
+    The fix: run the engine in a child task whose cancel-scope death is
+    contained. This supervisor lives at the event loop root with its
+    own (uncontaminated) cancel scope, so it can detect the inner
+    task's death, sleep through a backoff, and rebuild fresh clients
+    via `build_clients` + a new engine.
+
+    Inner-exit modes:
+      * Clean return (stop_event was set) → break and return.
+      * `CancelledError` → assume transport loss; discard old clients
+        (do NOT try to aclose, scope may be poisoned); rebuild.
+      * `_TransportError` from engine.run propagating up → rebuild.
+      * Any other exception → log, rebuild.
+
+    Backoff between rebuilds: `backoff_min` → `backoff_max` capped,
+    doubling on each failure. Production matches docker's cadence
+    (5s → 60s) so the supervisor doesn't burn cycles in a tight loop
+    against a still-unreachable peer.
+
+    `build_clients` is async; it must return a tuple `(primary, local)`
+    of already-connected MCP clients, or raise. If it raises, the
+    supervisor counts the failure, sleeps, and retries.
+
+    `sleep_fn(seconds)` is the interruptible sleep used between
+    rebuilds. Defaults to wait_for(stop_event) with timeout; tests
+    inject a faster version.
+    """
+    if sleep_fn is None:
+        async def sleep_fn(seconds: float) -> None:
+            await _supervisor_sleep(stop_event, seconds)
+
+    sup_stats: Dict[str, Any] = {
+        "reconnects": 0,
+        "supervisor_errors": 0,
+        "last_engine_stats": {},
+    }
+    backoff = backoff_min
+
+    async def _inner_runner() -> Dict[str, int]:
+        """Body of the inner task. Builds clients + engine inside this task
+        so the streamable_http_client cancel scope is local to it (and
+        cannot poison the supervisor's awaits when transport dies)."""
+        primary, local = await build_clients()
+        engine = SyncEngine(
+            primary=primary,
+            local=local,
+            cursor_path=cursor_path,
+            pull_interval=pull_interval,
+            push_interval=push_interval,
+            pull_jitter=pull_jitter,
+            push_jitter=push_jitter,
+            limit=limit,
+        )
+        # Expose stats to supervisor before run begins so we capture them
+        # even if engine dies on the first iteration.
+        sup_stats["last_engine_stats"] = engine.stats
+        try:
+            await engine.run(stop_event)
+        finally:
+            # Best-effort close. The cancel scope may be poisoned, in which
+            # case aclose() itself may raise — that's fine; this task is
+            # dying anyway, the supervisor will rebuild.
+            for client, label in ((local, "local"), (primary, "primary")):
+                try:
+                    await client.aclose()
+                except BaseException:
+                    logger.debug(
+                        "%s.aclose failed during inner teardown",
+                        label, exc_info=True,
+                    )
+        return engine.stats
+
+    while not stop_event.is_set():
+        logger.info("supervisor: inner engine starting")
+        inner = asyncio.create_task(_inner_runner(), name="sync-engine-inner")
+
+        clean = False
+        try:
+            await inner
+            # Inner returned of its own accord — only happens when
+            # stop_event fired during a sleep. Clean shutdown.
+            clean = True
+        except asyncio.CancelledError:
+            if stop_event.is_set():
+                # Real shutdown initiated externally — propagate.
+                raise
+            sup_stats["supervisor_errors"] += 1
+            logger.warning(
+                "supervisor: inner task CancelledError (transport loss assumed); "
+                "rebuilding in %.1fs", backoff,
+            )
+        except _TransportError as e:
+            sup_stats["supervisor_errors"] += 1
+            logger.warning(
+                "supervisor: inner task TransportError: %s; rebuilding in %.1fs",
+                e, backoff,
+            )
+        except Exception as e:
+            sup_stats["supervisor_errors"] += 1
+            # Connect failures inside _inner_runner land here. We log at
+            # WARNING (with type name) rather than spamming a full
+            # traceback because the typical case is "primary unreachable"
+            # which is loud but expected during a transport outage.
+            logger.warning(
+                "supervisor: inner task %s: %s; rebuilding in %.1fs",
+                type(e).__name__, e, backoff,
+            )
+
+        if clean:
+            break
+
+        # Failure path. Inner task already best-efforted client cleanup
+        # in its finally block; the dead clients will be GC'd. Some
+        # cosmetic "Task exception was never retrieved" / async-gen
+        # cleanup errors may surface in the log.
+        sup_stats["reconnects"] += 1
+        await sleep_fn(backoff)
+        backoff = min(backoff_max, backoff * 2)
+
+    return sup_stats
+
+
 async def _amain(args: argparse.Namespace) -> int:
+    """CLI entry: wire signal handlers and call _run_supervisor."""
     if not args.primary_url:
         print("ERROR: --primary-url (or JUNTO_SYNC_PRIMARY_URL) is required",
               file=sys.stderr)
         return 2
 
-    primary = HTTPMCPClient(
-        url=args.primary_url,
-        api_key=args.primary_key,
-        agent_name=args.agent_name,
-        project=args.project,
-        role_description="Peer-side sync engine — primary connection",
-    )
-    local = HTTPMCPClient(
-        url=args.local_url,
-        api_key=args.local_key,
-        agent_name=args.agent_name,
-        project=args.project,
-        role_description="Peer-side sync engine — local connection",
-    )
-
-    try:
-        await primary.connect()
-    except Exception:
-        logger.exception("failed to connect to primary at %s", args.primary_url)
-        return 3
-    try:
-        await local.connect()
-    except Exception:
-        logger.exception("failed to connect to local at %s", args.local_url)
-        await primary.aclose()
-        return 3
-
-    engine = SyncEngine(
-        primary=primary,
-        local=local,
-        cursor_path=Path(args.cursor_path).expanduser(),
-        pull_interval=args.pull_interval,
-        push_interval=args.push_interval,
-        pull_jitter=args.pull_jitter,
-        push_jitter=args.push_jitter,
-        limit=args.limit,
-    )
-
     stop_event = asyncio.Event()
-
     loop = asyncio.get_running_loop()
     for sig_name in ("SIGINT", "SIGTERM"):
         try:
@@ -628,16 +759,46 @@ async def _amain(args: argparse.Namespace) -> int:
         except (NotImplementedError, RuntimeError):
             pass
 
+    async def build_clients():
+        primary = HTTPMCPClient(
+            url=args.primary_url,
+            api_key=args.primary_key,
+            agent_name=args.agent_name,
+            project=args.project,
+            role_description="Peer-side sync engine — primary connection",
+        )
+        local = HTTPMCPClient(
+            url=args.local_url,
+            api_key=args.local_key,
+            agent_name=args.agent_name,
+            project=args.project,
+            role_description="Peer-side sync engine — local connection",
+        )
+        await primary.connect()
+        await local.connect()
+        return primary, local
+
     logger.info(
-        "sync engine starting: primary=%s local=%s cursors=%s",
+        "sync engine supervisor starting: primary=%s local=%s cursors=%s",
         args.primary_url, args.local_url, args.cursor_path,
     )
-    try:
-        await engine.run(stop_event)
-    finally:
-        logger.info("sync engine stopping: stats=%s", engine.stats)
-        await local.aclose()
-        await primary.aclose()
+
+    sup_stats = await _run_supervisor(
+        build_clients=build_clients,
+        cursor_path=Path(args.cursor_path).expanduser(),
+        pull_interval=args.pull_interval,
+        push_interval=args.push_interval,
+        pull_jitter=args.pull_jitter,
+        push_jitter=args.push_jitter,
+        limit=args.limit,
+        stop_event=stop_event,
+    )
+
+    logger.info(
+        "sync engine supervisor stopping: supervisor=%s last_engine=%s",
+        {k: v for k, v in sup_stats.items() if k != "last_engine_stats"},
+        sup_stats.get("last_engine_stats"),
+    )
     return 0
 
 
