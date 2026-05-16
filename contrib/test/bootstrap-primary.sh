@@ -163,11 +163,14 @@ step7_issue_key() {
     return
   fi
   local raw
+  # `get_mongo()` prints "Connected to MongoDB at ..." to stdout on first
+  # init, which would otherwise end up captured by $(...) as part of $raw.
+  # Filter to lines that look like the smk_-prefixed key from auth.py:67.
   raw="$(docker exec junto-peer-mcp-server python -c "
 from shared_memory.auth import create_api_key
 raw, _ = create_api_key(name='$PRIMARY_KEY_NAME', role='admin', created_by='bootstrap-primary.sh')
 print(raw)
-")"
+" | awk '/^smk_/{print; exit}')"
   [[ -n "$raw" ]] || { log "  key creation returned empty — investigate"; exit 1; }
 
   local primary_ip
