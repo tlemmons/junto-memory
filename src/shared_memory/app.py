@@ -8,6 +8,7 @@ from mcp import types as _mcp_types
 from mcp.server.fastmcp import FastMCP
 
 from shared_memory.clients import app_lifespan
+from shared_memory.error_flag import build_call_tool_handler_with_error_flag
 from shared_memory.intent import build_call_tool_handler_with_intent
 
 # Allow connections from any host (for remote access via IP or proxy)
@@ -55,8 +56,12 @@ mcp._mcp_server.get_capabilities = _get_capabilities_with_subscribe
 # reassignment is invisible to the registered handler. Replacing the dict entry
 # is the only way to interpose.
 _orig_call_tool_handler = mcp._mcp_server.request_handlers[_mcp_types.CallToolRequest]
+# Composition: error_flag is outermost (post-processes the final result),
+# intent is innermost (extracts __intent_id from args before dispatch).
 mcp._mcp_server.request_handlers[_mcp_types.CallToolRequest] = (
-    build_call_tool_handler_with_intent(_orig_call_tool_handler)
+    build_call_tool_handler_with_error_flag(
+        build_call_tool_handler_with_intent(_orig_call_tool_handler)
+    )
 )
 
 
