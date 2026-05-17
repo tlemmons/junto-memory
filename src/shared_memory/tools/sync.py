@@ -1044,14 +1044,39 @@ async def _apply_message_sent(db, chroma, op):
     receiver's local op_log append happens separately, so the §4.3.b
     transactional atomicity that emit-side gets isn't required here —
     the (origin, seq) unique index on op_log gives us race-safe dedupe.
+
+    After insert, fire the same inbox push the write-side emit fires
+    (messaging.py:577-578) so any in-process subscriber on THIS peer
+    gets a `notifications/resources/updated` for the materialized
+    message. Without this, cross-peer messages are durable but invisible
+    to live subscribers (e.g., the junto-inbox plugin) until the next
+    poll. Mirrors the write-side `suppress_push` semantic.
     """
     payload = op["payload"]
+    duplicate = False
     try:
         db.messages.insert_one(dict(payload))
     except DuplicateKeyError:
         # Receiver already has this message_id (rare under normal flow,
         # but defense-in-depth for race / replay-from-different-peer).
-        pass
+        # Skip notify — subscribers already saw this msg's first arrival.
+        duplicate = True
+
+    if not duplicate and not payload.get("push_suppressed", False):
+        to_project = payload.get("to_project")
+        to_instance = payload.get("to_instance")
+        if to_project and to_instance:
+            from shared_memory.tools.messaging import _notify_inbox_for_send
+            try:
+                await _notify_inbox_for_send(to_project, to_instance)
+            except Exception as exc:  # pragma: no cover — defensive
+                # Notify is best-effort; apply success is the durability
+                # contract. Don't break replay on a push failure.
+                log.warning(
+                    "sync apply: inbox notify failed for %s/%s: %s",
+                    to_project, to_instance, exc,
+                )
+
     return {"disposition": "applied"}
 
 

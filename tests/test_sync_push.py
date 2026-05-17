@@ -912,6 +912,109 @@ def test_push_applies_message_sent():
     assert msg["message"] == "hi"
 
 
+def test_push_message_sent_fires_inbox_notify(monkeypatch):
+    """Materialized message must wake live inbox subscribers on this peer
+    so the junto-inbox plugin's `notifications/resources/updated` fires
+    after cross-peer delivery. Without this, replicated messages are
+    durable but invisible until the next poll.
+    """
+    from shared_memory.tools import messaging as messaging_tool
+
+    calls = []
+
+    async def _spy(to_project, to_instance):
+        calls.append((to_project, to_instance))
+
+    monkeypatch.setattr(messaging_tool, "_notify_inbox_for_send", _spy)
+
+    db = _FakeMongoDB()
+    chroma = _FakeChroma()
+    op = _message_op(1)
+    result = _push(db, chroma, [op])
+    assert _dispositions(result) == ["applied"]
+    assert calls == [("junto", "memory")]
+
+
+def test_push_message_sent_respects_push_suppressed(monkeypatch):
+    """Chain-depth-suppressed messages must NOT fire inbox notify on
+    replay either. Same gate as the write-side emit (messaging.py:577).
+    Otherwise replication becomes a free auto-delivery channel for
+    spirals the depth cap is trying to brake.
+    """
+    from shared_memory.tools import messaging as messaging_tool
+
+    calls = []
+
+    async def _spy(to_project, to_instance):
+        calls.append((to_project, to_instance))
+
+    monkeypatch.setattr(messaging_tool, "_notify_inbox_for_send", _spy)
+
+    db = _FakeMongoDB()
+    chroma = _FakeChroma()
+    op = _message_op(1)
+    op["payload"]["push_suppressed"] = True
+    result = _push(db, chroma, [op])
+    assert _dispositions(result) == ["applied"]
+    assert calls == []
+
+
+def test_push_message_sent_skips_notify_on_duplicate(monkeypatch):
+    """A re-applied (duplicate) message must not re-notify subscribers.
+    They already saw it on the first arrival; a re-push (replay-from-
+    different-peer, race) shouldn't double-ring the doorbell.
+    """
+    from shared_memory.tools import messaging as messaging_tool
+    from shared_memory.tools import sync as sync_tool
+
+    calls = []
+
+    async def _spy(to_project, to_instance):
+        calls.append((to_project, to_instance))
+
+    monkeypatch.setattr(messaging_tool, "_notify_inbox_for_send", _spy)
+
+    db = _FakeMongoDB()
+    # Real Mongo has a unique index on messages._id; the fake doesn't by
+    # default, so configure it here to exercise the DuplicateKeyError
+    # branch of _apply_message_sent. The fake raises a stand-in
+    # `_DupKeyError`; swap the exception class sync.py catches so the
+    # branch fires.
+    db._cols["messages"] = _FakeMongoCollection(unique_keys=[("_id",)])
+    monkeypatch.setattr(sync_tool, "DuplicateKeyError", _DupKeyError)
+    chroma = _FakeChroma()
+    op = _message_op(1)
+
+    import asyncio as _aio
+    _aio.run(sync_tool._apply_message_sent(db, chroma, op))
+    assert calls == [("junto", "memory")]
+
+    # Second apply of the same op_id triggers the duplicate branch.
+    calls.clear()
+    _aio.run(sync_tool._apply_message_sent(db, chroma, op))
+    assert calls == []
+
+
+def test_push_message_sent_swallows_notify_errors(monkeypatch):
+    """Notify is best-effort. A failing push must not break apply —
+    durability is the contract, the doorbell is a courtesy.
+    """
+    from shared_memory.tools import messaging as messaging_tool
+
+    async def _boom(to_project, to_instance):
+        raise RuntimeError("transport gone")
+
+    monkeypatch.setattr(messaging_tool, "_notify_inbox_for_send", _boom)
+
+    db = _FakeMongoDB()
+    chroma = _FakeChroma()
+    op = _message_op(2)
+    result = _push(db, chroma, [op])
+    assert _dispositions(result) == ["applied"]
+    msg_id = op["payload"]["_id"]
+    assert db["messages"].find_one({"_id": msg_id}) is not None
+
+
 # ───────────────────────────────────────────────────────────────────
 # Local op_log append preserves (origin, seq, intent_id, _id)
 # ───────────────────────────────────────────────────────────────────
