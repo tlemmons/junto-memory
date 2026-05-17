@@ -82,6 +82,7 @@ def _pull_op_log(
     cursors: Dict[str, int],
     limit: int,
     projects: Optional[List[str]],
+    head_only: bool = False,
 ) -> Dict[str, Any]:
     """Core read logic for memory_sync_pull — extracted for unit testing.
 
@@ -94,6 +95,13 @@ def _pull_op_log(
 
     Internal events (no `actor.project`) are always included when a
     project filter is set; see module docstring open-question #2.
+
+    `head_only=True`: skip transmitting ops; for each origin return only
+    the max(seq) where `seq > cursor[origin]` as `next_cursor[origin]`,
+    plus `has_more[origin]=True` whenever any rows exist past the cursor.
+    Uses a descending-sort+limit(1) per origin so cost is constant per
+    origin regardless of replication lag. `limit` is ignored in this mode.
+    Returns the same shape as the normal path but with `ops=[]`.
     """
     op_log_coll = db[OPLOG_COLLECTION]
     known_origins = set(op_log_coll.distinct("origin")) | set(cursors.keys())
@@ -112,6 +120,17 @@ def _pull_op_log(
                 {"actor.project": {"$exists": False}},
                 {"actor.project": None},
             ]
+
+        if head_only:
+            head_row = op_log_coll.find(
+                query, projection={"seq": 1}
+            ).sort([("seq", -1)]).limit(1)
+            head_list = list(head_row)
+            if not head_list:
+                continue
+            next_cursor[origin] = head_list[0]["seq"]
+            has_more[origin] = True  # caller hasn't fetched the body yet
+            continue
 
         rows = list(
             op_log_coll.find(query).sort([("seq", 1)]).limit(limit + 1)
@@ -140,6 +159,7 @@ async def memory_sync_pull(
     since_cursor_by_origin: Optional[Dict[str, int]] = None,
     limit: int = 500,
     projects: Optional[List[str]] = None,
+    head_only: bool = False,
     ctx: Context = None,
 ) -> str:
     """Pull op_log entries newer than the caller's cursor (per origin).
@@ -158,10 +178,16 @@ async def memory_sync_pull(
             (full history). Empty/None map = cold start.
         limit: Max ops returned per origin per call. Default 500. Server
             caps responses at this many rows even if more are available;
-            caller pages forward via the returned `next_cursor`.
+            caller pages forward via the returned `next_cursor`. Ignored
+            when `head_only=True`.
         projects: When set, restrict to ops whose `actor.project` is in
             this list. Op_log entries without a project (server-side
             internal events) are always included.
+        head_only: When True, skip transmitting op bodies and return only
+            `next_cursor[origin] = max(seq)` per origin where rows exist
+            past the cursor. Constant-cost per origin regardless of lag.
+            Used by lag observers and connection-health probes. The
+            response shape is identical to the normal path except `ops=[]`.
 
     Returns JSON:
         {
@@ -174,7 +200,9 @@ async def memory_sync_pull(
     `next_cursor` only contains origins that returned at least one row
     on this call. `has_more[origin]=True` means another page exists; the
     caller should re-call with the returned cursor. Empty result =
-    caller is up to date.
+    caller is up to date. With `head_only=True`, `has_more[origin]=True`
+    whenever rows exist past the cursor (since the caller hasn't fetched
+    the body); fetch them with a follow-up call with `head_only=False`.
     """
     err = require_session(session_id)
     if err:
@@ -194,7 +222,7 @@ async def memory_sync_pull(
         return json.dumps({"error": "MongoDB unavailable"})
 
     cursors: Dict[str, int] = dict(since_cursor_by_origin or {})
-    result = _pull_op_log(db, cursors, limit, projects)
+    result = _pull_op_log(db, cursors, limit, projects, head_only=bool(head_only))
     return json.dumps(result, default=_jsonable)
 
 

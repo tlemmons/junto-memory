@@ -1,7 +1,7 @@
 """sync_observer.py — cursor-lag observer for §13 acceptance.
 
-Polls both primary and peer via memory_sync_pull(since={}, limit=0), reads
-their `next_cursor` maps (highest op_log seq per origin), and computes:
+Polls both primary and peer via memory_sync_pull(since={}, head_only=True),
+reads their `next_cursor` maps (highest op_log seq per origin), and computes:
 
   pull_lag[primary_origin] = primary.cursor[primary_origin] - peer.cursor[primary_origin]
       = how far the peer is behind in receiving primary's writes
@@ -51,15 +51,9 @@ def log(msg: str) -> None:
 async def _fetch_cursor_view(client: HTTPMCPClient) -> Tuple[Optional[str], Dict[str, int]]:
     """Returns (server_origin, next_cursor_by_origin). Empty dict on error."""
     try:
-        # Server-side bug: memory_sync_pull's _query_op_log panics on
-        # rows[-1] when limit=0 because rows[:0] is empty after truncation,
-        # AND limit=1 returns next_cursor=oldest-seq instead of newest. Use
-        # a large limit so next_cursor reflects max(seq) per origin (the
-        # last row of the returned set). Backlog item TODO for proper
-        # server-side "cursor head probe" endpoint.
         resp = await client.call_tool(
             "memory_sync_pull",
-            {"since_cursor_by_origin": {}, "limit": 100000},
+            {"since_cursor_by_origin": {}, "head_only": True},
         )
     except Exception as exc:
         log(f"  pull failed: {type(exc).__name__}: {str(exc)[:120]}")

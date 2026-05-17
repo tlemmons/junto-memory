@@ -49,7 +49,10 @@ class _FakeOpLog:
     def distinct(self, field):
         return sorted({r.get(field) for r in self._rows if r.get(field) is not None})
 
-    def find(self, query):
+    def find(self, query, projection=None):
+        # projection is a Mongo perf hint (only fetch listed fields); the
+        # fake honors the find() filter shape and ignores projection — tests
+        # work against full rows.
         out = []
         for r in self._rows:
             if not self._match(r, query):
@@ -397,6 +400,88 @@ def test_pull_tool_rejects_invalid_limit():
 
     parsed = json.loads(raw)
     assert "limit" in parsed["error"].lower()
+
+
+# ───────────────────────────────────────────────────────────────────
+# head_only mode — backlog_2e601854581f (cursor-head probe)
+# ───────────────────────────────────────────────────────────────────
+
+
+def test_head_only_returns_no_ops():
+    rows = [_op(1), _op(2), _op(3)]
+    db = _FakeDB(rows)
+    result = sync_tool._pull_op_log(
+        db, cursors={}, limit=500, projects=None, head_only=True
+    )
+    assert result["ops"] == []
+
+
+def test_head_only_returns_max_seq_per_origin():
+    rows = [
+        _op(1, origin="A"), _op(5, origin="A"), _op(3, origin="A"),
+        _op(2, origin="B"), _op(7, origin="B"),
+    ]
+    db = _FakeDB(rows)
+    result = sync_tool._pull_op_log(
+        db, cursors={}, limit=500, projects=None, head_only=True
+    )
+    assert result["next_cursor"] == {"A": 5, "B": 7}
+    assert result["has_more"] == {"A": True, "B": True}
+
+
+def test_head_only_respects_cursor():
+    rows = [_op(1), _op(2), _op(3), _op(4)]
+    db = _FakeDB(rows)
+    result = sync_tool._pull_op_log(
+        db, cursors={"central": 2}, limit=500, projects=None, head_only=True
+    )
+    assert result["next_cursor"] == {"central": 4}
+    assert result["has_more"] == {"central": True}
+
+
+def test_head_only_origin_caught_up_returns_empty_for_it():
+    rows = [_op(1), _op(2), _op(3)]
+    db = _FakeDB(rows)
+    result = sync_tool._pull_op_log(
+        db, cursors={"central": 3}, limit=500, projects=None, head_only=True
+    )
+    assert result["next_cursor"] == {}
+    assert result["has_more"] == {}
+    assert result["ops"] == []
+
+
+def test_head_only_with_project_filter():
+    rows = [
+        _op(1, project="junto"),
+        _op(2, project="nimbus"),
+        _op(3, project="junto"),
+        _op(4, project="nimbus"),
+    ]
+    db = _FakeDB(rows)
+    result = sync_tool._pull_op_log(
+        db, cursors={}, limit=500, projects=["junto"], head_only=True
+    )
+    assert result["next_cursor"] == {"central": 3}
+
+
+def test_head_only_ignores_limit():
+    """head_only path always returns just the head regardless of limit value."""
+    rows = [_op(seq) for seq in range(1, 11)]
+    db = _FakeDB(rows)
+    result = sync_tool._pull_op_log(
+        db, cursors={}, limit=1, projects=None, head_only=True
+    )
+    assert result["next_cursor"] == {"central": 10}
+    assert result["ops"] == []
+
+
+def test_head_only_empty_db_returns_empty_cursor():
+    db = _FakeDB([])
+    result = sync_tool._pull_op_log(
+        db, cursors={}, limit=500, projects=None, head_only=True
+    )
+    assert result["next_cursor"] == {}
+    assert result["ops"] == []
 
 
 # ───────────────────────────────────────────────────────────────────
