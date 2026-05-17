@@ -82,6 +82,7 @@ async def _do_store(client: HTTPMCPClient, seq: int) -> Tuple[str, bool, str]:
         {
             "title": f"§13 acceptance store #{seq} ({token})",
             "content": f"Synthetic store from federated_writer.py, seq={seq}.",
+            "memory_type": "code_snippet",
             "project": "junto",
             "tags": [TEST_TAG, "synthetic"],
         },
@@ -99,8 +100,7 @@ async def _do_message(client: HTTPMCPClient, seq: int) -> Tuple[str, bool, str]:
         {
             "to_instance": "federated-writer",
             "to_project": "junto",
-            "subject": f"§13 acceptance msg #{seq} ({token})",
-            "body": f"Synthetic message from federated_writer.py, seq={seq}.",
+            "message": f"§13 acceptance msg #{seq} ({token}): synthetic message from federated_writer.py, seq={seq}.",
             "category": "info",
             "priority": "low",
         },
