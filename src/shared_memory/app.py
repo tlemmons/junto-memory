@@ -17,7 +17,7 @@ from shared_memory.intent import build_call_tool_handler_with_intent
 # Original stateless_http=True was a workaround for an older FastMCP -32602
 # "request before initialization" race; verified resolved in current FastMCP
 # via concurrent client harness (2026-04-26, see /tmp/mcp_stress_harness.py).
-mcp = FastMCP("shared_memory", lifespan=app_lifespan, host="0.0.0.0", stateless_http=False)
+mcp = FastMCP("junto", lifespan=app_lifespan, host="0.0.0.0", stateless_http=False)
 
 
 # ── MCP resources.subscribe capability patch (backlog_4218136ef3ce) ──
