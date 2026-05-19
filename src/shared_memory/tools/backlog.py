@@ -13,7 +13,9 @@ from shared_memory.helpers import (
     get_project_collection,
     get_shared_collection,
     normalize_project,
+    parse_timestamp,
     require_session,
+    utc_now,
     utc_now_iso,
 )
 from shared_memory.op_log import emit_op_log_from_context, fetch_embedding_for_op_log
@@ -149,6 +151,7 @@ async def memory_list_backlog(
     assigned_to: str = None,
     target_version: str = None,
     include_done: bool = False,
+    updated_within_days: int = None,
     limit: int = 20,
     offset: int = 0,
     ctx: Context = None
@@ -164,6 +167,9 @@ async def memory_list_backlog(
         assigned_to: Filter by assignee
         target_version: Filter by milestone/version (e.g., "meural-beta", "v2.0", "sprint-5")
         include_done: Include completed items (default False)
+        updated_within_days: Only return items whose `updated` timestamp is within
+            the last N days. Omit (default None) to disable the recency filter.
+            Server-side filter — cheaper than load-then-filter at the caller.
         limit: Maximum items to return (default 20, max 100). Use 0 for no limit.
         offset: Skip this many items (for pagination, default 0)
     """
@@ -175,6 +181,14 @@ async def memory_list_backlog(
         return json.dumps({"error": f"Invalid status. Must be one of: {BACKLOG_STATUSES}"})
     if priority and priority not in BACKLOG_PRIORITIES:
         return json.dumps({"error": f"Invalid priority. Must be one of: {BACKLOG_PRIORITIES}"})
+    if updated_within_days is not None and updated_within_days < 1:
+        return json.dumps({"error": "updated_within_days must be >= 1"})
+
+    # Compute the recency cutoff once, comparing against meta["updated"] strings.
+    recency_cutoff = None
+    if updated_within_days is not None:
+        from datetime import timedelta
+        recency_cutoff = utc_now() - timedelta(days=int(updated_within_days))
 
     chroma = await get_chroma()
     items = []
@@ -222,6 +236,10 @@ async def memory_list_backlog(
                     continue
                 if not include_done and item_status in ["done", "wont_do"]:
                     continue
+                if recency_cutoff is not None:
+                    item_updated = parse_timestamp(meta.get("updated"))
+                    if item_updated is None or item_updated < recency_cutoff:
+                        continue
 
                 items.append({
                     "id": results["ids"][i],

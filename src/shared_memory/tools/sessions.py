@@ -2,7 +2,7 @@
 
 import json
 import uuid
-from typing import List
+from typing import Any, Dict, List
 
 from mcp.server.fastmcp import Context
 
@@ -319,16 +319,30 @@ async def memory_start_session(
     except Exception:
         pass  # binding is best-effort; auth handlers fall back to "unknown"
 
-    # Gather context for this Claude - keep output compact
-    output = {
-        "session_id": session_id,
-        "project": project
-    }
+    # design:push-control-v0 §3 — memory_start_session for this agent opens
+    # the recency window. This unblocks the read-side push-suppression
+    # filter so suppressed messages surface on the channel-poll path while
+    # the agent is plausibly being supervised.
+    try:
+        db_for_recency = get_mongo()
+        if db_for_recency is not None:
+            db_for_recency.agent_directory.update_one(
+                {"project": project, "instance": claude_instance},
+                {"$set": {"last_human_interaction": utc_now_iso(), "last_seen": utc_now_iso()}},
+                upsert=True,
+            )
+    except Exception:
+        pass  # recency bump is best-effort; do not fail session start
 
-    if _rename_redirect_warning:
-        output["rename_redirect"] = _rename_redirect_warning
+    # ── Gather context into local variables, assemble dict at the end ──
+    # Field order in the returned JSON is intentionally stable→dynamic for
+    # prompt-caching friendliness (backlog_c83b0591babd). Anthropic prefix
+    # caching keys on byte-identical prompt prefixes, so big stable blocks
+    # (guidelines, tip) go first; the unique session_id and changing per-
+    # call queries go last. Pure server-side change, no client API change.
 
-    # Get recent learnings for this project
+    # Recent learnings (DYNAMIC — task-driven query)
+    _learnings_titles = None
     try:
         proj_collection = await get_project_collection(chroma, project)
         recent_learnings = await proj_collection.query(
@@ -336,80 +350,98 @@ async def memory_start_session(
             n_results=3,
             where={"type": {"$in": ["learning", "gotcha", "handoff"]}}
         )
-
         if recent_learnings["documents"] and recent_learnings["documents"][0]:
-            # Compact: just titles
-            titles = [meta.get("title") for meta in recent_learnings["metadatas"][0]]
-            if titles:
-                output["learnings"] = titles
+            _titles = [meta.get("title") for meta in recent_learnings["metadatas"][0]]
+            if _titles:
+                _learnings_titles = _titles
     except Exception:
         pass
 
-    # Get shared patterns - just titles, skip if none
+    # Shared patterns (DYNAMIC — task-driven query)
+    _patterns_titles = None
     try:
         shared = await get_shared_collection(chroma, "patterns")
-        patterns = await shared.query(
+        patterns_result = await shared.query(
             query_texts=[task_description or project],
             n_results=2
         )
-        if patterns["documents"] and patterns["documents"][0]:
-            titles = [meta.get("title") for meta in patterns["metadatas"][0]]
-            if titles:
-                output["patterns"] = titles
+        if patterns_result["documents"] and patterns_result["documents"][0]:
+            _titles = [meta.get("title") for meta in patterns_result["metadatas"][0]]
+            if _titles:
+                _patterns_titles = _titles
     except Exception:
         pass
 
-    # Get active work by other Claudes - compact format, capped at 20
-    other_active = []
+    # Active work by other Claudes (DYNAMIC)
+    _other_active = []
     for sid, info in active_sessions.items():
         if sid != session_id:
-            other_active.append(f"{info['claude_instance']}@{info['project']}: {info['task'][:50]}")
-            if len(other_active) >= 20:
+            _other_active.append(f"{info['claude_instance']}@{info['project']}: {info['task'][:50]}")
+            if len(_other_active) >= 20:
                 break
 
-    if other_active:
-        output["other_claudes"] = other_active
+    # File locks, mods, signals, blocking, interface updates (DYNAMIC)
+    _relevant_locks = get_relevant_locks_for_session(session_id, project)
+    _recent_mods = await get_recent_modifications(chroma, project, session_id)
+    _signals = get_pending_signals(claude_instance)
+    _blocking = get_blocking_others(claude_instance)
+    _interface_updates = await get_interface_updates(chroma, project)
 
-    # NEW: Get relevant file locks
-    relevant_locks = get_relevant_locks_for_session(session_id, project)
-    if relevant_locks:
-        output["relevant_locks"] = relevant_locks
+    # Server-managed guidelines (STABLE per-project — biggest stable block)
+    _guidelines_block = None
+    try:
+        from shared_memory.tools.guidelines import get_guidelines_for_session
+        guidelines = get_guidelines_for_session(project)
+        if guidelines:
+            _guidelines_block = {
+                "instructions": "MANDATORY: Follow these rules for the entire session. They are authoritative.",
+                "rules": [g["rule"] for g in guidelines],
+            }
+    except Exception as e:
+        print(f"[MCP] Guidelines fetch failed (non-fatal): {e}")
 
-    # NEW: Get recent file modifications by others
-    recent_mods = await get_recent_modifications(chroma, project, session_id)
-    if recent_mods:
-        output["recent_modifications"] = recent_mods
+    # Auth info (STABLE — server-wide flag + per-key role)
+    _auth_block = None
+    try:
+        from shared_memory.auth import AUTH_ENABLED as _ae
+        if _ae:
+            _auth_block = {
+                "role": _auth_role,
+                "projects": _auth_projects or "all",
+            }
+    except ImportError:
+        pass
 
-    # NEW: Get pending signals (completion notifications)
-    signals = get_pending_signals(claude_instance)
-    if signals:
-        output["signals"] = signals
+    # Tip (STABLE — constant string)
+    _tip = "New? Run memory_query(query='shared memory usage guide') for best practices and backlog tools."
 
-    # NEW: Check if you're blocking others
-    blocking = get_blocking_others(claude_instance)
-    if blocking:
-        output["blocking_others"] = blocking
+    # ── Assemble output: stable fields FIRST, dynamic LAST ──
+    output: Dict[str, Any] = {}
 
-    # NEW: Get interface updates
-    interface_updates = await get_interface_updates(chroma, project)
-    if interface_updates:
-        output["interface_updates"] = interface_updates
+    # 1. STABLE always-present: guidelines (big), tip (constant)
+    if _guidelines_block is not None:
+        output["guidelines"] = _guidelines_block
+    output["tip"] = _tip
 
-    # ── Registry-awareness output ──
+    # 2. STABLE conditional but stable when present: auth, project
+    if _auth_block is not None:
+        output["auth"] = _auth_block
+    output["project"] = project
 
-    # Identity suggestion from path matching
+    # 3. ONE-SHOT stable (present in first few sessions, then absent):
+    # rename_redirect, identity_suggestion, registry_warning, worker, action_needed.
+    # Grouped after the always-stable block since their value text doesn't
+    # change once present, even though presence itself can change.
+    if _rename_redirect_warning:
+        output["rename_redirect"] = _rename_redirect_warning
     if _identity_suggestion:
         output["identity_suggestion"] = {
             "suggested_name": _identity_suggestion,
             "reason": f"Your working directory matches the path pattern for '{_identity_suggestion}'. "
                       f"Call memory_start_session again with claude_instance='{_identity_suggestion}' to use this identity."
         }
-
-    # Registry warning (unregistered named agent)
     if _registry_warning:
         output["registry_warning"] = _registry_warning
-
-    # Worker info
     if _is_worker:
         output["worker"] = {
             "auto_id": claude_instance,
@@ -417,8 +449,6 @@ async def memory_start_session(
             "note": "You are a worker agent. You can add backlog items and learnings but cannot receive messages. "
                     "Your session will auto-expire."
         }
-
-    # Nudge agents without a role_description to register one
     if _needs_role_description:
         output["action_needed"] = (
             "You have no role_description in the agent directory. "
@@ -427,31 +457,26 @@ async def memory_start_session(
             "or ask the user what your role should be."
         )
 
-    # Fetch server-managed guidelines (behavioral rules for all agents)
-    # Lazy import to avoid circular dependency between tool modules
-    try:
-        from shared_memory.tools.guidelines import get_guidelines_for_session
-        guidelines = get_guidelines_for_session(project)
-        if guidelines:
-            output["guidelines"] = {
-                "instructions": "MANDATORY: Follow these rules for the entire session. They are authoritative.",
-                "rules": [g["rule"] for g in guidelines],
-            }
-    except Exception as e:
-        print(f"[MCP] Guidelines fetch failed (non-fatal): {e}")
+    # 4. DYNAMIC: session_id (unique per call) and all per-call query results.
+    output["session_id"] = session_id
+    if _learnings_titles:
+        output["learnings"] = _learnings_titles
+    if _patterns_titles:
+        output["patterns"] = _patterns_titles
+    if _other_active:
+        output["other_claudes"] = _other_active
+    if _relevant_locks:
+        output["relevant_locks"] = _relevant_locks
+    if _recent_mods:
+        output["recent_modifications"] = _recent_mods
+    if _signals:
+        output["signals"] = _signals
+    if _blocking:
+        output["blocking_others"] = _blocking
+    if _interface_updates:
+        output["interface_updates"] = _interface_updates
 
-    # Auth info in output (when auth is enabled)
-    try:
-        from shared_memory.auth import AUTH_ENABLED as _ae
-        if _ae:
-            output["auth"] = {
-                "role": _auth_role,
-                "projects": _auth_projects or "all",
-            }
-    except ImportError:
-        pass
-
-    # Audit log
+    # Audit log (side effect, not in output)
     try:
         from shared_memory.audit import log_audit
         log_audit("session.start", claude_instance, project,
@@ -459,9 +484,6 @@ async def memory_start_session(
                   session_id)
     except Exception:
         pass
-
-    # Always include a tip pointing to the usage guide
-    output["tip"] = "New? Run memory_query(query='shared memory usage guide') for best practices and backlog tools."
 
     return json.dumps(output)
 

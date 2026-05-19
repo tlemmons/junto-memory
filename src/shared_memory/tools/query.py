@@ -6,8 +6,9 @@ from typing import List
 
 from mcp.server.fastmcp import Context
 
+from shared_memory import query_config
 from shared_memory.app import mcp
-from shared_memory.clients import get_chroma
+from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import OVERLAP_WINDOW_HOURS, PROJECT_PREFIX, SHARED_PREFIX
 from shared_memory.helpers import (
     cleanup_stale_signals,
@@ -52,6 +53,10 @@ async def memory_query(
     memory_types: List[str] = None,
     include_inactive: bool = False,
     include_shared: bool = True,
+    updated_within_days: int = None,
+    expand: bool = None,
+    expand_top: int = None,
+    snippet_length: int = None,
     limit: int = 3,
     ctx: Context = None
 ) -> str:
@@ -70,17 +75,53 @@ async def memory_query(
         memory_types: Filter by types (api_spec, architecture, learning, pattern, etc.)
         include_inactive: Include deprecated/superseded/archived documents
         include_shared: Search shared patterns/context (default True, set False for project-only)
+        updated_within_days: Only return hits whose `updated` (or `created` fallback)
+            timestamp is within the last N days. Omit (default None) to disable
+            the recency filter. Server-side filter — cheaper than load-then-filter.
+        expand: When True, results include full `content`. When False, results
+            include a `snippet` (first `snippet_length` chars) instead — much
+            smaller payload for triage-style queries. Omit (default None) to
+            use the per-project / server default (server default ships True
+            so existing callers see no change). Caller-supplied value always
+            wins over config.
+        expand_top: If >0, the top-N results get full `content` even when
+            `expand=False`; the rest get snippets. Lets callers say "real
+            content for the most relevant 1-3, previews for the rest."
+            Omit (default None) to use the configured default (0 = off).
+        snippet_length: Max chars in the preview snippet when expand=False.
+            Omit (default None) to use the configured default (200).
         limit: Maximum number of results (1-10, default 3)
     """
     error = require_session(session_id)
     if error:
         return error
 
+    if updated_within_days is not None and updated_within_days < 1:
+        return json.dumps({"error": "updated_within_days must be >= 1"})
+
     chroma = await get_chroma()
     active_sessions[session_id]["last_activity"] = utc_now_iso()
 
     if project:
         project = normalize_project(project)
+
+    # Resolve expand / expand_top / snippet_length from caller args, falling
+    # back to per-project then server-default config. backlog_6d5aa1a2849f.
+    _qcfg = query_config.get_effective_config(get_mongo(), project)
+    if expand is None:
+        expand = bool(_qcfg["default_expand"])
+    if expand_top is None:
+        expand_top = int(_qcfg["default_expand_top"])
+    if snippet_length is None:
+        snippet_length = int(_qcfg["default_snippet_length"])
+    if expand_top < 0:
+        expand_top = 0
+    if snippet_length < 50:
+        snippet_length = 50
+
+    recency_cutoff = None
+    if updated_within_days is not None:
+        recency_cutoff = utc_now() - timedelta(days=int(updated_within_days))
 
     results = []
 
@@ -117,6 +158,12 @@ async def memory_query(
                     relevance = calculate_relevance(dist)
                     if relevance < MIN_RELEVANCE_THRESHOLD:
                         continue
+
+                    # Recency filter (optional)
+                    if recency_cutoff is not None:
+                        ts = parse_timestamp(meta.get("updated") or meta.get("created"))
+                        if ts is None or ts < recency_cutoff:
+                            continue
 
                     status = meta.get("status", "active")
                     doc_id = proj_results["ids"][0][i] if proj_results["ids"] else None
@@ -176,6 +223,12 @@ async def memory_query(
                         if relevance < shared_threshold:
                             continue
 
+                        # Recency filter (optional)
+                        if recency_cutoff is not None:
+                            ts = parse_timestamp(meta.get("updated") or meta.get("created"))
+                            if ts is None or ts < recency_cutoff:
+                                continue
+
                         doc_id = shared_results["ids"][0][i] if shared_results["ids"] else None
 
                         staleness = format_staleness_warning(meta)
@@ -221,9 +274,27 @@ async def memory_query(
     results.sort(key=_sort_key)
     results = results[:limit]
 
+    # ── Preview-mode trim (backlog_6d5aa1a2849f) ──
+    # After sort+limit, decide per-position whether to ship full content or
+    # just a snippet. Top-N hits get content when `expand_top > 0`; rest get
+    # snippets when `expand=False`. When `expand=True` everyone gets content.
+    for i, r in enumerate(results):
+        full_content = r.get("content", "") or ""
+        # Always provide a snippet for predictable shape, even when expanded.
+        snippet = full_content[:snippet_length]
+        if len(full_content) > snippet_length:
+            snippet = snippet.rstrip() + "…"
+        r["snippet"] = snippet
+        give_content = bool(expand) or (expand_top > 0 and i < expand_top)
+        if not give_content:
+            r.pop("content", None)
+
     return json.dumps({
         "query": query,
         "result_count": len(results),
+        "expand": bool(expand),
+        "expand_top": int(expand_top),
+        "snippet_length": int(snippet_length),
         "results": results
     }, indent=2)
 

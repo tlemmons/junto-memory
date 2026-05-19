@@ -33,16 +33,24 @@ async def memory_admin(
     to_agent: str = None,
     dry_run: bool = True,
     alias_type: str = None,
+    # Push-control admin args
+    project: str = None,
+    key: str = None,
+    value: object = None,
+    alert_id: str = None,
+    agent: str = None,
+    reason: str = None,
     ctx: Context = None,
 ) -> str:
     """
     Admin operations: manage API keys, view audit logs, rename agents/projects.
 
     When auth is enabled:
-      - Read-only actions (auth_status, list_keys, list_aliases, audit_log) require
-        admin or owner.
-      - Mutation actions (create_key, revoke_key, rename_agent, rename_project)
-        require owner.
+      - Read-only actions (auth_status, list_keys, list_aliases, audit_log,
+        push_control_get_config) require admin or owner.
+      - Mutation actions (create_key, revoke_key, rename_agent, rename_project,
+        push_control_set_config, push_control_reset_config,
+        push_control_ack_alert, push_control_unsuspend_agent) require owner.
 
     Actions:
         create_key   - Create a new API key (requires name, optional role + projects)
@@ -56,6 +64,31 @@ async def memory_admin(
         rename_project - Rename a whole project. Args: from_project, to_project,
                        dry_run (default True).
         list_aliases - List active rename aliases. Args: alias_type=agent|project|None.
+        push_control_get_config - Read effective push-control config for one
+                       project (default+override) or all scopes. Args: project=None
+                       returns server default + all per-project overrides; project=<name>
+                       returns the effective merged config for that project.
+        push_control_set_config - Upsert one config key. Args: project=None for
+                       server default, project=<name> for per-project override;
+                       key (depth_cap|push_budget|hard_ceiling|recovery_behavior|
+                       incident_pad_messages|incident_pad_seconds|webhook_url|
+                       webhook_token); value.
+        push_control_reset_config - Drop a per-project override. Args: project
+                       (required); key=None drops ALL overrides for that project.
+        push_control_ack_alert - Mark an alert acknowledged (operator has seen it).
+                       Args: alert_id. Note: ack does NOT unsuspend the agent —
+                       use push_control_unsuspend_agent for that.
+        push_control_unsuspend_agent - Lift suspension on an agent so its pushes
+                       resume. Args: project, agent, reason (optional).
+        query_get_config - Read effective memory_query defaults. Args: project=None
+                       returns server default + all per-project overrides; project=<name>
+                       returns the effective merged config for that project.
+        query_set_config - Upsert one query default key. Args: project=None for
+                       server default, project=<name> for per-project override;
+                       key (default_expand|default_expand_top|default_snippet_length);
+                       value.
+        query_reset_config - Drop a per-project override. Args: project (required);
+                       key=None drops ALL overrides for that project.
 
     Args:
         session_id: Your session ID
@@ -69,6 +102,12 @@ async def memory_admin(
         to_project / to_agent: target identity
         dry_run: rename actions default to dry_run=True; pass dry_run=False to commit
         alias_type: filter for list_aliases ("agent" or "project")
+        project: target project for push_control_* actions (None = server default)
+        key: config key name for push_control_set_config / push_control_reset_config
+        value: config value for push_control_set_config
+        alert_id: alert ID for push_control_ack_alert
+        agent: agent name for push_control_unsuspend_agent
+        reason: explanatory note for push_control_unsuspend_agent (audit log)
     """
     error = require_session(session_id)
     if error:
@@ -82,7 +121,12 @@ async def memory_admin(
     if auth_error:
         return json.dumps({"error": auth_error})
 
-    write_actions = {"create_key", "revoke_key", "rename_agent", "rename_project"}
+    write_actions = {
+        "create_key", "revoke_key", "rename_agent", "rename_project",
+        "push_control_set_config", "push_control_reset_config",
+        "push_control_ack_alert", "push_control_unsuspend_agent",
+        "query_set_config", "query_reset_config",
+    }
     if action in write_actions:
         write_error = require_auth(session_info, "admin.write")
         if write_error:
@@ -221,7 +265,157 @@ async def memory_admin(
         )
         return json.dumps(result, indent=2, default=str)
 
+    elif action in (
+        "query_get_config", "query_set_config", "query_reset_config",
+    ):
+        from shared_memory import query_config
+        from shared_memory.clients import get_mongo
+
+        db = get_mongo()
+        if db is None:
+            return json.dumps({"error": "MongoDB not available"})
+
+        actor = session_info.get("claude_instance", "unknown")
+
+        if action == "query_get_config":
+            if project is not None:
+                return json.dumps(
+                    query_config.get_effective_config(db, project),
+                    indent=2, default=str,
+                )
+            server_default = query_config.get_effective_config(db, None)
+            overrides = []
+            try:
+                for doc in db.query_config.find({"scope": {"$ne": query_config.DEFAULT_SCOPE}}):
+                    overrides.append({
+                        "scope": doc.get("scope"),
+                        "project": doc.get("project"),
+                        "default_expand": doc.get("default_expand"),
+                        "default_expand_top": doc.get("default_expand_top"),
+                        "default_snippet_length": doc.get("default_snippet_length"),
+                        "updated_at": doc.get("updated_at"),
+                        "updated_by": doc.get("updated_by"),
+                    })
+            except Exception as e:
+                return json.dumps({"error": f"read overrides failed: {e}"})
+            return json.dumps({
+                "server_default": server_default,
+                "overrides": overrides,
+            }, indent=2, default=str)
+
+        elif action == "query_set_config":
+            if not key:
+                return json.dumps({"error": "'key' is required for query_set_config"})
+            result = query_config.set_config_value(
+                db=db, project=project, key=key, value=value, actor=actor,
+            )
+            return json.dumps(result, indent=2, default=str)
+
+        elif action == "query_reset_config":
+            if not project:
+                return json.dumps({"error": "'project' is required for query_reset_config (server default cannot be reset)"})
+            result = query_config.reset_config(
+                db=db, project=project, key=key, actor=actor,
+            )
+            return json.dumps(result, indent=2, default=str)
+
+    elif action in (
+        "push_control_get_config", "push_control_set_config",
+        "push_control_reset_config", "push_control_ack_alert",
+        "push_control_unsuspend_agent",
+    ):
+        from shared_memory import push_control
+        from shared_memory.clients import get_mongo
+
+        db = get_mongo()
+        if db is None:
+            return json.dumps({"error": "MongoDB not available"})
+
+        actor = session_info.get("claude_instance", "unknown")
+
+        if action == "push_control_get_config":
+            if project is not None:
+                return json.dumps(
+                    push_control.get_effective_config(db, project),
+                    indent=2, default=str,
+                )
+            # No project given — return both server default and all overrides.
+            server_default = push_control.get_effective_config(db, None)
+            overrides = []
+            try:
+                for doc in db.push_control_config.find({"scope": {"$ne": push_control.DEFAULT_SCOPE}}):
+                    overrides.append({
+                        "scope": doc.get("scope"),
+                        "project": doc.get("project"),
+                        "depth_cap": doc.get("depth_cap"),
+                        "push_budget": doc.get("push_budget"),
+                        "hard_ceiling": doc.get("hard_ceiling"),
+                        "recovery_behavior": doc.get("recovery_behavior"),
+                        "incident_pad_messages": doc.get("incident_pad_messages"),
+                        "incident_pad_seconds": doc.get("incident_pad_seconds"),
+                        "webhook_url": doc.get("webhook_url"),
+                        # webhook_token redacted in list view
+                        "webhook_token_set": bool(doc.get("webhook_token")),
+                        "updated_at": doc.get("updated_at"),
+                        "updated_by": doc.get("updated_by"),
+                    })
+            except Exception as e:
+                return json.dumps({"error": f"read overrides failed: {e}"})
+            # Redact webhook_token from default-view too
+            sd_view = dict(server_default)
+            if sd_view.get("webhook_token"):
+                sd_view["webhook_token"] = "<set>"
+            return json.dumps({
+                "server_default": sd_view,
+                "overrides": overrides,
+            }, indent=2, default=str)
+
+        elif action == "push_control_set_config":
+            if not key:
+                return json.dumps({"error": "'key' is required for push_control_set_config"})
+            result = push_control.set_config_value(
+                db=db, project=project, key=key, value=value, actor=actor,
+            )
+            return json.dumps(result, indent=2, default=str)
+
+        elif action == "push_control_reset_config":
+            if not project:
+                return json.dumps({"error": "'project' is required for push_control_reset_config (server default cannot be reset)"})
+            result = push_control.reset_config(
+                db=db, project=project, key=key, actor=actor,
+            )
+            return json.dumps(result, indent=2, default=str)
+
+        elif action == "push_control_ack_alert":
+            if not alert_id:
+                return json.dumps({"error": "'alert_id' is required for push_control_ack_alert"})
+            result = push_control.acknowledge_alert(db, alert_id, actor=actor)
+            return json.dumps(result, indent=2, default=str)
+
+        elif action == "push_control_unsuspend_agent":
+            if not project or not agent:
+                return json.dumps({"error": "'project' and 'agent' are required for push_control_unsuspend_agent"})
+            success = push_control.set_agent_suspended(
+                db=db, project=project, agent=agent,
+                suspended=False,
+                reason=reason or f"unsuspended by {actor}",
+                actor=actor,
+            )
+            return json.dumps({
+                "ok": success,
+                "project": project,
+                "agent": agent,
+                "reason": reason or "",
+            })
+
     else:
         return json.dumps({
-            "error": f"Unknown action '{action}'. Use: create_key, revoke_key, list_keys, audit_log, auth_status, rename_agent, rename_project, list_aliases"
+            "error": (
+                f"Unknown action '{action}'. Use: create_key, revoke_key, "
+                "list_keys, audit_log, auth_status, rename_agent, rename_project, "
+                "list_aliases, push_control_get_config, push_control_set_config, "
+                "push_control_reset_config, push_control_ack_alert, "
+                "push_control_unsuspend_agent, query_get_config, "
+                "query_set_config, query_reset_config"
+            )
         })

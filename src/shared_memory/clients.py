@@ -229,6 +229,17 @@ def get_mongo():
         from shared_memory.op_log import ensure_op_log_indexes
         ensure_op_log_indexes(_mongo_db)
 
+        # Push control (design:push-control-v0 v1.1.0): alerts collection +
+        # push_control_config collection. In-process emission counters live
+        # in push_control module memory, not Mongo — they reset on restart.
+        from shared_memory.push_control import init_push_control_indexes
+        init_push_control_indexes(_mongo_db)
+
+        # Query-tool defaults (backlog_6d5aa1a2849f): per-project overrides
+        # for memory_query's expand/snippet_length/expand_top defaults.
+        from shared_memory.query_config import init_query_config_indexes
+        init_query_config_indexes(_mongo_db)
+
         print(f"Connected to MongoDB at {MONGO_HOST}:{MONGO_PORT}/{MONGO_DB}")
         return _mongo_db
 

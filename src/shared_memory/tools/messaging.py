@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Set
 from mcp.server.fastmcp import Context
 from pydantic import AnyUrl
 
+from shared_memory import push_control
 from shared_memory.app import mcp
 from shared_memory.audit import log_audit
 from shared_memory.clients import get_mongo
@@ -206,28 +207,23 @@ _DESTRUCTIVE_KEYWORDS = re.compile(
     r"|\brm\s+-rf\b"
 )
 
-# Phase C1: hard cap on auto-relay chains. Anything above this is persisted
-# but its delivery push (notify) is suppressed and coordinator gets alerted —
-# UNLESS the per-agent recency window bypasses it (Phase D2 below).
+# Legacy Phase C1 constant. Push-control v0 superseded this with a
+# configurable per-project depth_cap (default 12) evaluated inside
+# push_control.evaluate_send. Kept for any external code still referencing
+# the symbol; not consulted on the send path anymore.
 CHAIN_DEPTH_HARD_CAP = 5
 
-# ── Phase D2: per-agent human-recency window ───────────────────────────────
-# Threat model: we are NOT defending against a malicious agent gaming a flag;
-# we are stopping confused agents from spiraling. In our environment all
-# agents run on the user's hardware behind Tailscale and there is no
-# adversarial sender. The chain_depth cap exists to bound spirals when no
-# human is supervising. When the user IS active with one of the endpoints,
-# the chain is presumed supervised and the cap is bypassed.
-#
-# "Active with agent X" is server-observable from two signals only:
-#   1. A `sent_by_human=True` message DELIVERED to X (server-derived from
-#      caller's role; resists forgery without trying to).
-#   2. A `human_interacted=True` outbound message FROM X (sender-asserted by
-#      the agent's plugin/prompt loop; trusted in this environment because
-#      there is no adversarial sender).
-# Both update `agent_directory.last_human_interaction` for X. The depth gate
-# checks both endpoints with OR semantics: if EITHER sender or recipient has
-# recent human activity within the window, the cap is bypassed.
+# ── Recency window (now drives push-suppression filter release, §3) ────────
+# Three signals open the 5-minute window for an agent:
+#   1. memory_start_session for that agent (set in sessions.py).
+#   2. Inbound `sent_by_human=True` message DELIVERED to that agent (set
+#      below on read).
+#   3. Outbound `human_interacted=True` message FROM that agent (set below
+#      on send).
+# All three write agent_directory.last_human_interaction. push_control.py's
+# delivery filter (§3) checks this timestamp; when the window is open, the
+# inbox resource releases push_suppressed messages. The depth cap itself no
+# longer consults this window (push-control-v0 §6 — the cap is unconditional).
 HUMAN_RECENCY_WINDOW_SECONDS = 300  # 5 minutes
 
 
@@ -314,11 +310,12 @@ async def memory_send_message(
         in_response_to: Message ID this is a programmatic auto-response to (Phase C autopilot).
             If set, server computes chain_depth = parent.chain_depth + 1.
         chain_depth: Override chain depth (Phase C autopilot). Server takes the
-            max of (parent_depth+1, caller-provided). Above CHAIN_DEPTH_HARD_CAP
-            (5), messages are persisted but their push notification is
-            suppressed and coordinator gets alerted — UNLESS either endpoint
-            has had human interaction within the recency window (5min), in
-            which case the cap is bypassed (Phase D2).
+            max of (parent_depth+1, caller-provided). Above the configured
+            push-control depth_cap (default 12 per project) the message is
+            persisted but its push notification is suppressed (it sits in the
+            recipient's normal inbox, accessible via direct query). Per-sender
+            hourly limits (push_budget=30, hard_ceiling=100) also gate the
+            push. See design:push-control-v0.
         require_human: Force human review on the recipient side. Always True for
             messages whose body matches the destructive-keyword regex (DELETE,
             DROP, TRUNCATE, deploy, production, git push --force).
@@ -413,92 +410,77 @@ async def memory_send_message(
         caller_depth = chain_depth if isinstance(chain_depth, int) else 0
         final_depth = max(parent_depth + 1, caller_depth, 0)
 
-    # ── Phase D2: per-agent recency bypass ──
-    # When depth exceeds the hard cap, check whether either endpoint has had a
-    # human interaction within HUMAN_RECENCY_WINDOW_SECONDS. If so, the chain
-    # is presumed supervised and the cap is bypassed. Otherwise we PERSIST the
-    # message but suppress the push notification (fail-loud, never drop) and
-    # alert the coordinator so the runaway loop is visible. Pull-side delivery
-    # still works; the message lands in the recipient's queue when they ask
-    # for it.
-    suppress_push = False
+    # ── Push control v0 evaluation (design:push-control-v0 v1.1.0) ──
+    # Replaces the legacy CHAIN_DEPTH_HARD_CAP=5 + Phase D2 recency-bypass
+    # block. The new gate has three layers, all per-sender and all invisible
+    # to the agent: push depth cap (per-thread, flat, no reset), push budget
+    # (per-sender hourly, soft), hard ceiling (per-sender hourly, suspend).
+    # Per §6 the depth cap does NOT consult human-presence — the cap is
+    # deliberately unconditional. The recency window survives only for the
+    # read-side push-suppression-filter release (§3, applied in read_inbox).
+    #
+    # Hard-ceiling alerting + agent suspension are wired in Phase 1d. For
+    # now a hard_trip just sets push_suppressed and emits an audit event;
+    # the agent is not yet suspended (incoming Phase 1d).
+    pc_eval = push_control.evaluate_send(
+        db=db,
+        sender_instance=session_info["claude_instance"],
+        sender_project=from_project,
+        chain_depth=final_depth,
+        recipient_instance=to_instance,
+        recipient_project=normalized_project,
+        recency_bypass=False,
+    )
+    suppress_push = pc_eval["suppress"]
+    push_suppress_reason = pc_eval["reason"]
+    emission_count = pc_eval["emission_count"]
+    hard_trip = pc_eval["hard_trip"]
+    # Legacy field — no longer computed at send time. Kept on the message
+    # doc for backward compat with downstream consumers that read it.
     recency_bypass = False
-    if final_depth > CHAIN_DEPTH_HARD_CAP:
-        sender_recent = _has_recent_human_interaction(
-            db, from_project, session_info["claude_instance"]
-        )
-        recipient_recent = (
-            to_instance != "*"
-            and _has_recent_human_interaction(db, normalized_project, to_instance)
-        )
-        if sender_recent or recipient_recent:
-            recency_bypass = True
-            try:
-                log_audit(
-                    "chain.recency_bypass",
-                    session_info["claude_instance"],
-                    from_project,
-                    {
-                        "to_instance": to_instance,
-                        "to_project": normalized_project,
-                        "chain_depth": final_depth,
-                        "sender_recent": sender_recent,
-                        "recipient_recent": recipient_recent,
-                        "window_seconds": HUMAN_RECENCY_WINDOW_SECONDS,
-                    },
-                    session_id,
-                )
-            except Exception:
-                pass
-        else:
-            suppress_push = True
-            # Coordinator alert. The original message still gets persisted
-            # below; this is a separate system-level breadcrumb.
-            try:
-                coordinator = db.registered_agents.find_one({
-                    "project": normalized_project,
-                    "tier": "admin",
-                })
-                if coordinator:
-                    db.messages.insert_one({
-                        "_id": f"msg_{uuid.uuid4().hex[:12]}",
-                        "from_instance": "system",
-                        "from_project": normalized_project,
-                        "to_instance": coordinator["name"],
-                        "to_project": normalized_project,
-                        "message": (
-                            f"CHAIN-DEPTH ALERT: persisted (push suppressed) a "
-                            f"message from {session_info['claude_instance']}@{from_project} "
-                            f"to {to_instance}@{target_project} at depth {final_depth} "
-                            f"(cap is {CHAIN_DEPTH_HARD_CAP}). Neither endpoint had "
-                            f"human interaction within {HUMAN_RECENCY_WINDOW_SECONDS}s. "
-                            f"Likely autopilot loop. Investigate and consider "
-                            f"memory_pause_autopilot."
-                        ),
-                        "priority": "urgent",
-                        "category": "blocker",
-                        "status": "pending",
-                        "chain_depth": 0,
-                        "require_human": True,
-                        "created_at": now,
-                    })
-            except Exception:
-                pass
-            try:
-                log_audit(
-                    "chain.persist_suppressed_push",
-                    session_info["claude_instance"],
-                    from_project,
-                    {
-                        "to_instance": to_instance,
-                        "to_project": normalized_project,
-                        "chain_depth": final_depth,
-                        "cap": CHAIN_DEPTH_HARD_CAP,
-                    },
-                    session_id,
-                )
-            except Exception:
-                pass
+
+    if suppress_push:
+        try:
+            log_audit(
+                "push_control.hard_trip" if hard_trip else "push_control.soft_trip",
+                actor=session_info["claude_instance"],
+                project=from_project,
+                details={
+                    "reason": push_suppress_reason,
+                    "to_instance": to_instance,
+                    "to_project": normalized_project,
+                    "chain_depth": final_depth,
+                    "emission_count": emission_count,
+                    "config_depth_cap": pc_eval["effective_config"].get("depth_cap"),
+                    "config_push_budget": pc_eval["effective_config"].get("push_budget"),
+                    "config_hard_ceiling": pc_eval["effective_config"].get("hard_ceiling"),
+                },
+                session_id=session_id,
+            )
+        except Exception:
+            pass
+
+    # ── Phase 1d/1e/1g: hard-ceiling escalation ──
+    # First crossing of the hard ceiling for this sender in this hour:
+    # compute the incident window, write an alert, insert system@junto
+    # recovery notices into both endpoints' inboxes, suspend the agent,
+    # and fire an out-of-band webhook to claudeControl. All inside a
+    # try/except so a malfunction in the escalation path never breaks
+    # the underlying send.
+    hard_trip_result = None
+    if hard_trip:
+        try:
+            hard_trip_result = push_control.handle_hard_trip(
+                db=db,
+                sender_instance=session_info["claude_instance"],
+                sender_project=from_project,
+                emission_count=emission_count,
+                trigger="hard_ceiling",
+                trip_time=now,
+                cfg=pc_eval["effective_config"],
+            )
+        except Exception as e:
+            log.error("push_control: hard_trip orchestration failed: %s", e)
 
     # ── Phase C1.1: destructive content gate, chain-depth-gated ──
     # Auto-flag only when this is a relayed/autopilot message (chain_depth>0).
@@ -535,6 +517,8 @@ async def memory_send_message(
         "user_originated": sent_by_human or session_info.get("claude_instance", "").startswith("user-"),
         "status": "pending",
         "push_suppressed": suppress_push,
+        "push_suppress_reason": push_suppress_reason,
+        "emission_count": emission_count,
         "recency_bypass": recency_bypass,
         "created_at": now,
         "delivered_at": None,
@@ -582,10 +566,10 @@ async def memory_send_message(
     # AFTER notify gives the most accurate "live" count.
     live_subscribers = _live_subscribers_count(msg_doc["to_project"], to_instance)
 
-    # effective_chain_depth: 0 when the recency window bypassed the cap
-    # (chain is presumed supervised, treat as fresh from gate's perspective).
-    # Otherwise the literal final_depth.
-    effective_chain_depth = 0 if recency_bypass else final_depth
+    # effective_chain_depth: legacy field. Push-control v0 removed the
+    # recency-bypass behavior on the depth cap, so this is now identical to
+    # final_depth. Kept in the response shape for backward compat.
+    effective_chain_depth = final_depth
 
     return json.dumps({
         "status": "queued",
@@ -605,6 +589,8 @@ async def memory_send_message(
         "destructive_match": body_is_destructive,
         "persisted": True,
         "push_suppressed": suppress_push,
+        "push_suppress_reason": push_suppress_reason,
+        "emission_count": emission_count,
         "recency_bypass": recency_bypass,
         "live_subscribers": 0 if suppress_push else live_subscribers,
     })
@@ -618,6 +604,7 @@ async def memory_get_messages(
     message_id: str = None,
     for_instance: str = None,
     cursor: str = None,
+    updated_within_days: int = None,
     ctx: Context = None
 ) -> str:
     """
@@ -638,10 +625,18 @@ async def memory_get_messages(
             to your own agent name is always allowed (self-read).
         cursor: Pagination cursor (created_at ISO string from a previous call's
             next_cursor). Returns the next page of OLDER messages (created_at < cursor).
+        updated_within_days: Only return messages whose `created_at` is within
+            the last N days. Omit (default None) to disable the recency filter.
+            Server-side filter — cheaper than load-then-filter at the caller.
+            Note: messages have a 7-day TTL set at insert time (see clients.py),
+            so values > 7 silently behave as 7.
     """
     error = require_session(session_id)
     if error:
         return error
+
+    if updated_within_days is not None and updated_within_days < 1:
+        return json.dumps({"error": "updated_within_days must be >= 1"})
 
     session_info = active_sessions[session_id]
     my_instance = session_info["claude_instance"]
@@ -688,7 +683,10 @@ async def memory_get_messages(
             "sent_by_human": bool(doc.get("sent_by_human", False)),
             "human_interacted": bool(doc.get("human_interacted", False)),
             "push_suppressed": bool(doc.get("push_suppressed", False)),
+            "push_suppress_reason": doc.get("push_suppress_reason"),
             "recency_bypass": bool(doc.get("recency_bypass", False)),
+            "is_system_notice": bool(doc.get("is_system_notice", False)),
+            "system_notice_kind": doc.get("system_notice_kind"),
         }
         if doc.get("reply_to"):
             entry["reply_to"] = doc["reply_to"]
@@ -736,6 +734,11 @@ async def memory_get_messages(
         if cursor_dt is not None:
             query["$and"].append({"created_at": {"$lt": cursor_dt}})
 
+    # Recency filter (server-side; saves load-then-filter cycles at callers)
+    if updated_within_days is not None:
+        recency_cutoff = utc_now() - timedelta(days=int(updated_within_days))
+        query["$and"].append({"created_at": {"$gte": recency_cutoff}})
+
     # Fetch limit+1 to detect "has more" without a separate count query.
     page_size = max(1, int(limit))
     db_cursor = db.messages.find(query).sort([
@@ -781,7 +784,10 @@ async def memory_get_messages(
             "sent_by_human": is_sent_by_human,
             "human_interacted": bool(doc.get("human_interacted", False)),
             "push_suppressed": bool(doc.get("push_suppressed", False)),
+            "push_suppress_reason": doc.get("push_suppress_reason"),
             "recency_bypass": bool(doc.get("recency_bypass", False)),
+            "is_system_notice": bool(doc.get("is_system_notice", False)),
+            "system_notice_kind": doc.get("system_notice_kind"),
         }
         if doc.get("reply_to"):
             entry["reply_to"] = doc["reply_to"]
@@ -1080,7 +1086,10 @@ def _format_inbox_message(doc: Dict[str, Any]) -> Dict[str, Any]:
         "sent_by_human": bool(doc.get("sent_by_human", False)),
         "human_interacted": bool(doc.get("human_interacted", False)),
         "push_suppressed": bool(doc.get("push_suppressed", False)),
+        "push_suppress_reason": doc.get("push_suppress_reason"),
         "recency_bypass": bool(doc.get("recency_bypass", False)),
+        "is_system_notice": bool(doc.get("is_system_notice", False)),
+        "system_notice_kind": doc.get("system_notice_kind"),
     }
     if doc.get("reply_to"):
         entry["reply_to"] = doc["reply_to"]
@@ -1136,6 +1145,31 @@ async def read_inbox(project: str, agent: str) -> str:
         ]
     }
     query = {"$and": [instance_match, project_match, {"status": "pending"}]}
+
+    # ── Push-suppression filter (design:push-control-v0 §3) ──
+    # The inbox resource is what the channel-push delivery path reads. By
+    # default, hide push_suppressed messages so a continuously-polling plugin
+    # does not pump them as live channel notifications. They are released
+    # only when the recipient's recency window is open (5min from any of:
+    # memory_start_session for this agent, inbound sent_by_human=True,
+    # outbound human_interacted=True). When closed, suppressed messages
+    # remain visible to direct queries (memory_get_messages); the push
+    # surface is the only one filtered.
+    #
+    # System notices (is_system_notice=True) are ALWAYS surfaced — per §8
+    # they're meant to be found on the next normal inbox flush, sitting in
+    # front of the suspect messages. They carry push_suppressed=True so
+    # they never push, but they must not be hidden from reads.
+    push_filter_active = not push_control.should_deliver_via_push_filter(
+        db, project, agent
+    )
+    if push_filter_active:
+        query["$and"].append({
+            "$or": [
+                {"push_suppressed": {"$ne": True}},
+                {"is_system_notice": True},
+            ]
+        })
 
     cursor = db.messages.find(query).sort([
         ("priority", 1),
