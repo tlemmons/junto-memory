@@ -107,7 +107,9 @@ curl -sf http://<primary-tailnet-host>:8080/health
 
 Should print `{"status":"healthy",...}`. If not, fix tailnet
 connectivity before proceeding — every later step assumes the link
-works.
+works. If `tailscale ping <primary-host>` works but the curl hangs
+or refuses, the fix is **`sudo systemctl restart tailscaled`** on the
+side reporting the failure — see Step 8 for the full pattern.
 
 ## Step 4 — Clone and configure junto-memory on the peer
 
@@ -238,7 +240,21 @@ sudo tailscale up
 ```
 
 If the queued write appears on primary after restore, the supervisor
-is doing its job. If it doesn't, capture
+is doing its job. If it doesn't, first verify the link is actually
+back: from the peer, `curl -sf http://<primary-tailnet-host>:8080/health`.
+
+**Tailnet gotcha:** if `sudo tailscale up` returned successfully but
+the curl still hangs or refuses, the fix is `sudo systemctl restart
+tailscaled` on the affected host — **not** another `tailscale down`
+followed by `tailscale up`. The down/up loop doesn't recover the
+daemon's inbound routing on a host where tailscaled has wedged; the
+systemctl restart does. This was a five-wrong-hypothesis session on
+the work-side pilot before the pattern was found
+(workClaude learning_1b5, 2026-05-20). Use the systemctl-restart as
+the first diagnostic step when a peer goes unreachable inbound, not
+the last.
+
+Only after the link is verified-back should you capture
 `docker logs --tail 100 junto-peer-sync-engine` and reach out
 (see Support below).
 
