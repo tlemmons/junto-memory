@@ -150,8 +150,10 @@ The script:
 `sync engine supervisor starting`, then `supervisor: inner engine
 starting`, then a series of `httpx HTTP Request: POST … 200 OK`
 lines as it begins draining ops from primary. The first pull is
-the cold sync — for a primary with months of data, expect it to
-take 5–30 minutes depending on op-log size.
+the cold sync — workJunto first-adopter observation (2026-05-20)
+was ~3 minutes from an AWS primary with months of accumulated
+op-log; budget up to 15–30 minutes for primaries with
+substantially larger histories.
 
 Watch progress:
 
@@ -293,8 +295,9 @@ Only after the link is verified-back should you capture
   state-spec writes race. MVP punts on this; one identity, one
   primary local instance.
 - **Cold sync uses the regular pull endpoint.** No optimized
-  snapshot transfer. For an AWS primary with months of accumulated
-  op-log, the first peer-sync after step 5 may take 15–30 minutes.
+  snapshot transfer. Empirically: ~3 minutes for the first
+  workJunto pilot from AWS primary (2026-05-20). Larger primaries
+  with year-plus op-log history may take 15–30 minutes.
 
 ## Support
 
