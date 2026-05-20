@@ -290,8 +290,46 @@ def main():
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
-    # Run with the selected transport
-    mcp.run(transport=args.transport)
+    # Run with the selected transport.
+    # For streamable-http we go through uvicorn manually so we can install
+    # the /mcp/discussion path-rewriting ASGI middleware (backlog_0f6b4e4332a0).
+    # stdio path is unchanged.
+    if args.transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        import uvicorn
+
+        from shared_memory.tool_profiles import current_profile
+
+        starlette_app = mcp.streamable_http_app()
+
+        DISCUSSION_PREFIX = "/mcp/discussion"
+
+        async def discussion_route_middleware(scope, receive, send):
+            """Rewrite /mcp/discussion[/...] → /mcp[/...] and set the
+            tool_profiles.current_profile contextvar to "discussion" so the
+            list_tools handler (app.py) filters the surface. Default /mcp path
+            is untouched and continues to serve the full tool surface."""
+            if scope["type"] in ("http", "websocket"):
+                path = scope.get("path", "")
+                if path == DISCUSSION_PREFIX or path.startswith(DISCUSSION_PREFIX + "/"):
+                    new_path = "/mcp" + path[len(DISCUSSION_PREFIX):]
+                    scope = {**scope, "path": new_path, "raw_path": new_path.encode()}
+                    token = current_profile.set("discussion")
+                    try:
+                        await starlette_app(scope, receive, send)
+                    finally:
+                        current_profile.reset(token)
+                    return
+            await starlette_app(scope, receive, send)
+
+        config = uvicorn.Config(
+            discussion_route_middleware,
+            host=args.host,
+            port=args.port,
+            log_level=mcp.settings.log_level.lower(),
+        )
+        uvicorn.Server(config).run()
 
 
 def _ts(iso_str: str) -> float:

@@ -65,6 +65,31 @@ mcp._mcp_server.request_handlers[_mcp_types.CallToolRequest] = (
 )
 
 
+# ── list_tools profile filtering (backlog_0f6b4e4332a0) ──
+# When the /mcp/discussion ASGI middleware (see __main__.py) sets the
+# tool_profiles.current_profile contextvar to "discussion" for a request, the
+# tools/list response is filtered down to DISCUSSION_PROFILE_TOOLS. Default
+# profile is "full" — every registered tool surfaces, unchanged from the
+# pre-2026-05-20 behavior. Same chokepoint pattern as the CallToolRequest
+# patch above.
+from shared_memory.tool_profiles import DISCUSSION_PROFILE_TOOLS, current_profile
+
+_orig_list_tools_handler = mcp._mcp_server.request_handlers[_mcp_types.ListToolsRequest]
+
+
+async def _list_tools_with_profile_filter(req):
+    result = await _orig_list_tools_handler(req)
+    if current_profile.get() != "discussion":
+        return result
+    list_result = result.root  # ServerResult.root is the ListToolsResult
+    filtered = [t for t in list_result.tools if t.name in DISCUSSION_PROFILE_TOOLS]
+    new_list_result = list_result.model_copy(update={"tools": filtered})
+    return _mcp_types.ServerResult(new_list_result)
+
+
+mcp._mcp_server.request_handlers[_mcp_types.ListToolsRequest] = _list_tools_with_profile_filter
+
+
 def create_app():
     """Import all tool modules to trigger @mcp.tool() registration, then return mcp."""
     # These imports trigger the @mcp.tool() decorators which register tools with mcp
