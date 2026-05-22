@@ -101,6 +101,9 @@ services:
       # once Phase 2 lands and LAN-local instances appear; today the
       # central singleton uses `central`.
       - ORIGIN_SERVER_ID=${ORIGIN_SERVER_ID:-central}
+      # Per-tool latency logging (src/shared_memory/timing.py). Set to 1 for
+      # diagnosis runs; unset/empty for normal operation (zero overhead).
+      - JUNTO_TIMING_LOG=${JUNTO_TIMING_LOG:-}
     ports:
       - "8080:8080"
     ulimits:

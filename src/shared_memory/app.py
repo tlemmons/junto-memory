@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 from shared_memory.clients import app_lifespan
 from shared_memory.error_flag import build_call_tool_handler_with_error_flag
 from shared_memory.intent import build_call_tool_handler_with_intent
+from shared_memory.timing import build_call_tool_handler_with_timing
 
 # Allow connections from any host (for remote access via IP or proxy)
 # stateless_http=False (the default): persistent client sessions, required
@@ -56,11 +57,16 @@ mcp._mcp_server.get_capabilities = _get_capabilities_with_subscribe
 # reassignment is invisible to the registered handler. Replacing the dict entry
 # is the only way to interpose.
 _orig_call_tool_handler = mcp._mcp_server.request_handlers[_mcp_types.CallToolRequest]
-# Composition: error_flag is outermost (post-processes the final result),
-# intent is innermost (extracts __intent_id from args before dispatch).
+# Composition (outer → inner):
+#   timing     — measures total wall time including all inner wrappers
+#   error_flag — post-processes the final result
+#   intent     — extracts __intent_id from args before dispatch
+# When JUNTO_TIMING_LOG is unset (default), the timing wrapper is a no-op.
 mcp._mcp_server.request_handlers[_mcp_types.CallToolRequest] = (
-    build_call_tool_handler_with_error_flag(
-        build_call_tool_handler_with_intent(_orig_call_tool_handler)
+    build_call_tool_handler_with_timing(
+        build_call_tool_handler_with_error_flag(
+            build_call_tool_handler_with_intent(_orig_call_tool_handler)
+        )
     )
 )
 
