@@ -70,7 +70,7 @@ def _parse_deliver_at(value: str, now: datetime) -> Optional[datetime]:
 
 
 @mcp.tool()
-async def memory_schedule_message(
+async def memory_set_reminder(
     session_id: str,
     deliver_at: str,
     message: str,
@@ -79,9 +79,9 @@ async def memory_schedule_message(
     dedup_key: Optional[str] = None,
 ) -> str:
     """
-    Schedule a message to deliver to yourself at a future time.
+    Set a reminder to wake yourself at a future time.
 
-    Self-only. The materialized message appears in your own inbox at deliver_at,
+    Self-only. The reminder body is delivered to your own inbox at deliver_at,
     routed through the same push path as memory_send_message — surfaces as a
     channel block on next user turn (when inbox push is healthy) and is always
     pullable via memory_get_messages.
@@ -94,15 +94,15 @@ async def memory_schedule_message(
         session_id: Your session ID.
         deliver_at: ISO 8601 UTC timestamp ("2026-05-22T15:30:00Z") OR relative
             ("+30s", "+5m", "+2h", "+1d"). Must be in the future, max 30 days.
-        message: The body delivered to you at deliver_at.
+        message: The reminder body delivered to you at deliver_at.
         category: Same set as memory_send_message (info/task/question/review/blocker).
         priority: low / normal / urgent.
-        dedup_key: Optional caller-supplied string. If a pending schedule with
+        dedup_key: Optional caller-supplied string. If a pending reminder with
             this key already exists for you, returns that schedule_id instead
             of creating a duplicate. Use for idempotent reminders.
 
     Limits:
-        - Max 20 pending schedules per agent at any time (cancel to free slots).
+        - Max 20 pending reminders per agent at any time (cancel to free slots).
         - Max 30-day horizon on deliver_at.
         - Destructive keywords (DELETE/DROP/rm -rf/etc.) in body force
           require_human=true on the materialized message.
@@ -163,8 +163,8 @@ async def memory_schedule_message(
     })
     if pending_count >= MAX_PENDING_PER_AGENT:
         return json.dumps({
-            "error": f"Pending schedule cap reached ({MAX_PENDING_PER_AGENT}). "
-                     "Cancel some with memory_cancel_scheduled to free slots.",
+            "error": f"Pending reminder cap reached ({MAX_PENDING_PER_AGENT}). "
+                     "Cancel some with memory_cancel_reminder to free slots.",
             "pending_count": pending_count,
             "pending_cap": MAX_PENDING_PER_AGENT,
         })
@@ -203,11 +203,11 @@ async def memory_schedule_message(
 
 
 @mcp.tool()
-async def memory_cancel_scheduled(session_id: str, schedule_id: str) -> str:
+async def memory_cancel_reminder(session_id: str, schedule_id: str) -> str:
     """
-    Cancel a pending scheduled message. Caller must own the schedule.
+    Cancel a pending reminder. Caller must own the reminder.
 
-    Idempotent on already-cancelled / already-delivered schedules: returns the
+    Idempotent on already-cancelled / already-delivered reminders: returns the
     current status instead of failing.
     """
     error = require_session(session_id)
@@ -245,13 +245,13 @@ async def memory_cancel_scheduled(session_id: str, schedule_id: str) -> str:
 
 
 @mcp.tool()
-async def memory_list_scheduled(
+async def memory_list_reminders(
     session_id: str,
     include_history: bool = False,
     limit: int = 20,
 ) -> str:
     """
-    List your scheduled messages.
+    List your reminders.
 
     Args:
         session_id: Your session ID.
