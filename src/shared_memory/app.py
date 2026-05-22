@@ -78,7 +78,7 @@ mcp._mcp_server.request_handlers[_mcp_types.CallToolRequest] = (
 # profile is "full" — every registered tool surfaces, unchanged from the
 # pre-2026-05-20 behavior. Same chokepoint pattern as the CallToolRequest
 # patch above.
-from shared_memory.tool_profiles import DISCUSSION_PROFILE_TOOLS, current_profile
+from shared_memory.tool_profiles import DISCUSSION_PROFILE_TOOLS, current_profile  # noqa: E402
 
 _orig_list_tools_handler = mcp._mcp_server.request_handlers[_mcp_types.ListToolsRequest]
 

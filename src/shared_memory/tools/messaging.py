@@ -467,10 +467,9 @@ async def memory_send_message(
     # and fire an out-of-band webhook to claudeControl. All inside a
     # try/except so a malfunction in the escalation path never breaks
     # the underlying send.
-    hard_trip_result = None
     if hard_trip:
         try:
-            hard_trip_result = push_control.handle_hard_trip(
+            push_control.handle_hard_trip(
                 db=db,
                 sender_instance=session_info["claude_instance"],
                 sender_project=from_project,

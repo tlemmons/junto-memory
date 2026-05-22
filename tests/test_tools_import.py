@@ -2,13 +2,13 @@
 
 
 def test_all_tools_register():
-    """All 50 tools are registered with the MCP server."""
+    """All 55 tools are registered with the MCP server."""
     from shared_memory.app import create_app
 
     mcp = create_app()
     tools = mcp._tool_manager._tools
 
-    assert len(tools) == 50, f"Expected 50 tools, got {len(tools)}: {sorted(tools.keys())}"
+    assert len(tools) == 55, f"Expected 55 tools, got {len(tools)}: {sorted(tools.keys())}"
 
 
 def test_expected_tools_present():

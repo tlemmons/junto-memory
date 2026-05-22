@@ -11,7 +11,6 @@ and gated behind the existing admin auth surface.
 """
 
 import json
-from typing import Any, Dict
 
 from mcp.server.fastmcp import Context
 
@@ -19,7 +18,6 @@ from shared_memory import push_control
 from shared_memory.app import mcp
 from shared_memory.clients import get_mongo
 from shared_memory.helpers import require_session
-from shared_memory.state import active_sessions
 
 
 @mcp.tool()
