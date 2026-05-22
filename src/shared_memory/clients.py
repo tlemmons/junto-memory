@@ -80,14 +80,34 @@ async def get_chroma():
 
 @asynccontextmanager
 async def app_lifespan(app):
-    """Lifespan manager for cleanup (lazy init means startup is handled by get_chroma)."""
+    """Lifespan manager for startup tasks + shutdown cleanup.
+
+    Chroma is lazy-initialized via get_chroma() and not handled here. Tasks that
+    need an event loop (scheduled-message scanner, future periodic jobs) start
+    here. We run with stateless_http=False (app.py), so lifespan is reliable.
+    """
     global _chroma_client
 
-    # We don't initialize here anymore - get_chroma() does lazy initialization
-    # This avoids issues with stateless_http mode where lifespan might not run properly
+    # Start the scheduled-message scanner (timed self-messages). Local import
+    # avoids load-time cycles between clients.py and tools/scheduler.py.
+    try:
+        from shared_memory.tools.scheduler import ensure_indexes, start_scheduler
+        ensure_indexes()
+        start_scheduler()
+    except Exception as e:
+        # Don't take down the server if the scheduler can't start — log loudly
+        # and keep going. The tools still register; just no auto-delivery.
+        import logging
+        logging.getLogger(__name__).error("lifespan: scheduler startup failed: %s", e)
+
     yield {}
 
-    # Cleanup on shutdown
+    # Shutdown cleanup.
+    try:
+        from shared_memory.tools.scheduler import stop_scheduler
+        stop_scheduler()
+    except Exception:
+        pass
     _chroma_client = None
 
 

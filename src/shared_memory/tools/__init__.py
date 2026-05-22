@@ -20,6 +20,7 @@ from shared_memory.tools import (  # noqa: F401
     projects,
     push_control_api,
     query,
+    scheduler,
     search,
     sessions,
     specs,
