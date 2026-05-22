@@ -71,6 +71,16 @@ async def memory_start_session(
     # Cleanup stale sessions on each new session start
     cleanup_stale_sessions()
 
+    # ── Drain gate ──
+    # When an operator has set drain=true via memory_admin (typically during a
+    # graceful-restart prep window), refuse NEW sessions. Existing sessions
+    # continue to work. The flag is in-memory and clears on the next process
+    # restart by design.
+    from shared_memory.restart import drain_error_payload, is_draining
+    draining, _ = is_draining()
+    if draining:
+        return json.dumps(drain_error_payload())
+
     # ── Authentication (Path B soft-auth) ──
     # Posture: when AUTH_ENABLED=true and no api_key is presented, fall through
     # as default role="agent" instead of rejecting. This lets existing agents

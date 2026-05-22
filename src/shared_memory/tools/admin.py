@@ -89,6 +89,15 @@ async def memory_admin(
                        value.
         query_reset_config - Drop a per-project override. Args: project (required);
                        key=None drops ALL overrides for that project.
+        drain        - Owner-only. value=True/False toggles the drain gate; value=None
+                       reads current state. When draining, memory_start_session refuses
+                       new sessions (existing continue). Resets on process restart.
+                       Args: value (bool|None), reason (optional explanatory note).
+        broadcast_restart_warning - Owner-only. Fans out a system@junto restart-warning
+                       notice to every active agent (deduped by instance+project).
+                       Notice is push-enabled. Args:
+                         value={"seconds_until": <0-3600>, "reason": <optional str>}
+                         reason (top-level arg also accepted as fallback).
 
     Args:
         session_id: Your session ID
@@ -126,11 +135,51 @@ async def memory_admin(
         "push_control_set_config", "push_control_reset_config",
         "push_control_ack_alert", "push_control_unsuspend_agent",
         "query_set_config", "query_reset_config",
+        "drain", "broadcast_restart_warning",
     }
     if action in write_actions:
         write_error = require_auth(session_info, "admin.write")
         if write_error:
             return json.dumps({"error": write_error})
+
+    # ── Graceful-restart ops ──
+    if action == "drain":
+        from shared_memory.restart import is_draining, set_draining
+        if value is None:
+            draining, drain_reason = is_draining()
+            return json.dumps({
+                "status": "drain_state",
+                "draining": draining,
+                "reason": drain_reason,
+            })
+        new_state = bool(value)
+        set_draining(new_state, reason=reason)
+        return json.dumps({
+            "status": "drain_set",
+            "draining": new_state,
+            "reason": reason,
+        })
+
+    if action == "broadcast_restart_warning":
+        from shared_memory.restart import broadcast_restart_warning
+        if not isinstance(value, dict) or "seconds_until" not in value:
+            return json.dumps({
+                "error": "broadcast_restart_warning requires value={'seconds_until': <int>}; "
+                         "optional 'reason': <str>. The top-level reason arg is also accepted.",
+            })
+        try:
+            seconds_until = int(value["seconds_until"])
+        except (TypeError, ValueError):
+            return json.dumps({"error": "value.seconds_until must be an integer"})
+        if seconds_until < 0 or seconds_until > 3600:
+            return json.dumps({"error": "seconds_until must be between 0 and 3600"})
+        body_reason = value.get("reason") or reason
+        result = await broadcast_restart_warning(
+            seconds_until=seconds_until,
+            reason=body_reason,
+            from_project=session_info.get("project") or "junto",
+        )
+        return json.dumps(result)
 
     if action == "auth_status":
         return json.dumps({
