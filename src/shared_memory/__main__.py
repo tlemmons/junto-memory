@@ -299,12 +299,12 @@ def main():
     else:
         import uvicorn
 
-        from shared_memory.tool_profiles import current_profile
         from shared_memory.auth import (
             parse_bearer_token,
-            set_header_api_key,
             reset_header_api_key,
+            set_header_api_key,
         )
+        from shared_memory.tool_profiles import current_profile
 
         starlette_app = mcp.streamable_http_app()
 

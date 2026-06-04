@@ -27,7 +27,6 @@ from shared_memory.helpers import (
 )
 from shared_memory.state import active_sessions
 
-
 # Curated "use-when" hints for tools agents commonly miss in deferred-tool-load
 # harnesses (Claude Code et al.), where only tool *names* appear until a
 # ToolSearch. Surfaced in every memory_start_session response so the discovery
@@ -116,7 +115,7 @@ async def memory_start_session(
     _auth_role = "agent"  # default when auth disabled OR soft-auth fallback
     _auth_projects = []   # empty = all projects
     try:
-        from shared_memory.auth import AUTH_ENABLED, check_project_access, validate_api_key, get_header_api_key
+        from shared_memory.auth import AUTH_ENABLED, check_project_access, get_header_api_key, validate_api_key
         if AUTH_ENABLED:
             # Header-auth fallback (design:header-auth-v0): when no per-tool
             # api_key arg is supplied, fall back to the Authorization: Bearer
