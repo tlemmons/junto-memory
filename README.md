@@ -348,7 +348,7 @@ All configuration is via environment variables. See `.env.example` for the compl
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MCP_AUTH_ENABLED` | `false` | Enable API key authentication. When true, `memory_start_session` requires a valid `api_key`. |
+| `MCP_AUTH_ENABLED` | `false` | Enable API key authentication. When true, `memory_start_session` requires a valid key — passed either as the `api_key` tool argument or via an `Authorization: Bearer <key>` HTTP header (see [Security](#security)). |
 | `ANTHROPIC_API_KEY` | -- | Required only for the standalone librarian enrichment service. |
 | `LIBRARIAN_PROJECT_ROOTS` | -- | JSON map of project names to filesystem paths for librarian code analysis. |
 | `DB_<NAME>_TYPE` | -- | Register an external database. Supported: `mssql`, `mysql`. See `.env.example` for full pattern. |
@@ -476,6 +476,27 @@ Set `MCP_AUTH_ENABLED=true` in `.env` to require API keys for all sessions. Keys
 Each API key can be scoped to specific projects for **tenant isolation** — agents only see data in their allowed projects. All security-sensitive operations are written to an **audit log** (90-day retention).
 
 When auth is disabled (default), all tools are open — suitable for local single-user setups.
+
+#### Passing the key: tool argument or `Authorization` header
+
+A key can reach the server two ways (`design:header-auth-v0`):
+
+1. **`api_key` tool argument** — pass `api_key="smk_..."` to `memory_start_session`. Explicit and always wins.
+2. **`Authorization: Bearer` header** — put a `headers` block in your MCP client config (the standard MCP convention). The server reads the key from the header when no `api_key` argument is supplied:
+
+   ```json
+   {
+     "mcpServers": {
+       "junto": {
+         "type": "http",
+         "url": "https://your-host/mcp",
+         "headers": { "Authorization": "Bearer smk_..." }
+       }
+     }
+   }
+   ```
+
+Precedence: explicit `api_key` argument > header > keyless. A keyless session (neither provided) falls back to `agent` tier. A **present-but-invalid** key — argument or header — is rejected outright (fails loud rather than silently downgrading). The header path is verified against Claude Code, which forwards the static header untouched.
 
 ### Network Security
 
