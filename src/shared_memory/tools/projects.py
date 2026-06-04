@@ -73,6 +73,9 @@ async def memory_project(
     role_description: str = None,
     tier: str = "named",
     path_patterns: List[str] = None,
+    owner: str = None,
+    sunset: str = None,
+    purpose: str = None,
     ctx: Context = None
 ) -> str:
     """
@@ -87,6 +90,10 @@ async def memory_project(
         Required: name
         Optional: display_name
         Auto-creates: "coordinator" agent as co-admin with human
+
+    action="set_owner" - Set the discoverable OWNER of a project (admin only)
+        Required: name (project), owner (agent name to contact for cross-project
+        access, permission grants, ownership/governance decisions)
 
     action="get" - View project details and all registered agents
         Required: name
@@ -116,6 +123,14 @@ async def memory_project(
         role_description: What this agent does (for add_agent, update_agent)
         tier: Agent tier - "admin" or "named" (default: named). Workers self-register.
         path_patterns: Working directory patterns for auto-identity (e.g., ["*/picFrameWeb*"])
+        owner: Project owner agent (for create / set_owner) — the discoverable
+            contact for cross-project access, permission, and governance needs.
+        sunset: For add_agent/update_agent on temp agents — a date or milestone
+            string marking when the agent is expected to retire (e.g.
+            "2026-06-30" or "post-launch"). Tracking only; decommission is a
+            separate (future) action.
+        purpose: For add_agent/update_agent — a short why-this-agent-exists note,
+            useful for temp agents whose reason for being is time-bounded.
     """
     error = require_session(session_id)
     if error:
@@ -151,6 +166,7 @@ async def memory_project(
             "name": project_name,
             "display_name": display_name or name,
             "admins": admins,
+            "owner": owner,
             "created_by": caller,
             "created_at": now,
             "updated_at": now
@@ -178,8 +194,32 @@ async def memory_project(
             "project": project_name,
             "display_name": display_name or name,
             "admins": admins,
+            "owner": owner,
             "auto_registered": ["coordinator"]
         }, indent=2)
+
+    # -- SET_OWNER --
+    elif action == "set_owner":
+        if not name or not owner:
+            return json.dumps({"error": "name (project) and owner required for set_owner"})
+
+        project_name = name.lower().replace("-", "_").replace(" ", "_")
+
+        if not _is_project_admin(db, project_name, caller):
+            return json.dumps({"error": f"Permission denied. Only project admins can set the owner. You are '{caller}'."})
+
+        result = db.projects.update_one(
+            {"name": project_name},
+            {"$set": {"owner": owner, "updated_at": now}}
+        )
+        if result.matched_count == 0:
+            return json.dumps({"error": f"Project '{project_name}' not found"})
+
+        return json.dumps({
+            "status": "owner_set",
+            "project": project_name,
+            "owner": owner
+        })
 
     # -- GET --
     elif action == "get":
@@ -207,6 +247,7 @@ async def memory_project(
             "project": project_name,
             "display_name": project.get("display_name", project_name),
             "admins": project.get("admins", []),
+            "owner": project.get("owner"),
             "created_by": project.get("created_by"),
             "agent_count": len(agents),
             "agents": agents
@@ -222,6 +263,7 @@ async def memory_project(
                 "name": proj["name"],
                 "display_name": proj.get("display_name", proj["name"]),
                 "admins": proj.get("admins", []),
+                "owner": proj.get("owner"),
                 "agent_count": agent_count,
                 "created_at": proj["created_at"].isoformat() if proj.get("created_at") else None
             })
@@ -286,6 +328,8 @@ async def memory_project(
             "tier": tier,
             "role_description": role_description or "",
             "path_patterns": path_patterns or [],
+            "sunset": sunset,
+            "purpose": purpose or "",
             "created_by": caller,
             "created_at": now,
             "last_seen": None,
@@ -307,7 +351,9 @@ async def memory_project(
             "agent": agent,
             "tier": tier,
             "role_description": role_description or "",
-            "path_patterns": path_patterns or []
+            "path_patterns": path_patterns or [],
+            "sunset": sunset,
+            "purpose": purpose or ""
         }, indent=2)
 
     # -- REMOVE_AGENT --
@@ -363,6 +409,10 @@ async def memory_project(
             update_fields["tier"] = tier
         if path_patterns is not None:
             update_fields["path_patterns"] = path_patterns
+        if sunset is not None:
+            update_fields["sunset"] = sunset
+        if purpose is not None:
+            update_fields["purpose"] = purpose
 
         db.registered_agents.update_one(
             {"project": project_name, "name": agent},
@@ -389,4 +439,4 @@ async def memory_project(
         })
 
     else:
-        return json.dumps({"error": f"Unknown action '{action}'. Must be one of: create, get, list, delete, add_agent, remove_agent, update_agent"})
+        return json.dumps({"error": f"Unknown action '{action}'. Must be one of: create, get, list, set_owner, delete, add_agent, remove_agent, update_agent"})

@@ -150,6 +150,8 @@ async def memory_list_backlog(
     priority: str = None,
     assigned_to: str = None,
     target_version: str = None,
+    tags: List[str] = None,
+    tags_match: str = "all",
     include_done: bool = False,
     updated_within_days: int = None,
     limit: int = 20,
@@ -166,6 +168,10 @@ async def memory_list_backlog(
         priority: Filter by priority (critical, high, medium, low)
         assigned_to: Filter by assignee
         target_version: Filter by milestone/version (e.g., "meural-beta", "v2.0", "sprint-5")
+        tags: Filter by tags (e.g., ["patch", "required"]). Combine with tags_match
+            to control AND/OR semantics. Omit for no tag filtering.
+        tags_match: How to match `tags` — "all" (default; item must carry every
+            listed tag) or "any" (item carries at least one listed tag).
         include_done: Include completed items (default False)
         updated_within_days: Only return items whose `updated` timestamp is within
             the last N days. Omit (default None) to disable the recency filter.
@@ -183,6 +189,11 @@ async def memory_list_backlog(
         return json.dumps({"error": f"Invalid priority. Must be one of: {BACKLOG_PRIORITIES}"})
     if updated_within_days is not None and updated_within_days < 1:
         return json.dumps({"error": "updated_within_days must be >= 1"})
+    if tags_match not in ("all", "any"):
+        return json.dumps({"error": 'tags_match must be "all" or "any"'})
+
+    # Normalize the requested tag filter once.
+    filter_tags = [t for t in (tags or []) if t]
 
     # Compute the recency cutoff once, comparing against meta["updated"] strings.
     recency_cutoff = None
@@ -234,6 +245,18 @@ async def memory_list_backlog(
                     continue
                 if target_version and meta.get("target_version", "") != target_version:
                     continue
+                if filter_tags:
+                    try:
+                        item_tags = json.loads(meta.get("tags", "[]"))
+                    except (ValueError, TypeError):
+                        item_tags = []
+                    item_tag_set = set(item_tags)
+                    if tags_match == "all":
+                        if not all(t in item_tag_set for t in filter_tags):
+                            continue
+                    else:  # "any"
+                        if not any(t in item_tag_set for t in filter_tags):
+                            continue
                 if not include_done and item_status in ["done", "wont_do"]:
                     continue
                 if recency_cutoff is not None:

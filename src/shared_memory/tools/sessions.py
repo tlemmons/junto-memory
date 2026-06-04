@@ -28,6 +28,33 @@ from shared_memory.helpers import (
 from shared_memory.state import active_sessions
 
 
+# Curated "use-when" hints for tools agents commonly miss in deferred-tool-load
+# harnesses (Claude Code et al.), where only tool *names* appear until a
+# ToolSearch. Surfaced in every memory_start_session response so the discovery
+# work doesn't depend on name-scanning alone.
+#
+# Design constraints (see backlog notable_tools follow-up):
+#  - Capped at 5 entries. Bounds the token cost of every session start.
+#  - NO rotation. This block is byte-stable across calls on purpose — the
+#    response is assembled stable→dynamic for Anthropic prefix-cache hits
+#    (see the field-order note below). Rotating would change the prefix every
+#    call and forfeit that. If the list outgrows 5, prune — don't rotate.
+#  - Edit this constant when the tool surface changes; keep the most
+#    impactful/recently-added tools at the top.
+NOTABLE_TOOLS = [
+    {"tool": "memory_set_reminder",
+     "when": "Schedule a message to your future self (or a peer) at a specific time — deadlines, follow-ups, 'ping me after X'."},
+    {"tool": "memory_find_function",
+     "when": "BEFORE writing any function — 200+ are already registered; check if it exists first."},
+    {"tool": "memory_register_function",
+     "when": "AFTER writing/modifying a function — register name, file:line, purpose, gotchas so the next agent doesn't re-read your file."},
+    {"tool": "memory_define_spec",
+     "when": "Publish an interface contract (API shape, schema, topic) with spec_type='interface' BEFORE coding both sides of a boundary."},
+    {"tool": "memory_record_learning",
+     "when": "Hit a non-obvious bug, gotcha, or >10-min debug? Record it immediately — don't wait for park."},
+]
+
+
 @mcp.tool()
 async def memory_start_session(
     project: str,
@@ -432,6 +459,9 @@ async def memory_start_session(
     if _guidelines_block is not None:
         output["guidelines"] = _guidelines_block
     output["tip"] = _tip
+    # notable_tools: curated, byte-stable (see NOTABLE_TOOLS). Stays in the
+    # stable block so it doesn't disturb prefix caching.
+    output["notable_tools"] = NOTABLE_TOOLS
 
     # 2. STABLE conditional but stable when present: auth, project
     if _auth_block is not None:
