@@ -47,16 +47,92 @@ LIBRARIAN_PORT = int(os.getenv("LIBRARIAN_PORT", "8085"))
 # Configure via LIBRARIAN_PROJECT_ROOTS env var as JSON: {"project": "/path/to/root", ...}
 PROJECT_ROOTS = json.loads(os.getenv("LIBRARIAN_PROJECT_ROOTS", "{}"))
 
-# Session for MCP calls
+# Memory-server session (the session_id argument passed to memory_* tools)
 _librarian_session_id: Optional[str] = None
+
+# MCP transport session (the Mcp-Session-Id HTTP header). The server runs a
+# FastMCP Streamable-HTTP transport (mcp>=1.x) that REQUIRES an `initialize`
+# handshake before any tools/call — without the header the server rejects with
+# "400 Bad Request: Missing session ID". This is distinct from the memory
+# session_id above. Captured once via _ensure_mcp_session(), reused on every
+# call, and re-established if the server forgets it (e.g. after a restart).
+_mcp_protocol_session_id: Optional[str] = None
+MCP_PROTOCOL_VERSION = "2025-03-26"
 
 
 # =============================================================================
 # MCP Server Communication
 # =============================================================================
 
-async def mcp_call(tool_name: str, params: Dict[str, Any]) -> Dict:
-    """Call an MCP tool via HTTP."""
+def _parse_sse(text: str) -> Optional[Dict]:
+    """Extract the first JSON object from an SSE 'data:' line."""
+    for line in text.split("\n"):
+        if line.startswith("data: "):
+            try:
+                return json.loads(line[6:])
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
+async def _ensure_mcp_session(force: bool = False) -> str:
+    """Perform the MCP initialize handshake and cache the transport session id.
+
+    Returns the Mcp-Session-Id. Set force=True to discard a stale id and
+    re-handshake (used when the server reports the session is gone).
+    """
+    global _mcp_protocol_session_id
+
+    if _mcp_protocol_session_id and not force:
+        return _mcp_protocol_session_id
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        init_resp = await client.post(
+            f"{MCP_SERVER_URL}/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "librarian", "version": "1.0"},
+                },
+                "id": 0,
+            },
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+        )
+        if init_resp.status_code != 200:
+            raise Exception(f"MCP initialize failed: {init_resp.status_code} {init_resp.text}")
+
+        session_id = init_resp.headers.get("mcp-session-id")
+        if not session_id:
+            raise Exception("MCP initialize returned no Mcp-Session-Id header")
+
+        # Complete the handshake: the spec requires a notifications/initialized
+        # before the server will service requests on this session.
+        await client.post(
+            f"{MCP_SERVER_URL}/mcp",
+            json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "Mcp-Session-Id": session_id,
+                "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+            },
+        )
+
+    _mcp_protocol_session_id = session_id
+    print(f"[Librarian] MCP transport session: {session_id}")
+    return session_id
+
+
+async def mcp_call(tool_name: str, params: Dict[str, Any], _retried: bool = False) -> Dict:
+    """Call an MCP tool via HTTP (Streamable-HTTP transport with session handshake)."""
+    mcp_session = await _ensure_mcp_session()
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         # MCP uses JSON-RPC style with SSE response
         response = await client.post(
@@ -72,25 +148,25 @@ async def mcp_call(tool_name: str, params: Dict[str, Any]) -> Dict:
             },
             headers={
                 "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream"
+                "Accept": "application/json, text/event-stream",
+                "Mcp-Session-Id": mcp_session,
+                "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
             }
         )
+
+        # 400 (missing session) / 404 (unknown session) mean the server forgot
+        # our transport session — typically after a restart. Re-handshake once.
+        if response.status_code in (400, 404) and not _retried:
+            print(f"[Librarian] MCP session lost ({response.status_code}); re-initializing")
+            await _ensure_mcp_session(force=True)
+            return await mcp_call(tool_name, params, _retried=True)
 
         if response.status_code != 200:
             raise Exception(f"MCP call failed: {response.status_code} {response.text}")
 
         # Parse SSE response - format is "event: message\ndata: {...}\n\n"
         text = response.text
-        result = None
-
-        for line in text.split("\n"):
-            if line.startswith("data: "):
-                data_str = line[6:]  # Remove "data: " prefix
-                try:
-                    result = json.loads(data_str)
-                    break
-                except json.JSONDecodeError:
-                    continue
+        result = _parse_sse(text)
 
         if not result:
             print(f"[DEBUG] Full response text: {text[:500]}")
