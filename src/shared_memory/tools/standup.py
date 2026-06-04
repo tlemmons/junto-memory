@@ -51,6 +51,7 @@ async def memory_standup(
     session_id: str,
     project: str,
     stale_hours: int = 24,
+    include_idle: bool = False,
     ctx: Context = None,
 ) -> str:
     """
@@ -72,6 +73,11 @@ async def memory_standup(
         project: Project to roll up (e.g., "junto", "nimbus")
         stale_hours: Flag state specs not refreshed within this many hours
             (default 24).
+        include_idle: When False (default), agents with no state spec and no
+            live session are collapsed into an idle_agents count + name list
+            instead of a full row each — this keeps the page compact on
+            projects with many orphaned/pending registrations. Set True to emit
+            a full row for every registered agent.
     """
     error = require_session(session_id)
     if error:
@@ -139,9 +145,11 @@ async def memory_standup(
     all_agents = sorted(set(roster.keys()) | set(state_specs.keys()))
 
     agents_out = []
+    idle_names = []
     blocked = []
     stale = []
     tom_queue = []
+    counts = {"working": 0, "parked": 0, "idle": 0}
 
     for name in all_agents:
         reg = roster.get(name, {})
@@ -175,6 +183,20 @@ async def memory_standup(
         else:
             status = "idle/no-state"
 
+        if status == "working":
+            counts["working"] += 1
+        elif status == "parked":
+            counts["parked"] += 1
+        else:
+            counts["idle"] += 1
+
+        # Collapse idle/no-state agents (orphaned/pending registrations) to a
+        # name list unless explicitly requested — they have nothing to report
+        # and would otherwise dominate the page on busy projects.
+        if status == "idle/no-state" and not include_idle:
+            idle_names.append(name)
+            continue
+
         if blockers:
             blocked.append({"agent": name, "blockers": blockers})
 
@@ -203,11 +225,11 @@ async def memory_standup(
         "project": project,
         "owner": (project_doc or {}).get("owner"),
         "generated_at": now.isoformat(),
-        "agent_count": len(agents_out),
+        "agent_count": len(all_agents),
         "summary": {
-            "working": sum(1 for a in agents_out if a["status"] == "working"),
-            "parked": sum(1 for a in agents_out if a["status"] == "parked"),
-            "idle": sum(1 for a in agents_out if a["status"] == "idle/no-state"),
+            "working": counts["working"],
+            "parked": counts["parked"],
+            "idle": counts["idle"],
             "blocked": len(blocked),
             "stale_specs": len(stale),
             "open_tom_decisions": len(tom_queue),
@@ -216,4 +238,9 @@ async def memory_standup(
         "blocked_agents": blocked,
         "stale_specs": stale,
         "agents": agents_out,
+        "idle_agents": {
+            "count": len(idle_names),
+            "names": idle_names,
+            "note": "registered but no state spec and no live session; pass include_idle=true for full rows",
+        },
     }, indent=2, default=str)
