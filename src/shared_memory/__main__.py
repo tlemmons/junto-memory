@@ -300,6 +300,11 @@ def main():
         import uvicorn
 
         from shared_memory.tool_profiles import current_profile
+        from shared_memory.auth import (
+            parse_bearer_token,
+            set_header_api_key,
+            reset_header_api_key,
+        )
 
         starlette_app = mcp.streamable_http_app()
 
@@ -323,8 +328,25 @@ def main():
                     return
             await starlette_app(scope, receive, send)
 
+        async def auth_header_middleware(scope, receive, send):
+            """Parse 'Authorization: Bearer <key>' into the header_api_key
+            contextvar so memory_start_session can fall back to it when no
+            per-tool api_key arg is given (design:header-auth-v0). Outermost
+            wrapper: sets/resets with the proven try/finally token pattern,
+            then delegates to discussion_route_middleware. No header → no-op."""
+            if scope["type"] in ("http", "websocket"):
+                key = parse_bearer_token(scope.get("headers"))
+                if key:
+                    token = set_header_api_key(key)
+                    try:
+                        await discussion_route_middleware(scope, receive, send)
+                    finally:
+                        reset_header_api_key(token)
+                    return
+            await discussion_route_middleware(scope, receive, send)
+
         config = uvicorn.Config(
-            discussion_route_middleware,
+            auth_header_middleware,
             host=args.host,
             port=args.port,
             log_level=mcp.settings.log_level.lower(),

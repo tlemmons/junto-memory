@@ -116,8 +116,15 @@ async def memory_start_session(
     _auth_role = "agent"  # default when auth disabled OR soft-auth fallback
     _auth_projects = []   # empty = all projects
     try:
-        from shared_memory.auth import AUTH_ENABLED, check_project_access, validate_api_key
+        from shared_memory.auth import AUTH_ENABLED, check_project_access, validate_api_key, get_header_api_key
         if AUTH_ENABLED:
+            # Header-auth fallback (design:header-auth-v0): when no per-tool
+            # api_key arg is supplied, fall back to the Authorization: Bearer
+            # key parsed by the ASGI middleware into a contextvar. The explicit
+            # arg always wins; keyless (no arg, no header) still soft-falls to
+            # role=agent below.
+            if not api_key:
+                api_key = get_header_api_key()
             if api_key:
                 key_info = validate_api_key(api_key)
                 if not key_info:

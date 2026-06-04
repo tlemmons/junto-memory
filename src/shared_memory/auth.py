@@ -21,12 +21,62 @@ Tenant isolation:
 import hashlib
 import os
 import secrets
+from contextvars import ContextVar
 from typing import Dict, List, Optional, Tuple
 
 from shared_memory.helpers import utc_now
 
 # Whether auth is required (opt-in)
 AUTH_ENABLED = os.getenv("MCP_AUTH_ENABLED", "").lower() in ("true", "1", "yes")
+
+# ── Header-based auth (design:header-auth-v0) ──
+# An ASGI middleware parses the request's "Authorization: Bearer <key>" header
+# into this contextvar; memory_start_session falls back to it when no per-tool
+# api_key arg is supplied. The explicit arg always wins (backward-compat).
+# Spike-proven (learning_348aa4ef8710f33f): a contextvar set in the per-request
+# ASGI middleware survives into the FastMCP tools/call handler even with
+# stateless_http=False.
+_header_api_key: ContextVar[Optional[str]] = ContextVar(
+    "junto_header_api_key", default=None
+)
+
+
+def parse_bearer_token(headers) -> Optional[str]:
+    """Extract the token from an 'Authorization: Bearer <token>' header.
+
+    `headers` is the ASGI scope's headers: an iterable of (name, value) byte
+    tuples. Case-insensitive on both the header name and the 'Bearer' scheme.
+    Returns None if the header is absent, malformed, a non-Bearer scheme, or
+    has an empty token. Pure function — no contextvar side effects (testable).
+    """
+    for name, value in headers or ():
+        if name.lower() == b"authorization":
+            try:
+                raw = value.decode("latin-1")
+            except Exception:
+                return None
+            parts = raw.split(" ", 1)
+            if len(parts) == 2 and parts[0].lower() == "bearer" and parts[1].strip():
+                return parts[1].strip()
+            return None
+    return None
+
+
+def set_header_api_key(key: str):
+    """Set the per-request header api_key contextvar. Returns the reset token —
+    pass it to reset_header_api_key in a finally block (ASGI task-locality)."""
+    return _header_api_key.set(key)
+
+
+def reset_header_api_key(token) -> None:
+    """Reset the header api_key contextvar using the token from set_."""
+    _header_api_key.reset(token)
+
+
+def get_header_api_key() -> Optional[str]:
+    """Read the header api_key parsed by the ASGI middleware for this request,
+    or None if no Bearer header was present."""
+    return _header_api_key.get()
 
 # Roles ordered by privilege level (user sits between agent and admin —
 # broader cross-project read, can send messages, but no key/guideline management)
