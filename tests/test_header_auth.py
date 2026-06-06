@@ -56,3 +56,32 @@ def test_header_api_key_set_get_reset():
         auth_mod.reset_header_api_key(token)
     # After reset, back to the default — no leakage across requests.
     assert auth_mod.get_header_api_key() is None
+
+
+# ── tunnel-origin detection (design:auth-origin-trust-v0) ──
+
+def test_detect_tunnel_origin_true_on_cf_header():
+    # cloudflared sets CF-Connecting-IP on every proxied request.
+    assert auth_mod.detect_tunnel_origin([(b"cf-connecting-ip", b"203.0.113.7")]) is True
+
+
+def test_detect_tunnel_origin_case_insensitive():
+    assert auth_mod.detect_tunnel_origin([(b"CF-Connecting-IP", b"203.0.113.7")]) is True
+
+
+def test_detect_tunnel_origin_false_for_lan_local():
+    # A LAN/local direct hit carries no CF header → keyless allowed.
+    assert auth_mod.detect_tunnel_origin([(b"host", b"192.168.15.240:8080")]) is False
+    assert auth_mod.detect_tunnel_origin([]) is False
+    assert auth_mod.detect_tunnel_origin(None) is False
+
+
+def test_via_tunnel_set_get_reset():
+    assert auth_mod.get_via_tunnel() is False  # default
+    token = auth_mod.set_via_tunnel(True)
+    try:
+        assert auth_mod.get_via_tunnel() is True
+    finally:
+        auth_mod.reset_via_tunnel(token)
+    # No leakage across requests.
+    assert auth_mod.get_via_tunnel() is False
