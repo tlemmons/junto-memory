@@ -112,6 +112,14 @@ services:
       # Per-tool latency logging (src/shared_memory/timing.py). Set to 1 for
       # diagnosis runs; unset/empty for normal operation (zero overhead).
       - JUNTO_TIMING_LOG=${JUNTO_TIMING_LOG:-}
+      # Keyless sessions arriving via the Cloudflare tunnel soft-fall to agent
+      # tier (design:auth-origin-trust-v0 flag, learning_0b5c97149eb58ec3).
+      # FALSE here because Cloudflare Access already does identity authn at
+      # the edge (401 before the request reaches this server) AND claude.ai
+      # connectors cannot send a Bearer key — true would hard-block every
+      # cloud connector (tom-assistant/advisor/research/DeeAnn). Flip to true
+      # ONLY if the CF Access app on mcp.lemmons.net is ever removed.
+      - JUNTO_TUNNEL_REQUIRES_KEY=${JUNTO_TUNNEL_REQUIRES_KEY:-false}
     ports:
       # Bind to loopback + the home LAN IP only — NOT 0.0.0.0 (design:auth-
       # origin-trust-v0). cloudflared connects locally (127.0.0.1) so the public
