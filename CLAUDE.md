@@ -103,6 +103,7 @@ Run in parallel where possible. STOP at step 6; do not execute the plan until us
    - `memory_get_messages(include_delivered=true)` — see acked threads too; cross-project notes are common
    - `memory_list_backlog(project="junto", assigned_to="memory", status="open", priority="high")`
    - `memory_get_active_work(project="junto")` — agent activity, locks, signals
+   - `memory_list_alerts(unacknowledged_only=True)` — limit-watch: budget_warn / push_budget_breach / hard_ceiling alerts (design:limit-watch-v0). Surface any unacked alert to Tom in section C — this is how he learns limits are being approached and decides whether to extend them.
 3. Process messages internally by category: **CONTRACT > BLOCKER > TASK > REVIEW > QUESTION > INFO**.
 4. Present briefing in this order. State spec leads — quote near-verbatim, do NOT paraphrase.
 

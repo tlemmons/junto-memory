@@ -207,12 +207,6 @@ _DESTRUCTIVE_KEYWORDS = re.compile(
     r"|\brm\s+-rf\b"
 )
 
-# Legacy Phase C1 constant. Push-control v0 superseded this with a
-# configurable per-project depth_cap (default 12) evaluated inside
-# push_control.evaluate_send. Kept for any external code still referencing
-# the symbol; not consulted on the send path anymore.
-CHAIN_DEPTH_HARD_CAP = 5
-
 # ── Recency window (now drives push-suppression filter release, §3) ────────
 # Three signals open the 5-minute window for an agent:
 #   1. memory_start_session for that agent (set in sessions.py).
@@ -265,6 +259,45 @@ def _bump_human_interaction(db, project: str, agent: str, when=None) -> None:
         db.agent_directory.update_one(
             {"project": project, "instance": agent},
             {"$set": {"last_human_interaction": ts, "last_seen": ts}},
+            upsert=True,
+        )
+    except Exception:
+        pass
+
+
+def _get_messages_seen_through(db, project: str, agent: str):
+    """Return the agent's read-watermark (messages_seen_through) datetime, or None.
+
+    See design:message-read-watermark-v0. Distinct from last_seen /
+    last_human_interaction — those are recency signals for push-control's
+    5-min bypass and MUST NOT be overloaded as the read dedup marker.
+    """
+    if db is None or not project or not agent:
+        return None
+    try:
+        doc = db.agent_directory.find_one(
+            {"project": project, "instance": agent},
+            {"messages_seen_through": 1},
+        )
+    except Exception:
+        return None
+    if not doc:
+        return None
+    return parse_timestamp(doc.get("messages_seen_through"))
+
+
+def _advance_messages_seen_through(db, project: str, agent: str, ts) -> None:
+    """Advance the agent's read-watermark to `ts`, forward-only ($max).
+
+    $max only moves the stored value forward, so a late/out-of-order read can
+    never rewind the watermark and re-surface already-seen messages. Best-effort.
+    """
+    if db is None or not project or not agent or ts is None:
+        return
+    try:
+        db.agent_directory.update_one(
+            {"project": project, "instance": agent},
+            {"$max": {"messages_seen_through": ts}},
             upsert=True,
         )
     except Exception:
@@ -411,7 +444,7 @@ async def memory_send_message(
         final_depth = max(parent_depth + 1, caller_depth, 0)
 
     # ── Push control v0 evaluation (design:push-control-v0 v1.1.0) ──
-    # Replaces the legacy CHAIN_DEPTH_HARD_CAP=5 + Phase D2 recency-bypass
+    # Replaces the legacy hard cap (5) + Phase D2 recency-bypass
     # block. The new gate has three layers, all per-sender and all invisible
     # to the agent: push depth cap (per-thread, flat, no reset), push budget
     # (per-sender hourly, soft), hard ceiling (per-sender hourly, suspend).
@@ -480,6 +513,20 @@ async def memory_send_message(
             )
         except Exception as e:
             log.error("push_control: hard_trip orchestration failed: %s", e)
+
+    # ── Limit-watch (design:limit-watch-v0) ──
+    # Persist the sender's hourly peak + fire once-per-hour budget_warn /
+    # push_budget_breach alerts. `suppressed` counts only budget-driven
+    # suppression — depth_cap suppression is conversation-shape, not volume,
+    # and would pollute the tuning data.
+    push_control.record_emission_history(
+        db,
+        session_info["claude_instance"],
+        from_project,
+        emission_count,
+        bool(suppress_push and push_suppress_reason in ("push_budget", "hard_ceiling")),
+        pc_eval["effective_config"],
+    )
 
     # ── Phase C1.1: destructive content gate, chain-depth-gated ──
     # Auto-flag only when this is a relayed/autopilot message (chain_depth>0).
@@ -604,6 +651,7 @@ async def memory_get_messages(
     for_instance: str = None,
     cursor: str = None,
     updated_within_days: int = None,
+    include_seen: bool = False,
     ctx: Context = None
 ) -> str:
     """
@@ -629,6 +677,17 @@ async def memory_get_messages(
             Server-side filter — cheaper than load-then-filter at the caller.
             Note: messages have a 7-day TTL set at insert time (see clients.py),
             so values > 7 silently behave as 7.
+        include_seen: Default False — a top read (no cursor) by the owning agent
+            returns only messages newer than the agent's read-watermark
+            (messages_seen_through), and advances that watermark when it has
+            handed over the complete unseen set (has_more=False). This stops
+            every `go` from redisplaying the full 7-day window. Set True for a
+            full-window catch-up (skips the watermark filter and does not
+            advance it). The watermark is per-recipient and ONLY consulted on
+            the self, non-paginated path; cursor pagination and for_instance
+            peeks always bypass it. The inbox:// resource (push delivery,
+            control UI) is a separate path and is NOT affected by this filter.
+            See design:message-read-watermark-v0.
     """
     error = require_session(session_id)
     if error:
@@ -738,6 +797,20 @@ async def memory_get_messages(
         recency_cutoff = utc_now() - timedelta(days=int(updated_within_days))
         query["$and"].append({"created_at": {"$gte": recency_cutoff}})
 
+    # ── Read-watermark filter (design:message-read-watermark-v0) ──
+    # A top read (no cursor) by the OWNING agent defaults to unseen-only:
+    # messages newer than the agent's messages_seen_through watermark. Cursor
+    # pagination and for_instance peeks always bypass it (pagination would
+    # break against a moving watermark; a peek must not advance someone else's
+    # marker). include_seen=True is the full-window catch-up escape hatch.
+    is_watermark_read = (
+        not include_seen and cursor is None and target_instance == my_instance
+    )
+    if is_watermark_read:
+        watermark = _get_messages_seen_through(db, my_project, my_instance)
+        if watermark is not None:
+            query["$and"].append({"created_at": {"$gt": watermark}})
+
     # Fetch limit+1 to detect "has more" without a separate count query.
     page_size = max(1, int(limit))
     db_cursor = db.messages.find(query).sort([
@@ -801,6 +874,19 @@ async def memory_get_messages(
     # peeking at someone else's inbox via for_instance.
     if saw_human_message and target_instance == my_instance:
         _bump_human_interaction(db, my_project, my_instance)
+
+    # ── Advance read-watermark (design:message-read-watermark-v0) ──
+    # Only on the self top read, and ONLY when we handed over the COMPLETE
+    # unseen set (has_more=False). If has_more is True the agent saw a
+    # truncated page, so advancing would silently skip the older-unseen tail;
+    # we leave the watermark put and the agent re-reads (or raises limit /
+    # paginates) to drain. $max keeps it forward-only.
+    if is_watermark_read and not has_more and raw_docs:
+        newest = max(
+            (d.get("created_at") for d in raw_docs if d.get("created_at") is not None),
+            default=None,
+        )
+        _advance_messages_seen_through(db, my_project, my_instance, newest)
 
     # Sort by priority then created
     messages.sort(key=lambda x: (priority_sort.get(x["priority"], 99), x["created"] or ""))
