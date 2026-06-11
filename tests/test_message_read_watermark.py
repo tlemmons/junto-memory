@@ -168,6 +168,34 @@ async def test_full_read_advances_watermark_forward(monkeypatch):
         sessions.pop(sid, None)
 
 
+async def test_recency_primary_sort_does_not_strand_urgent(monkeypatch):
+    """design:inbox-surfacing-v0: priority is a STRING, so DB-sorting on it
+    (low<normal<urgent) before .limit() stranded urgent behind a large normal
+    backlog. Recency-primary must surface the newest messages regardless of
+    priority — a recent urgent is never buried; a stale urgent pages back.
+    Fails on the old [("priority",1),("created_at",-1)] sort."""
+    now = utc_now()
+    docs = [_msg(f"normal{i}", now - timedelta(minutes=10 - i)) for i in range(5)]
+    u_new = _msg("urgent_new", now)  # newest of all
+    u_new["priority"] = "urgent"
+    docs.append(u_new)
+    u_old = _msg("urgent_old", now - timedelta(hours=3))  # stale urgent
+    u_old["priority"] = "urgent"
+    docs.append(u_old)
+
+    fake_db = _FakeDB(docs)
+    sid, m, sessions = _setup(monkeypatch, fake_db)
+    try:
+        res = json.loads(await m.memory_get_messages(session_id=sid, limit=3))
+        ids = {x["id"] for x in res["messages"]}
+        # newest 3 by created_at = urgent_new(now), normal4(-6m), normal3(-7m)
+        assert "urgent_new" in ids, f"recent urgent stranded behind normal: {ids}"
+        assert "urgent_old" not in ids, f"stale urgent should page back: {ids}"
+        assert res["has_more"] is True
+    finally:
+        sessions.pop(sid, None)
+
+
 async def test_truncated_read_does_not_advance_watermark(monkeypatch):
     """has_more=True means the agent saw only a page; advancing would silently
     drop the older-unseen tail. The watermark must stay put."""

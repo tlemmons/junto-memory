@@ -812,9 +812,14 @@ async def memory_get_messages(
             query["$and"].append({"created_at": {"$gt": watermark}})
 
     # Fetch limit+1 to detect "has more" without a separate count query.
+    # Sort recency-primary (created_at DESC). Priority is NOT a DB sort key:
+    # it is a STRING (low/normal/urgent), so ("priority",1) sorted it
+    # alphabetically (urgent LAST) and, applied before limit, stranded urgent
+    # behind a large backlog (design:inbox-surfacing-v0). created_at-primary
+    # also makes cursor pagination consistent (the cursor filters created_at <
+    # x). Within-page priority ordering is still applied below in Python.
     page_size = max(1, int(limit))
     db_cursor = db.messages.find(query).sort([
-        ("priority", 1),
         ("created_at", -1)
     ]).limit(page_size + 1)
 
@@ -1256,8 +1261,11 @@ async def read_inbox(project: str, agent: str) -> str:
             ]
         })
 
+    # Recency-primary sort (created_at DESC) — see the get_messages sort note:
+    # priority is a string, so DB-sorting on it stranded urgent behind a large
+    # backlog (design:inbox-surfacing-v0). Within-page priority ordering is
+    # applied in Python below; the inbox resource is the plugin's page-1 path.
     cursor = db.messages.find(query).sort([
-        ("priority", 1),
         ("created_at", -1),
     ]).limit(INBOX_DEFAULT_LIMIT + 1)
 
