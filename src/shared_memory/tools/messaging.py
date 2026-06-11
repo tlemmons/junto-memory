@@ -14,7 +14,13 @@ from shared_memory import push_control
 from shared_memory.app import mcp
 from shared_memory.audit import log_audit
 from shared_memory.clients import get_mongo
-from shared_memory.config import MESSAGE_CATEGORIES, MESSAGE_PRIORITIES, MESSAGE_STATUSES
+from shared_memory.config import (
+    ACTION_CATEGORIES,
+    MESSAGE_CATEGORIES,
+    MESSAGE_PRIORITIES,
+    MESSAGE_STATUSES,
+    OBLIGATION_RESOLVE_ON_REPLY,
+)
 from shared_memory.helpers import normalize_project, parse_timestamp, require_session, utc_now
 from shared_memory.intent import get_current_intent_id
 from shared_memory.op_log import with_op_log
@@ -177,6 +183,7 @@ def get_pending_messages_for_instance(instance_name: str, project: str = None) -
             "category": doc.get("category", "info"),
             "message": doc.get("message", ""),
             "priority": doc.get("priority", "normal"),
+            "obligation": doc.get("obligation"),
             "created": created_at,
         }
         if doc.get("reply_to"):
@@ -300,6 +307,48 @@ def _advance_messages_seen_through(db, project: str, agent: str, ts) -> None:
             {"$max": {"messages_seen_through": ts}},
             upsert=True,
         )
+    except Exception:
+        pass
+
+
+def _advance_parent_obligation_on_reply(db, parent_id: str, replier: str, now) -> None:
+    """Auto-ack: when a reply's sender is the parent's OWNER, advance the parent's
+    obligation (design:unified-messaging-v0 Stage 3 / lanes-B).
+
+    owner_of(parent) := parent.owner ?? parent.to_instance — the generalized scope
+    guard. `owner` is unset today (claiming, Stage 2, populates it later), so this
+    falls back to the named recipient and is forward-compatible: a direct message's
+    owner IS its recipient, which is exactly the lanes-B guard reply.from==parent.to.
+
+    Transition (ACTION categories only; info/non-action carry no obligation):
+      {question, contract, review} -> resolved   (an answer satisfies)
+      {task, blocker}              -> responded   (engaged; stays in the action lane,
+                                                   deprioritized, until an explicit done)
+    Never downgrades an already-resolved parent (idempotent re-reply). Broadcast
+    parents (to_instance="*") never match a concrete replier -> never auto-ack.
+    Best-effort: a failure here must never break the underlying send.
+    """
+    if db is None or not parent_id or not replier:
+        return
+    try:
+        parent = db.messages.find_one(
+            {"_id": parent_id},
+            {"category": 1, "to_instance": 1, "owner": 1, "obligation": 1},
+        )
+        if not parent:
+            return
+        if parent.get("category") not in ACTION_CATEGORIES:
+            return  # info / non-action messages carry no obligation
+        owner = parent.get("owner") or parent.get("to_instance")
+        if not owner or replier != owner:
+            return  # scope guard: only the addressed owner's own reply clears it
+        if parent.get("obligation") == "resolved":
+            return  # terminal — never downgrade
+        if parent["category"] in OBLIGATION_RESOLVE_ON_REPLY:
+            update = {"obligation": "resolved", "responded_at": now, "resolved_at": now}
+        else:  # task, blocker — engaged but not done
+            update = {"obligation": "responded", "responded_at": now}
+        db.messages.update_one({"_id": parent_id}, {"$set": update})
     except Exception:
         pass
 
@@ -562,6 +611,10 @@ async def memory_send_message(
         # forgeable; new code should read sent_by_human instead.
         "user_originated": sent_by_human or session_info.get("claude_instance", "").startswith("user-"),
         "status": "pending",
+        # Obligation track (design:unified-messaging-v0 Stage 3 / lanes-B). ACTION
+        # categories start "open"; info carries none. A reply from the owner
+        # advances it via _advance_parent_obligation_on_reply.
+        "obligation": "open" if category in ACTION_CATEGORIES else None,
         "push_suppressed": suppress_push,
         "push_suppress_reason": push_suppress_reason,
         "emission_count": emission_count,
@@ -589,6 +642,16 @@ async def memory_send_message(
             ref={"collection": "messages", "doc_id": message_id},
             payload=msg_doc,
             intent_id=get_current_intent_id(),
+        )
+
+    # ── lanes-B: reply auto-acks the parent's obligation ──
+    # A reply (in_response_to set) from the parent's owner advances the parent
+    # off the action lane (resolved) or marks it engaged (responded). Owner
+    # defaults to the named recipient (forward-compatible with Stage-2 claiming).
+    # Best-effort — never blocks the send.
+    if in_response_to:
+        _advance_parent_obligation_on_reply(
+            db, in_response_to, session_info["claude_instance"], now
         )
 
     # ── Phase D2: outbound recency bump ──
@@ -625,6 +688,7 @@ async def memory_send_message(
         "from_project": from_project,
         "priority": priority,
         "category": category,
+        "obligation": msg_doc["obligation"],
         "reply_to": reply_to,
         "in_response_to": in_response_to,
         "chain_depth": final_depth,
@@ -853,6 +917,7 @@ async def memory_get_messages(
             "message": doc.get("message", ""),
             "priority": doc.get("priority", "normal"),
             "status": doc.get("status", "pending"),
+            "obligation": doc.get("obligation"),
             "created": created_at,
             "delivered": doc.get("status", "pending") != "pending",
             "chain_depth": doc.get("chain_depth", 0),
@@ -919,20 +984,43 @@ async def memory_update_message_status(
     Args:
         session_id: Your session ID
         message_id: The message ID to update
-        status: New status (delivered, received, completed, failed)
+        status: New DELIVERY status (delivered, received, completed, failed) OR an
+            OBLIGATION verb (responded, resolved). The two are separate axes:
+            delivery statuses write the `status` field; "responded"/"resolved"
+            write the `obligation` field (lanes-B / design:unified-messaging-v0).
+            "resolved" is the explicit low-friction done verb for a task/blocker
+            that a reply only marked "responded".
     """
     error = require_session(session_id)
     if error:
         return error
-
-    if status not in MESSAGE_STATUSES:
-        return json.dumps({"error": f"Invalid status. Must be one of: {MESSAGE_STATUSES}"})
 
     db = get_mongo()
     if db is None:
         return json.dumps({"error": "MongoDB unavailable"})
 
     now = utc_now()
+
+    # ── Obligation track (lanes-B) — separate axis from delivery status ──
+    # "resolved"/"responded" are not delivery statuses; route them to the
+    # `obligation` field. "resolved" is the explicit done verb (clears a
+    # task/blocker that a reply left "responded").
+    if status in ("responded", "resolved"):
+        obl_update = {"obligation": status, "responded_at": now}
+        if status == "resolved":
+            obl_update["resolved_at"] = now
+        result = db.messages.update_one({"_id": message_id}, {"$set": obl_update})
+        if result.matched_count == 0:
+            return json.dumps({"error": f"Message not found: {message_id}"})
+        return json.dumps({
+            "obligation": status,
+            "message_id": message_id,
+            "updated": True,
+        })
+
+    if status not in MESSAGE_STATUSES:
+        return json.dumps({"error": f"Invalid status. Must be one of: {MESSAGE_STATUSES} (or obligation verbs: responded, resolved)"})
+
     update = {"status": status}
 
     # Set appropriate timestamp
@@ -1168,6 +1256,7 @@ def _format_inbox_message(doc: Dict[str, Any]) -> Dict[str, Any]:
         "message": doc.get("message", ""),
         "priority": doc.get("priority", "normal"),
         "status": doc.get("status", "pending"),
+        "obligation": doc.get("obligation"),
         "created": created_at,
         "delivered": doc.get("status", "pending") != "pending",
         "chain_depth": doc.get("chain_depth", 0),

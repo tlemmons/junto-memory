@@ -154,8 +154,26 @@ MESSAGE_PRIORITIES = ["urgent", "normal", "low"]
 # Message categories
 MESSAGE_CATEGORIES = ["contract", "task", "question", "info", "review", "blocker"]
 
-# Message statuses for full lifecycle tracking
+# Message statuses for full lifecycle tracking (DELIVERY track — orthogonal to
+# the obligation track below).
 MESSAGE_STATUSES = ["pending", "delivered", "received", "completed", "failed"]
+
+# ── Obligation track (design:unified-messaging-v0 Stage 3 / lanes-B) ──
+# A SECOND axis on a message, separate from the delivery status above. Only
+# ACTION-category messages carry an obligation; info carries none (unset). A
+# reply from the message's OWNER auto-advances it (see
+# _advance_parent_obligation_on_reply). Kept as its own field (NOT folded into
+# MESSAGE_STATUSES) because the 3 worklist filters gate on status=="pending" and
+# folding would make a responded task/blocker vanish from them — see
+# contract:message-lanes-v0:B-wireshape R1.
+#   ACTION_CATEGORIES         — get obligation="open" at send.
+#   OBLIGATION_RESOLVE_ON_REPLY — an owner's reply RESOLVES (an answer satisfies).
+#   OBLIGATION_RETAIN_ON_REPLY  — an owner's reply marks RESPONDED but the item
+#                                 stays in the action lane until an explicit done.
+OBLIGATION_STATES = ["open", "responded", "resolved"]
+ACTION_CATEGORIES = ["task", "question", "blocker", "contract", "review"]
+OBLIGATION_RESOLVE_ON_REPLY = ["question", "contract", "review"]
+OBLIGATION_RETAIN_ON_REPLY = ["task", "blocker"]
 
 # Auth roles (ordered by privilege)
 AUTH_ROLES = ["readonly", "agent", "admin", "owner"]
