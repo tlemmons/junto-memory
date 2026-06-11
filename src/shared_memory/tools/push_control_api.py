@@ -139,6 +139,33 @@ async def memory_get_emission_stats(
             "over_hard_ceiling": entry["count"] >= (cfg.get("hard_ceiling") or 9_999_999),
         })
 
+    # ── (A) Synthetic zero-row for the idle case (design:autopilot-removal-v0 §5) ──
+    # When an explicit agent= + project= query matches no current-hour emission
+    # row (the common IDLE statusline case), the in-process counters carry no
+    # caps — caps ride on the row. Return a zero-row resolved from project config
+    # so the idle chip still shows live "0/budget (ceiling)" + a real suspended
+    # flag, instead of an empty list (which would force the client to hardcode
+    # caps or blank the denominator). `suspended` is resolved from the suspension
+    # store, NOT assumed false: a suspended agent stops sending and naturally
+    # falls to 0 current-hour emissions, so the idle case INCLUDES suspended
+    # agents — hardcoding false here would hide a live suspension on the chip.
+    # Gated on BOTH agent and project being explicit: config is project-scoped,
+    # so an agent-only query can't resolve which project's caps to synthesize.
+    if not out and agent and project and db is not None:
+        cfg = push_control.get_effective_config(db, project)
+        out.append({
+            "instance": agent,
+            "project": normalize_project(project),
+            "hour": push_control._current_hour_bucket(),
+            "count": 0,
+            "depth_cap": cfg.get("depth_cap"),
+            "push_budget": cfg.get("push_budget"),
+            "hard_ceiling": cfg.get("hard_ceiling"),
+            "suspended": push_control.is_agent_suspended(db, project, agent),
+            "over_push_budget": False,
+            "over_hard_ceiling": False,
+        })
+
     # Stable sort: most-emitting agents first.
     out.sort(key=lambda x: -x["count"])
 
