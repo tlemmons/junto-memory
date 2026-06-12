@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Set
 
 from mcp.server.fastmcp import Context
 from pydantic import AnyUrl
+from pymongo import ReturnDocument
 
 from shared_memory import push_control
 from shared_memory.app import mcp
@@ -185,6 +186,7 @@ def get_pending_messages_for_instance(instance_name: str, project: str = None) -
             "priority": doc.get("priority", "normal"),
             "obligation": doc.get("obligation"),
             "component": doc.get("component"),
+            "owner": doc.get("owner"),
             "created": created_at,
         }
         if doc.get("reply_to"):
@@ -629,6 +631,14 @@ async def memory_send_message(
         # component-routing/claiming land in Stages 2-3. null = route by
         # to_instance (today's behavior; nimbus's degenerate case).
         "component": component or None,
+        # Ownership (design:unified-messaging-v0 Stage 2 / CLAIMING). owner stays
+        # null until a GROUP message (broadcast to_instance="*" or component-
+        # addressed) is claimed via memory_claim_message (atomic CAS on
+        # owner:null). DIRECT sends leave owner null too — the obligation guard
+        # reads `owner ?? to_instance`, so a direct message's implicit owner is
+        # its recipient (nimbus-compat invariant). claimed_at stamps the win.
+        "owner": None,
+        "claimed_at": None,
         "push_suppressed": suppress_push,
         "push_suppress_reason": push_suppress_reason,
         "emission_count": emission_count,
@@ -815,6 +825,8 @@ async def memory_get_messages(
             "status": doc.get("status", "?"),
             "obligation": doc.get("obligation"),
             "component": doc.get("component"),
+            "owner": doc.get("owner"),
+            "claimed_at": doc["claimed_at"].isoformat() if hasattr(doc.get("claimed_at"), "isoformat") else doc.get("claimed_at"),
             "created": doc["created_at"].isoformat() if doc.get("created_at") else (doc["created"].isoformat() if doc.get("created") else None),
             "chain_depth": doc.get("chain_depth", 0),
             "require_human": bool(doc.get("require_human", False)),
@@ -936,6 +948,7 @@ async def memory_get_messages(
             "status": doc.get("status", "pending"),
             "obligation": doc.get("obligation"),
             "component": doc.get("component"),
+            "owner": doc.get("owner"),
             "created": created_at,
             "delivered": doc.get("status", "pending") != "pending",
             "chain_depth": doc.get("chain_depth", 0),
@@ -1061,6 +1074,117 @@ async def memory_update_message_status(
         "status": status,
         "message_id": message_id,
         "updated": True
+    })
+
+
+@mcp.tool()
+async def memory_claim_message(
+    session_id: str,
+    message_id: str,
+    ctx: Context = None
+) -> str:
+    """
+    Claim ownership of a GROUP-addressed message (atomic, first-wins).
+
+    design:unified-messaging-v0 Stage 2 / CLAIMING. When a message is addressed
+    to a GROUP — a broadcast (to_instance="*") or a component — every subscriber
+    sees the same single doc. Calling this claims it for YOU via an atomic
+    compare-and-swap (find_one_and_update on owner:null): exactly one caller
+    wins, the rest learn they lost. The winner becomes the message's `owner`, so
+    the winner's reply auto-acks the obligation — the same `owner` the lanes-B
+    guard reads (claiming + auto-ack are one mechanism, by design).
+
+    DIRECT messages (addressed to a concrete agent) are NOT claimable — they
+    already have an implicit owner (the recipient). Claiming one is rejected.
+
+    Loser dedup is READ-SIDE in Stage 2: `owner` is surfaced on every message
+    read, so a non-winner sees owner=<someone-else> and skips it. The active
+    push-notify to other subscribers rides on Stage-3 component fan-out.
+
+    Args:
+        session_id: Your session ID.
+        message_id: The group message to claim.
+
+    Returns JSON {claimed, owner, message_id[, claimed_at][, note]}:
+      claimed=True  → you won; owner is you.
+      claimed=False → already held; owner is the agent who holds it.
+    """
+    error = require_session(session_id)
+    if error:
+        return error
+
+    session_info = active_sessions[session_id]
+    me = session_info["claude_instance"]
+    my_project = normalize_project(session_info.get("project", ""))
+
+    db = get_mongo()
+    if db is None:
+        return json.dumps({"error": "MongoDB unavailable"})
+
+    doc = db.messages.find_one(
+        {"_id": message_id},
+        {"to_instance": 1, "to_project": 1, "component": 1, "owner": 1},
+    )
+    if not doc:
+        return json.dumps({"error": f"Message not found: {message_id}"})
+
+    # ── Project visibility: you can only claim within your own project ──
+    msg_project = doc.get("to_project", "")
+    if msg_project and msg_project != my_project:
+        return json.dumps({"error": "Permission denied. Message belongs to a different project."})
+
+    # ── Group-addressing gate ──
+    # Only a GROUP message is claimable. Today the sole group form is a broadcast
+    # (to_instance="*"); a component-scoped group send is "*" + a component tag.
+    # A message with a CONCRETE recipient is direct — it has an implicit owner
+    # (that recipient) and must not be hijacked, EVEN IF it carries a component
+    # tag (the tag is metadata, not an address). When Stage 3 adds true
+    # component-addressed sends (no concrete to_instance), extend this gate; the
+    # owner:null CAS below already handles them unchanged.
+    to_instance = doc.get("to_instance", "")
+    is_group = to_instance == "*"
+    if not is_group:
+        return json.dumps({
+            "error": (
+                f"Message {message_id} is direct-addressed (to='{to_instance}') and "
+                f"cannot be claimed — it already has an implicit owner. Claiming "
+                f"applies only to group messages (broadcast to='*')."
+            )
+        })
+
+    # ── Atomic compare-and-swap: first-wins on owner:null ──
+    # find_one_and_update is the single round-trip CAS — the {_id, owner:None}
+    # filter is the precondition; only one concurrent caller matches it. Returns
+    # the post-update doc iff WE won, None if another caller already set owner.
+    now = utc_now()
+    won = db.messages.find_one_and_update(
+        {"_id": message_id, "owner": None},
+        {"$set": {"owner": me, "claimed_at": now}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if won is not None:
+        try:
+            log_audit("message.claimed", me, my_project,
+                      {"message_id": message_id, "component": doc.get("component"),
+                       "to_instance": to_instance})
+        except Exception:
+            pass
+        return json.dumps({
+            "claimed": True,
+            "owner": me,
+            "message_id": message_id,
+            "claimed_at": now.isoformat() if hasattr(now, "isoformat") else now,
+        })
+
+    # Lost the race (or it was claimed earlier). Re-read to report who holds it.
+    current = db.messages.find_one({"_id": message_id}, {"owner": 1})
+    current_owner = current.get("owner") if current else None
+    return json.dumps({
+        "claimed": False,
+        "owner": current_owner,
+        "message_id": message_id,
+        "note": ("You already own this." if current_owner == me
+                 else f"Already claimed by {current_owner}."),
     })
 
 
@@ -1276,6 +1400,7 @@ def _format_inbox_message(doc: Dict[str, Any]) -> Dict[str, Any]:
         "status": doc.get("status", "pending"),
         "obligation": doc.get("obligation"),
         "component": doc.get("component"),
+        "owner": doc.get("owner"),
         "created": created_at,
         "delivered": doc.get("status", "pending") != "pending",
         "chain_depth": doc.get("chain_depth", 0),
