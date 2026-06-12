@@ -186,6 +186,11 @@ def get_mongo():
         agent_dir.create_index([("project", 1), ("instance", 1)], unique=True)
         agent_dir.create_index("project")
         agent_dir.create_index("last_seen")
+        # Component-peer lookup at session start (design:unified-messaging-v0
+        # Stage 1): find agents in project P subscribed to component C, recently
+        # active. Compound (project, subscribed_components) — multikey on the
+        # array field — serves the $in + last_seen-filtered query.
+        agent_dir.create_index([("project", 1), ("subscribed_components", 1)])
 
         # Ensure indexes for project registry (admin-controlled)
         projects_col = _mongo_db.projects

@@ -2,6 +2,7 @@
 
 import json
 import uuid
+from datetime import timedelta
 from typing import Any, Dict, List
 
 from mcp.server.fastmcp import Context
@@ -54,6 +55,54 @@ NOTABLE_TOOLS = [
 ]
 
 
+def _active_component_peers(db, project, instance, subscribed_components,
+                            window_minutes=15, limit=20):
+    """Other agents recently active in any of `instance`'s subscribed components.
+
+    design:unified-messaging-v0 Stage 1 (ADDRESSING). Reads the PERSISTENT
+    agent_directory (not just in-process active_sessions) so it also catches
+    peers connected to a federated peer server. Best-effort: returns [] on a
+    missing db or any error — must never fail session start.
+
+    15-min activity window: one heartbeat-ish span, deliberately wider than the
+    5-min message-recency window — a teammate who parked 10 min ago is still
+    "who's in your component". Self and duplicate instances are filtered; each
+    peer reports only the components it shares with the caller.
+    """
+    subs = [c for c in (subscribed_components or []) if c]
+    if not subs or db is None:
+        return []
+    peers = []
+    try:
+        cutoff = utc_now() - timedelta(minutes=window_minutes)
+        seen = set()
+        for peer in db.agent_directory.find(
+            {
+                "project": project,
+                "subscribed_components": {"$in": subs},
+                "last_seen": {"$gt": cutoff},
+            },
+            {"instance": 1, "subscribed_components": 1, "last_task": 1},
+        ):
+            name = peer.get("instance")
+            if not name or name == instance or name in seen:
+                continue
+            seen.add(name)
+            shared = [
+                c for c in (peer.get("subscribed_components") or []) if c in subs
+            ]
+            peers.append({
+                "agent": name,
+                "components": shared,
+                "task": (peer.get("last_task") or "")[:50],
+            })
+            if len(peers) >= limit:
+                break
+    except Exception as e:
+        print(f"[MCP] Component-peer lookup failed (non-fatal): {e}")
+    return peers
+
+
 @mcp.tool()
 async def memory_start_session(
     project: str,
@@ -64,6 +113,7 @@ async def memory_start_session(
     working_directory: str = None,
     spawned_by: str = None,
     api_key: str = None,
+    subscribed_components: List[str] = None,
     ctx: Context = None
 ) -> str:
     """
@@ -93,6 +143,13 @@ async def memory_start_session(
             if path patterns are registered for this project.
         spawned_by: Parent agent that spawned this worker (for worker tier agents).
         api_key: API key for authentication (required when MCP_AUTH_ENABLED=true).
+        subscribed_components: Optional list of component names (sub-groups under
+            this project) this agent is working in (design:unified-messaging-v0
+            Stage 1 — ADDRESSING). Persisted on the agent_directory record;
+            session start surfaces a `component_peers` list of OTHER agents
+            recently active in any of these components. Stage 1 is discovery
+            only — component-addressed pub/sub delivery + claiming arrive in
+            Stages 2-3. Omit (default) for nimbus's direct-send world.
     """
     # Cleanup stale sessions on each new session start
     cleanup_stale_sessions()
@@ -326,6 +383,14 @@ async def memory_start_session(
                 update_fields["role_description"] = role_description
             if spawned_by:
                 update_fields["spawned_by"] = spawned_by
+            # Component subscriptions (design:unified-messaging-v0 Stage 1).
+            # Normalize to a clean list of non-empty strings; an explicit empty
+            # list clears the subscription (so an agent that moves off a
+            # component drops out of its peer list). None = don't touch.
+            if subscribed_components is not None:
+                update_fields["subscribed_components"] = [
+                    c for c in subscribed_components if c
+                ]
 
             insert_defaults = {"first_seen": utc_now()}
             if not role_description:
@@ -442,6 +507,12 @@ async def memory_start_session(
             if len(_other_active) >= 20:
                 break
 
+    # Component peers (design:unified-messaging-v0 Stage 1 — ADDRESSING):
+    # who else is recently active in any of MY subscribed components?
+    _component_peers = _active_component_peers(
+        get_mongo(), normalized_project, claude_instance, subscribed_components
+    )
+
     # File locks, mods, signals, blocking, interface updates (DYNAMIC)
     _relevant_locks = get_relevant_locks_for_session(session_id, project)
     _recent_mods = await get_recent_modifications(chroma, project, session_id)
@@ -530,6 +601,8 @@ async def memory_start_session(
         output["patterns"] = _patterns_titles
     if _other_active:
         output["other_claudes"] = _other_active
+    if _component_peers:
+        output["component_peers"] = _component_peers
     if _relevant_locks:
         output["relevant_locks"] = _relevant_locks
     if _recent_mods:

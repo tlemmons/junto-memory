@@ -184,6 +184,7 @@ def get_pending_messages_for_instance(instance_name: str, project: str = None) -
             "message": doc.get("message", ""),
             "priority": doc.get("priority", "normal"),
             "obligation": doc.get("obligation"),
+            "component": doc.get("component"),
             "created": created_at,
         }
         if doc.get("reply_to"):
@@ -366,6 +367,7 @@ async def memory_send_message(
     chain_depth: int = None,
     require_human: bool = False,
     human_interacted: bool = False,
+    component: str = None,
     ctx: Context = None
 ) -> str:
     """
@@ -406,6 +408,13 @@ async def memory_send_message(
             this on outbound sends made while processing a Tom-typed prompt).
             When True, refreshes the sender's per-agent recency window. Trusted
             in non-adversarial environments; default False on autopilot replies.
+        component: Optional sub-group under the project this message belongs to
+            (design:unified-messaging-v0 Stage 1 — ADDRESSING). Free-form,
+            human-chosen (e.g. "camera-sync"). Stage 1 carries it as first-class
+            metadata only — addressing is still by to_instance; component-based
+            pub/sub fan-out + claiming arrive in Stages 2-3. null (default) =
+            today's behavior, routes by to_instance. nimbus's direct-send world
+            is the component=null degenerate case (nimbus-compat invariant).
     """
     error = require_session(session_id)
     if error:
@@ -615,6 +624,11 @@ async def memory_send_message(
         # categories start "open"; info carries none. A reply from the owner
         # advances it via _advance_parent_obligation_on_reply.
         "obligation": "open" if category in ACTION_CATEGORIES else None,
+        # Component (design:unified-messaging-v0 Stage 1 / ADDRESSING). Optional
+        # sub-group under the project. Stage 1 = first-class metadata only;
+        # component-routing/claiming land in Stages 2-3. null = route by
+        # to_instance (today's behavior; nimbus's degenerate case).
+        "component": component or None,
         "push_suppressed": suppress_push,
         "push_suppress_reason": push_suppress_reason,
         "emission_count": emission_count,
@@ -689,6 +703,7 @@ async def memory_send_message(
         "priority": priority,
         "category": category,
         "obligation": msg_doc["obligation"],
+        "component": msg_doc["component"],
         "reply_to": reply_to,
         "in_response_to": in_response_to,
         "chain_depth": final_depth,
@@ -798,6 +813,8 @@ async def memory_get_messages(
             "message": doc["message"],
             "priority": doc.get("priority", "normal"),
             "status": doc.get("status", "?"),
+            "obligation": doc.get("obligation"),
+            "component": doc.get("component"),
             "created": doc["created_at"].isoformat() if doc.get("created_at") else (doc["created"].isoformat() if doc.get("created") else None),
             "chain_depth": doc.get("chain_depth", 0),
             "require_human": bool(doc.get("require_human", False)),
@@ -918,6 +935,7 @@ async def memory_get_messages(
             "priority": doc.get("priority", "normal"),
             "status": doc.get("status", "pending"),
             "obligation": doc.get("obligation"),
+            "component": doc.get("component"),
             "created": created_at,
             "delivered": doc.get("status", "pending") != "pending",
             "chain_depth": doc.get("chain_depth", 0),
@@ -1257,6 +1275,7 @@ def _format_inbox_message(doc: Dict[str, Any]) -> Dict[str, Any]:
         "priority": doc.get("priority", "normal"),
         "status": doc.get("status", "pending"),
         "obligation": doc.get("obligation"),
+        "component": doc.get("component"),
         "created": created_at,
         "delivered": doc.get("status", "pending") != "pending",
         "chain_depth": doc.get("chain_depth", 0),
