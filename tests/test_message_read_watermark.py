@@ -41,6 +41,8 @@ def _match(doc, query):
                     return False
                 elif op == "$ne" and val == operand:
                     return False
+                elif op == "$in" and val not in operand:
+                    return False
                 elif op == "$exists":
                     present = key in doc
                     if present != operand:
@@ -74,6 +76,9 @@ class _FakeMessages:
 
     def find(self, query, projection=None):
         return _FakeCursor([d for d in self._docs if _match(d, query)])
+
+    def count_documents(self, query):
+        return sum(1 for d in self._docs if _match(d, query))
 
     def insert_one(self, doc):
         self._docs.append(dict(doc))

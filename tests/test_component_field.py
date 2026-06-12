@@ -77,6 +77,9 @@ class _FakeMessages:
     def find(self, query, projection=None):
         return _FakeCursor([d for d in self._docs if _match(d, query)])
 
+    def count_documents(self, query):
+        return sum(1 for d in self._docs if _match(d, query))
+
     def find_one(self, filt, projection=None):
         for d in self._docs:
             if d.get("_id") == filt.get("_id"):

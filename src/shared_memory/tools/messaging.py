@@ -17,6 +17,7 @@ from shared_memory.audit import log_audit
 from shared_memory.clients import get_mongo
 from shared_memory.config import (
     ACTION_CATEGORIES,
+    classify_lane,
     MESSAGE_ACTION_TTL_DAYS,
     MESSAGE_CATEGORIES,
     MESSAGE_INFO_TTL_HOURS,
@@ -193,9 +194,85 @@ def get_pending_messages_for_instance(instance_name: str, project: str = None) -
         }
         if doc.get("reply_to"):
             entry["reply_to"] = doc["reply_to"]
+        _add_lane_fields(entry)
         messages.append(entry)
 
     return messages
+
+
+def _add_lane_fields(entry: Dict[str, Any]) -> None:
+    """Stamp lane/tier onto a serialized message entry in place.
+
+    The ONE place every message serializer reaches for the category→lane map
+    (interface:lanes-a-server-wire-v0). Used by all four serializers so they
+    cannot diverge (learning_84914604d129602e: the 4-serializer divergence
+    failure mode). Reads the entry's own category/obligation, so it is always
+    consistent with the payload it annotates.
+    """
+    lane, tier = classify_lane(entry.get("category", "info"), entry.get("obligation"))
+    entry["lane"] = lane
+    entry["tier"] = tier
+
+
+# Lanes-A within-page ordering rank (interface:lanes-a-server-wire-v0): an
+# un-engaged ask sorts above an engaged one, and both above everything cleared
+# or FYI. Anything not (action, 0/1) collapses to rank 2.
+_LANE_TIER_RANK = {("action", 0): 0, ("action", 1): 1}
+_PRIORITY_SORT = {"urgent": 0, "normal": 1, "low": 2}
+
+
+def _sort_messages_by_lane(messages: List[Dict[str, Any]]) -> None:
+    """In-place two-tier lanes-A sort (interface:lanes-a-server-wire-v0).
+
+    Order: action-open > action-responded > cleared/fyi; newest-first WITHIN a
+    tier; message priority (urgent>normal>low) as the FINAL tiebreak only — note
+    this DEMOTES priority from the old primary key to a tiebreak, the intended
+    lanes-A behavior change. Implemented as stable multi-pass (least-significant
+    key first) because the recency key sorts descending while the others ascend.
+    """
+    messages.sort(key=lambda x: _PRIORITY_SORT.get(x.get("priority"), 99))      # tertiary
+    messages.sort(key=lambda x: x.get("created") or "", reverse=True)           # secondary: recency
+    messages.sort(key=lambda x: _LANE_TIER_RANK.get((x.get("lane"), x.get("tier")), 2))  # primary
+
+
+def _compute_lane_counts(db, base_and: List[Dict[str, Any]], watermark=None) -> Dict[str, int]:
+    """Server-side lane badge counts (interface:lanes-a-server-wire-v0).
+
+    base_and identifies the agent's inbox (instance + project clauses) WITHOUT
+    the page limit/cursor, so the badge reflects the whole actionable backlog the
+    plugin's page-1 can't see the tail of.
+
+      pending_action_open      — pending ACTION msgs with obligation open (or a
+                                 legacy action msg with no obligation set)
+      pending_action_responded — pending ACTION msgs with obligation responded
+      pending_fyi_waiting      — pending info msgs; UNSEEN-only when a read
+                                 watermark is supplied (the FYI digest cadence),
+                                 else all pending info (no-watermark push path)
+
+    Resolved (cleared) action msgs are in neither action count — they've left the
+    lane. Action counts ignore the watermark by design: a seen-but-unanswered
+    question still owes a reply, so it must stay on the badge.
+    """
+    def _count(extra: Dict[str, Any]) -> int:
+        return db.messages.count_documents({"$and": base_and + [extra]})
+
+    action_open = _count({
+        "category": {"$in": ACTION_CATEGORIES}, "status": "pending",
+        "obligation": {"$in": ["open", None]},
+    })
+    action_responded = _count({
+        "category": {"$in": ACTION_CATEGORIES}, "status": "pending",
+        "obligation": "responded",
+    })
+    fyi_clause: Dict[str, Any] = {"category": "info", "status": "pending"}
+    if watermark is not None:
+        fyi_clause["created_at"] = {"$gt": watermark}
+    fyi_waiting = _count(fyi_clause)
+    return {
+        "pending_action_open": action_open,
+        "pending_action_responded": action_responded,
+        "pending_fyi_waiting": fyi_waiting,
+    }
 
 
 # Phase C1.1: destructive content gate. Body containing any of these patterns
@@ -883,6 +960,7 @@ async def memory_get_messages(
             entry["reply_to"] = doc["reply_to"]
         if doc.get("in_response_to"):
             entry["in_response_to"] = doc["in_response_to"]
+        _add_lane_fields(entry)
         return json.dumps({"count": 1, "messages": [entry]})
 
     # ── Querying for another agent's messages ──
@@ -968,7 +1046,6 @@ async def memory_get_messages(
         elif last_created is not None:
             next_cursor = str(last_created)
 
-    priority_sort = {"urgent": 0, "normal": 1, "low": 2}
     messages = []
     saw_human_message = False
     for doc in raw_docs:
@@ -1006,6 +1083,7 @@ async def memory_get_messages(
             entry["reply_to"] = doc["reply_to"]
         if doc.get("in_response_to"):
             entry["in_response_to"] = doc["in_response_to"]
+        _add_lane_fields(entry)
         messages.append(entry)
 
     # ── Phase D2: inbound recency bump ──
@@ -1029,12 +1107,26 @@ async def memory_get_messages(
         )
         _advance_messages_seen_through(db, my_project, my_instance, newest)
 
-    # Sort by priority then created
-    messages.sort(key=lambda x: (priority_sort.get(x["priority"], 99), x["created"] or ""))
+    # Lanes-A within-page display order (interface:lanes-a-server-wire-v0): tier
+    # over recency over priority. This is the POST-FETCH re-sort, NOT the DB
+    # selection key — selection stays created_at-primary above (design:inbox-
+    # surfacing-v0 Fix A), so nothing strands past limit() and the created_at
+    # cursor stays coherent. inbox's co-sign blocking condition (msg_83e884ecfac7).
+    _sort_messages_by_lane(messages)
+
+    # Lane badge counts over the FULL inbox (not page-limited — the plugin only
+    # sees page-1 and can't count the tail). Action counts ignore the watermark
+    # (a seen-but-unanswered ask still owes a reply); fyi counts unseen-only.
+    lane_counts = _compute_lane_counts(
+        db,
+        [instance_match, project_match],
+        watermark=_get_messages_seen_through(db, my_project, target_instance),
+    )
 
     return json.dumps({
         "count": len(messages),
         "messages": messages,
+        "lane_counts": lane_counts,
         "next_cursor": next_cursor,
         "has_more": has_more,
     })
@@ -1466,6 +1558,7 @@ def _format_inbox_message(doc: Dict[str, Any]) -> Dict[str, Any]:
         entry["reply_to"] = doc["reply_to"]
     if doc.get("in_response_to"):
         entry["in_response_to"] = doc["in_response_to"]
+    _add_lane_fields(entry)
     return entry
 
 
@@ -1562,14 +1655,20 @@ async def read_inbox(project: str, agent: str) -> str:
         elif last_created is not None:
             next_cursor = str(last_created)
 
-    priority_sort = {"urgent": 0, "normal": 1, "low": 2}
     messages = [_format_inbox_message(d) for d in docs]
-    messages.sort(key=lambda x: (priority_sort.get(x["priority"], 99), x["created"] or ""))
+    # Lanes-A within-page display order (post-fetch re-sort; DB selection above
+    # stays created_at-primary). See get_messages for the layering rationale.
+    _sort_messages_by_lane(messages)
 
     # Phase D2: bump recipient's recency timestamp the moment we hand them a
     # sent_by_human=True message via the inbox URI.
     if any(m.get("sent_by_human") for m in messages):
         _bump_human_interaction(db, project, agent)
+
+    # Lane badge counts over the full inbox. No read-watermark on the push path,
+    # so fyi counts all pending info (watermark=None); action counts are
+    # watermark-independent by design.
+    lane_counts = _compute_lane_counts(db, [instance_match, project_match])
 
     return json.dumps({
         "uri": inbox_uri(project, agent),
@@ -1577,6 +1676,7 @@ async def read_inbox(project: str, agent: str) -> str:
         "agent": agent,
         "count": len(messages),
         "messages": messages,
+        "lane_counts": lane_counts,
         "next_cursor": next_cursor,
         "has_more": has_more,
     })

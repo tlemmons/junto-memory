@@ -175,6 +175,35 @@ ACTION_CATEGORIES = ["task", "question", "blocker", "contract", "review"]
 OBLIGATION_RESOLVE_ON_REPLY = ["question", "contract", "review"]
 OBLIGATION_RETAIN_ON_REPLY = ["task", "blocker"]
 
+
+def classify_lane(category, obligation):
+    """Derive (lane, tier) for a message from its category + obligation.
+
+    SINGLE source of truth for the category→lane map (design:unified-messaging-v0
+    Stage 3 / lanes-A; interface:lanes-a-server-wire-v0, coordinator-converged).
+    Computed fresh at serialize time and NEVER stored — so it cannot diverge from
+    the category/obligation in the same payload. Both consumers (the junto-inbox
+    badge and the control UI) read `lane`/`tier` instead of re-implementing this
+    map, which is why it's server-emitted rather than client-derived.
+
+      lane "action"  — an ACTION-category message not yet resolved (still owes work)
+      lane "cleared" — an ACTION-category message whose obligation is resolved
+                       (drops OUT of the action lane)
+      lane "fyi"     — info / non-action
+
+      tier 0 — obligation "open" (or a legacy action message with no obligation):
+               an un-engaged ask, top of the action lane
+      tier 1 — obligation "responded": engaged, deprioritized but still in-lane
+      tier None — fyi / cleared (no action-lane position)
+    """
+    if category in ACTION_CATEGORIES:
+        if obligation == "resolved":
+            return "cleared", None
+        # "open" or a legacy pre-lanes-B action message (obligation unset) → tier 0;
+        # only an explicit "responded" demotes to tier 1.
+        return "action", (1 if obligation == "responded" else 0)
+    return "fyi", None
+
 # ── Differential TTL (design:unified-messaging-v0 Stage 5 / lanes-C) ──
 # Replaces the old flat "all messages expire at created+7d" rule. TTL now rides
 # on a per-doc `expire_at` field (Mongo TTL index, expireAfterSeconds=0):
