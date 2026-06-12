@@ -175,5 +175,17 @@ ACTION_CATEGORIES = ["task", "question", "blocker", "contract", "review"]
 OBLIGATION_RESOLVE_ON_REPLY = ["question", "contract", "review"]
 OBLIGATION_RETAIN_ON_REPLY = ["task", "blocker"]
 
+# ── Differential TTL (design:unified-messaging-v0 Stage 5 / lanes-C) ──
+# Replaces the old flat "all messages expire at created+7d" rule. TTL now rides
+# on a per-doc `expire_at` field (Mongo TTL index, expireAfterSeconds=0):
+#   info / non-action  → expire_at = created + MESSAGE_INFO_TTL_HOURS (FYI ages fast)
+#   ACTION, unacked     → expire_at = null  → NEVER ages (an open task/question must
+#                         not silently vanish — the load-bearing safety property)
+#   ACTION, acked/resolved → expire_at = created + MESSAGE_ACTION_TTL_DAYS
+# Existing pre-migration messages are backfilled to created + ACTION_TTL_DAYS
+# (preserves the old 7d behavior — no early deletion, no immortal docs).
+MESSAGE_INFO_TTL_HOURS = 48
+MESSAGE_ACTION_TTL_DAYS = 7
+
 # Auth roles (ordered by privilege)
 AUTH_ROLES = ["readonly", "agent", "admin", "owner"]

@@ -17,7 +17,9 @@ from shared_memory.audit import log_audit
 from shared_memory.clients import get_mongo
 from shared_memory.config import (
     ACTION_CATEGORIES,
+    MESSAGE_ACTION_TTL_DAYS,
     MESSAGE_CATEGORIES,
+    MESSAGE_INFO_TTL_HOURS,
     MESSAGE_PRIORITIES,
     MESSAGE_STATUSES,
     OBLIGATION_RESOLVE_ON_REPLY,
@@ -352,6 +354,33 @@ def _advance_parent_obligation_on_reply(db, parent_id: str, replier: str, now) -
         else:  # task, blocker — engaged but not done
             update = {"obligation": "responded", "responded_at": now}
         db.messages.update_one({"_id": parent_id}, {"$set": update})
+        # Stage-5 TTL: a RESOLVED action is terminal → start its 7d expiry.
+        # "responded" is NOT terminal (stays in the action lane), so only the
+        # resolve branch ages the message out.
+        if update.get("obligation") == "resolved":
+            _set_action_message_expiry(db, parent_id)
+    except Exception:
+        pass
+
+
+def _set_action_message_expiry(db, message_id):
+    """Stage-5 TTL: when an ACTION message reaches a terminal state (acked or
+    obligation resolved), give it expire_at = created + 7d so it ages out. Until
+    then an action carries expire_at=null and never expires (the load-bearing
+    "unacked action never vanishes" property). Idempotent — only sets when
+    expire_at is still null — and ACTION-only (info already got its 48h expiry at
+    send). Best-effort: a failure must never break the calling status update.
+    """
+    if db is None or not message_id:
+        return
+    try:
+        db.messages.update_one(
+            {"_id": message_id, "expire_at": None,
+             "category": {"$in": ACTION_CATEGORIES}},
+            [{"$set": {"expire_at": {
+                "$add": ["$created_at", MESSAGE_ACTION_TTL_DAYS * 24 * 3600 * 1000]
+            }}}],
+        )
     except Exception:
         pass
 
@@ -639,6 +668,14 @@ async def memory_send_message(
         # its recipient (nimbus-compat invariant). claimed_at stamps the win.
         "owner": None,
         "claimed_at": None,
+        # Differential TTL (design:unified-messaging-v0 Stage 5 / lanes-C). info
+        # ages in 48h; an ACTION message starts with NO expiry (unacked actions
+        # must never silently vanish) and gets expire_at=created+7d only when it
+        # reaches a terminal state (ack/resolve) via _set_action_message_expiry.
+        "expire_at": (
+            None if category in ACTION_CATEGORIES
+            else now + timedelta(hours=MESSAGE_INFO_TTL_HOURS)
+        ),
         "push_suppressed": suppress_push,
         "push_suppress_reason": push_suppress_reason,
         "emission_count": emission_count,
@@ -764,8 +801,10 @@ async def memory_get_messages(
         updated_within_days: Only return messages whose `created_at` is within
             the last N days. Omit (default None) to disable the recency filter.
             Server-side filter — cheaper than load-then-filter at the caller.
-            Note: messages have a 7-day TTL set at insert time (see clients.py),
-            so values > 7 silently behave as 7.
+            Note: messages have a DIFFERENTIAL TTL (design:unified-messaging-v0
+            Stage 5, see clients.py / config.py): info ages out in 48h, an
+            unacked action never ages, and an acked/resolved action lasts 7d from
+            creation. So for info, values > 2 effectively behave as 2.
         include_seen: Default False — a top read (no cursor) by the owning agent
             returns only messages newer than the agent's read-watermark
             (messages_seen_through), and advances that watermark when it has
@@ -827,6 +866,7 @@ async def memory_get_messages(
             "component": doc.get("component"),
             "owner": doc.get("owner"),
             "claimed_at": doc["claimed_at"].isoformat() if hasattr(doc.get("claimed_at"), "isoformat") else doc.get("claimed_at"),
+            "expire_at": doc["expire_at"].isoformat() if hasattr(doc.get("expire_at"), "isoformat") else doc.get("expire_at"),
             "created": doc["created_at"].isoformat() if doc.get("created_at") else (doc["created"].isoformat() if doc.get("created") else None),
             "chain_depth": doc.get("chain_depth", 0),
             "require_human": bool(doc.get("require_human", False)),
@@ -1043,6 +1083,9 @@ async def memory_update_message_status(
         result = db.messages.update_one({"_id": message_id}, {"$set": obl_update})
         if result.matched_count == 0:
             return json.dumps({"error": f"Message not found: {message_id}"})
+        # Stage-5 TTL: "resolved" is terminal → start the 7d expiry.
+        if status == "resolved":
+            _set_action_message_expiry(db, message_id)
         return json.dumps({
             "obligation": status,
             "message_id": message_id,
@@ -1069,6 +1112,11 @@ async def memory_update_message_status(
 
     if result.matched_count == 0:
         return json.dumps({"error": f"Message not found: {message_id}"})
+
+    # Stage-5 TTL: ack/completion is terminal for an action message → start its
+    # 7d expiry. "delivered" is NOT terminal (delivered ≠ acted-on).
+    if status in ("received", "completed", "failed"):
+        _set_action_message_expiry(db, message_id)
 
     return json.dumps({
         "status": status,

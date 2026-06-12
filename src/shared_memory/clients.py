@@ -12,6 +12,7 @@ from pymongo.errors import ConnectionFailure
 from shared_memory.config import (
     CHROMA_HOST,
     CHROMA_PORT,
+    MESSAGE_ACTION_TTL_DAYS,
     MONGO_DB,
     MONGO_HOST,
     MONGO_PASSWORD,
@@ -118,6 +119,60 @@ async def app_lifespan(app):
 _mongo_client = None
 _mongo_db = None
 
+
+def _migrate_messages_ttl(messages):
+    """Differential-TTL migration for the messages collection (Stage 5 / lanes-C).
+
+    Idempotent — runs on every boot, does real work only the first time:
+
+    1. Drop the legacy flat TTL index (created_at + expireAfterSeconds=7d) if it
+       still exists. That index expired EVERY message at created+7d.
+    2. Backfill expire_at on any message that lacks it, to created + 7d — i.e.
+       EXACTLY the old behavior. This is the loss-safety property: existing
+       messages keep their current expiry (no early deletion), and none become
+       immortal (a missing TTL field would otherwise mean "never expires").
+       New sends set expire_at via the differential rule (info=+48h,
+       unacked-action=null/never, acked-action=+7d) in messaging.py.
+    3. Create the new per-doc TTL index on expire_at (expireAfterSeconds=0 =
+       "delete when expire_at <= now"; docs with expire_at unset never expire).
+    4. Re-create a PLAIN created_at index — the dropped TTL index used to be the
+       only index serving the recency-primary get_messages sort.
+
+    Best-effort: a failure here must not block server start (TTL is a cleanup
+    nicety, not a correctness requirement).
+    """
+    try:
+        existing = messages.index_information()
+    except Exception:
+        existing = {}
+
+    # 1. Drop legacy flat TTL index (named created_at_1 with expireAfterSeconds).
+    legacy = existing.get("created_at_1")
+    if legacy is not None and "expireAfterSeconds" in legacy:
+        try:
+            messages.drop_index("created_at_1")
+        except Exception:
+            pass
+
+    # 2. Backfill expire_at = created_at + 7d for docs missing it (old behavior).
+    #    Aggregation-pipeline update ($add date+ms); requires MongoDB 4.2+.
+    try:
+        messages.update_many(
+            {"expire_at": {"$exists": False}},
+            [{"$set": {"expire_at": {
+                "$add": ["$created_at", MESSAGE_ACTION_TTL_DAYS * 24 * 3600 * 1000]
+            }}}],
+        )
+    except Exception:
+        pass
+
+    # 3. New per-doc TTL index. expireAfterSeconds=0 → Mongo deletes when the
+    #    expire_at date is in the past; a null/absent expire_at never expires.
+    messages.create_index("expire_at", expireAfterSeconds=0)
+    # 4. Plain created_at index for the recency sort (the old TTL index did this).
+    messages.create_index("created_at")
+
+
 def get_mongo():
     """Get the MongoDB client and database (lazy initialization).
 
@@ -170,7 +225,12 @@ def get_mongo():
         messages.create_index("status")
         messages.create_index("priority")
         messages.create_index([("to_instance", 1), ("to_project", 1), ("status", 1)])
-        messages.create_index("created_at", expireAfterSeconds=86400 * 7)  # TTL: 7 days
+        # Differential TTL migration (design:unified-messaging-v0 Stage 5 / lanes-C).
+        # Was: a single TTL index on created_at expiring ALL messages at +7d. Now:
+        # TTL rides on a per-doc expire_at field so info ages in 48h, unacked
+        # actions never age, and acked actions keep the 7d window. Idempotent —
+        # safe to re-run every boot. See _migrate_messages_ttl.
+        _migrate_messages_ttl(messages)
 
         # Ensure indexes for agent_status collection
         agent_status = _mongo_db.agent_status
