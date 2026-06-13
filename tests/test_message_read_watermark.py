@@ -1,18 +1,23 @@
-"""Read-watermark regression (design:message-read-watermark-v0, 2026-06-10).
+"""Read-state regression (design:message-read-watermark-v0 → superseded by
+per-message read, design:server-authoritative-delivery-v0 §E / build-plan task 2).
 
-memory_get_messages had no per-recipient read state, so every `go` redisplayed
-the full ~7-day window (the `delivered` flag is computed from status, and status
-never leaves "pending"). These tests pin the watermark contract:
+ORIGINAL (2026-06-10): a single per-recipient messages_seen_through watermark that
+AUTO-ADVANCED on full reads. That conflated "I glanced at a new message" with
+"every older message is now read".
 
-  - a top read by the owning agent defaults to unseen-only (created_at > watermark)
-  - the watermark advances forward-only, and ONLY when the complete unseen set
-    was handed over (has_more=False) — a truncated page must NOT advance it
-    (else the older-unseen tail is silently dropped)
-  - include_seen=True is a full-window catch-up that neither filters nor advances
-  - cursor pagination / for_instance peeks bypass the watermark entirely
+NOW (task 2): read state is PER-MESSAGE — read_by excludes the agent. A body-
+returning owner read marks ONLY the returned messages read (not the older tail);
+ack marks read too. The watermark is DEMOTED to a coarse floor (pre-task-2
+history) and no longer auto-advances. These tests pin the new contract:
+
+  - a top owner read defaults to UNREAD-only (read_by ne me [+ watermark floor])
+  - a full read MARKS the returned messages read (per-message), does NOT advance
+    the watermark; a truncated page marks ONLY the page, the tail stays unread
+  - include_seen=True is a full-window catch-up that neither filters nor marks
+  - cursor pagination / for_instance peeks bypass entirely
 
 The inbox:// resource path (push delivery, control UI) is a SEPARATE function
-(read_inbox) and is intentionally not touched by this filter.
+(read_inbox), read-INERT: it never filters by read_by and never marks read.
 """
 
 import json
@@ -39,8 +44,14 @@ def _match(doc, query):
                     return False
                 elif op == "$gte" and not (val is not None and val >= operand):
                     return False
-                elif op == "$ne" and val == operand:
-                    return False
+                elif op == "$ne":
+                    # array-aware: {read_by:{$ne:x}} excludes a doc whose array
+                    # field contains x, not just scalar equality
+                    if isinstance(val, list):
+                        if operand in val:
+                            return False
+                    elif val == operand:
+                        return False
                 elif op == "$in" and val not in operand:
                     return False
                 elif op == "$exists":
@@ -77,11 +88,43 @@ class _FakeMessages:
     def find(self, query, projection=None):
         return _FakeCursor([d for d in self._docs if _match(d, query)])
 
+    def find_one(self, query, projection=None):
+        for d in self._docs:
+            if _match(d, query):
+                return d
+        return None
+
     def count_documents(self, query):
         return sum(1 for d in self._docs if _match(d, query))
 
     def insert_one(self, doc):
         self._docs.append(dict(doc))
+
+    def update_many(self, query, update):
+        n = 0
+        for d in self._docs:
+            if _match(d, query):
+                n += 1
+                for k, v in (update.get("$addToSet") or {}).items():
+                    arr = d.setdefault(k, [])
+                    if v not in arr:
+                        arr.append(v)
+                for k, v in (update.get("$set") or {}).items():
+                    d[k] = v
+        return type("R", (), {"matched_count": n, "modified_count": n})()
+
+    def update_one(self, query, update, upsert=False):
+        for d in self._docs:
+            if _match(d, query):
+                if isinstance(update, dict):  # ignore pipeline (list) updates
+                    for k, v in (update.get("$set") or {}).items():
+                        d[k] = v
+                    for k, v in (update.get("$addToSet") or {}).items():
+                        arr = d.setdefault(k, [])
+                        if v not in arr:
+                            arr.append(v)
+                return type("R", (), {"matched_count": 1, "modified_count": 1})()
+        return type("R", (), {"matched_count": 0, "modified_count": 0})()
 
 
 class _FakeAgentDirectory:
@@ -157,7 +200,10 @@ async def test_default_read_filters_out_seen_messages(monkeypatch):
         sessions.pop(sid, None)
 
 
-async def test_full_read_advances_watermark_forward(monkeypatch):
+async def test_full_read_marks_returned_messages_read(monkeypatch):
+    """Per-message read (task 2): a full owner read marks the RETURNED messages
+    read_by the agent (replacing the watermark auto-advance, now demoted). A
+    second read excludes them; the watermark is NOT advanced by a scan."""
     now = utc_now()
     m1 = _msg("m1", now - timedelta(minutes=10))
     m2 = _msg("m2", now)
@@ -167,8 +213,14 @@ async def test_full_read_advances_watermark_forward(monkeypatch):
         res = json.loads(await m.memory_get_messages(session_id=sid, limit=20))
         assert res["has_more"] is False
         assert {x["id"] for x in res["messages"]} == {"m1", "m2"}
-        row = fake_db.agent_directory.rows[("junto", "memory")]
-        assert row["messages_seen_through"] == now, "watermark should advance to newest"
+        # both returned docs are now marked read by the agent (per-message)
+        for d in fake_db.messages._docs:
+            assert "memory" in d.get("read_by", []), f"{d['_id']} not marked read"
+        # watermark is DEMOTED — a scan does not advance it
+        assert fake_db.agent_directory.rows.get(("junto", "memory")) is None
+        # a second read returns nothing — everything is read
+        res2 = json.loads(await m.memory_get_messages(session_id=sid, limit=20))
+        assert res2["messages"] == [], "read messages must not re-surface"
     finally:
         sessions.pop(sid, None)
 
@@ -201,9 +253,10 @@ async def test_recency_primary_sort_does_not_strand_urgent(monkeypatch):
         sessions.pop(sid, None)
 
 
-async def test_truncated_read_does_not_advance_watermark(monkeypatch):
-    """has_more=True means the agent saw only a page; advancing would silently
-    drop the older-unseen tail. The watermark must stay put."""
+async def test_truncated_read_marks_only_returned_tail_stays_unread(monkeypatch):
+    """Per-message marking marks ONLY the page handed over — the older unreturned
+    tail stays unread (the old has_more guard is obsolete). m2 (newest) is
+    returned + marked; m1 stays unread and surfaces on the next read."""
     now = utc_now()
     m1 = _msg("m1", now - timedelta(minutes=10))
     m2 = _msg("m2", now)
@@ -212,9 +265,13 @@ async def test_truncated_read_does_not_advance_watermark(monkeypatch):
     try:
         res = json.loads(await m.memory_get_messages(session_id=sid, limit=1))
         assert res["has_more"] is True
-        assert fake_db.agent_directory.rows.get(("junto", "memory")) is None, (
-            "watermark must NOT advance on a truncated read"
-        )
+        assert [x["id"] for x in res["messages"]] == ["m2"]  # newest-first selection
+        by_id = {d["_id"]: d for d in fake_db.messages._docs}
+        assert "memory" in by_id["m2"].get("read_by", [])
+        assert "memory" not in by_id["m1"].get("read_by", []), "tail must stay unread"
+        # the unread tail surfaces on the next read
+        res2 = json.loads(await m.memory_get_messages(session_id=sid, limit=1))
+        assert [x["id"] for x in res2["messages"]] == ["m1"]
     finally:
         sessions.pop(sid, None)
 
@@ -275,6 +332,144 @@ async def test_inbox_resource_never_filters_never_advances(monkeypatch):
     assert directory.rows[("junto", "memory")]["messages_seen_through"] == wm, (
         "resource read must not advance the watermark"
     )
+
+
+async def test_ack_marks_message_read(monkeypatch):
+    """An ack (status=received) marks the message read by the acking agent — the
+    other half of body-pull-marks-read (build-plan task 2). After ack it drops
+    from the default unread view."""
+    now = utc_now()
+    q = _msg("q1", now)
+    q["category"] = "question"
+    q["obligation"] = "open"
+    fake_db = _FakeDB([q])
+    sid, m, sessions = _setup(monkeypatch, fake_db)
+    try:
+        await m.memory_update_message_status(session_id=sid, message_id="q1", status="received")
+        doc = fake_db.messages._docs[0]
+        assert "memory" in doc.get("read_by", []), "ack must mark read_by the acker"
+        res = json.loads(await m.memory_get_messages(session_id=sid, limit=20))
+        assert [x["id"] for x in res["messages"]] == [], "acked message must not re-surface"
+    finally:
+        sessions.pop(sid, None)
+
+
+async def test_fetch_by_id_marks_read(monkeypatch):
+    """Fetching your OWN message body by id is a canonical body-pull → marks it
+    read (build-plan task 2)."""
+    now = utc_now()
+    fake_db = _FakeDB([_msg("m1", now)])
+    sid, m, sessions = _setup(monkeypatch, fake_db)
+    try:
+        await m.memory_get_messages(session_id=sid, message_id="m1")
+        assert "memory" in fake_db.messages._docs[0].get("read_by", [])
+    finally:
+        sessions.pop(sid, None)
+
+
+async def test_read_inbox_is_read_inert_does_not_zero_m(monkeypatch):
+    """The inbox:// resource read is READ-INERT: it never writes read_by, so the
+    fyi M-count is NOT zeroed by surfacing the badge (the old M-zeroing bug). The
+    info message stays unread + counted after a resource read."""
+    from shared_memory.tools import messaging as m
+
+    now = utc_now()
+    info = _msg("i1", now)  # category=info by default
+    fake_db = _FakeDB([info])
+    monkeypatch.setattr(m, "get_mongo", lambda: fake_db)
+    monkeypatch.setattr(m, "_check_inbox_authz", lambda p, a: (True, ""))
+    monkeypatch.setattr(
+        m.push_control, "should_deliver_via_push_filter", lambda db, p, a: True
+    )
+    res = json.loads(await m.read_inbox("junto", "memory"))
+    assert res["lane_counts"]["pending_fyi_waiting"] == 1, "M must survive a resource read"
+    assert "memory" not in fake_db.messages._docs[0].get("read_by", []), (
+        "resource read must NOT mark read"
+    )
+
+
+async def test_headers_only_is_inert_and_omits_body(monkeypatch):
+    """headers_only (task 3) is a read-INERT triage scan: returns metadata with
+    NO body and does NOT mark read, so the message still surfaces (with body) on
+    a subsequent normal read."""
+    now = utc_now()
+    d = _msg("m1", now)
+    d["subject"] = "the subject"
+    fake_db = _FakeDB([d])
+    sid, m, sessions = _setup(monkeypatch, fake_db)
+    try:
+        res = json.loads(await m.memory_get_messages(session_id=sid, headers_only=True))
+        row = res["messages"][0]
+        assert row["id"] == "m1"
+        assert row["subject"] == "the subject"   # metadata present
+        assert row["message"] is None            # body omitted
+        assert "memory" not in fake_db.messages._docs[0].get("read_by", [])  # inert
+        # a normal read still surfaces it (with body) and marks it read
+        res2 = json.loads(await m.memory_get_messages(session_id=sid))
+        assert res2["messages"][0]["message"] == "m1"
+        assert "memory" in fake_db.messages._docs[0].get("read_by", [])
+    finally:
+        sessions.pop(sid, None)
+
+
+async def test_created_after_before_bounds(monkeypatch):
+    """Explicit created_at bounds (task 3). include_seen=True isolates the bound
+    from the unread filter."""
+    now = utc_now()
+    docs = [
+        _msg("old", now - timedelta(hours=3)),
+        _msg("mid", now - timedelta(hours=1)),
+        _msg("new", now),
+    ]
+    fake_db = _FakeDB(docs)
+    sid, m, sessions = _setup(monkeypatch, fake_db)
+    try:
+        after = (now - timedelta(hours=2)).isoformat()
+        res = json.loads(await m.memory_get_messages(
+            session_id=sid, include_seen=True, created_after=after))
+        assert {x["id"] for x in res["messages"]} == {"mid", "new"}
+
+        before = (now - timedelta(minutes=30)).isoformat()
+        res2 = json.loads(await m.memory_get_messages(
+            session_id=sid, include_seen=True, created_after=after, created_before=before))
+        assert {x["id"] for x in res2["messages"]} == {"mid"}
+    finally:
+        sessions.pop(sid, None)
+
+
+async def test_fyi_aging_signal_in_counts(monkeypatch):
+    """FYI aging signal (guidance, not force): lane_counts reports the oldest
+    unread FYI's age + the info TTL, so an agent can be nudged to drain FYIs
+    before they age out at 48h. Nothing auto-expires on it."""
+    now = utc_now()
+    old = _msg("fyi_old", now - timedelta(hours=30))
+    new = _msg("fyi_new", now - timedelta(hours=5))
+    fake_db = _FakeDB([old, new])
+    sid, m, sessions = _setup(monkeypatch, fake_db)
+    try:
+        res = json.loads(await m.memory_get_messages(session_id=sid, include_seen=True))
+        lc = res["lane_counts"]
+        assert lc["pending_fyi_waiting"] == 2
+        assert lc["fyi_ttl_hours"] == 48
+        assert 29.0 <= lc["pending_fyi_oldest_age_hours"] <= 31.0, lc
+    finally:
+        sessions.pop(sid, None)
+
+
+async def test_fyi_aging_none_when_no_fyi(monkeypatch):
+    now = utc_now()
+    q = _msg("q1", now)
+    q["category"] = "question"
+    q["obligation"] = "open"
+    fake_db = _FakeDB([q])
+    sid, m, sessions = _setup(monkeypatch, fake_db)
+    try:
+        res = json.loads(await m.memory_get_messages(session_id=sid, include_seen=True))
+        lc = res["lane_counts"]
+        assert lc["pending_fyi_waiting"] == 0
+        assert lc["pending_fyi_oldest_age_hours"] is None
+    finally:
+        sessions.pop(sid, None)
 
 
 async def test_include_seen_bypasses_and_does_not_advance(monkeypatch):

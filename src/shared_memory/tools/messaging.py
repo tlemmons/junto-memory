@@ -8,6 +8,8 @@ from datetime import timedelta
 from typing import Any, Dict, List, Set
 
 from mcp.server.fastmcp import Context
+from mcp.shared.message import SessionMessage
+from mcp.types import JSONRPCMessage, JSONRPCNotification
 from pydantic import AnyUrl
 from pymongo import ReturnDocument
 
@@ -185,6 +187,7 @@ def get_pending_messages_for_instance(instance_name: str, project: str = None) -
             "from_instance": doc.get("from_instance", doc.get("from", "?")),
             "from_project": doc.get("from_project", ""),
             "category": doc.get("category", "info"),
+            "subject": doc.get("subject"),
             "message": doc.get("message", ""),
             "priority": doc.get("priority", "normal"),
             "obligation": doc.get("obligation"),
@@ -235,7 +238,8 @@ def _sort_messages_by_lane(messages: List[Dict[str, Any]]) -> None:
     messages.sort(key=lambda x: _LANE_TIER_RANK.get((x.get("lane"), x.get("tier")), 2))  # primary
 
 
-def _compute_lane_counts(db, base_and: List[Dict[str, Any]], watermark=None) -> Dict[str, int]:
+def _compute_lane_counts(db, base_and: List[Dict[str, Any]], watermark=None,
+                         reader=None) -> Dict[str, int]:
     """Server-side lane badge counts (interface:lanes-a-server-wire-v0).
 
     base_and identifies the agent's inbox (instance + project clauses) WITHOUT
@@ -245,12 +249,15 @@ def _compute_lane_counts(db, base_and: List[Dict[str, Any]], watermark=None) -> 
       pending_action_open      — pending ACTION msgs with obligation open (or a
                                  legacy action msg with no obligation set)
       pending_action_responded — pending ACTION msgs with obligation responded
-      pending_fyi_waiting      — pending info msgs; UNSEEN-only when a read
-                                 watermark is supplied (the FYI digest cadence),
-                                 else all pending info (no-watermark push path)
+      pending_fyi_waiting      — pending info msgs the reader hasn't READ. UNREAD
+                                 is per-message (read_by excludes `reader`,
+                                 build-plan task 2) with the seen-watermark kept
+                                 as a coarse floor (pre-task-2 history). The M
+                                 count stays read-INERT: a resource/announce scan
+                                 never writes read_by, so glancing never zeroes M.
 
     Resolved (cleared) action msgs are in neither action count — they've left the
-    lane. Action counts ignore the watermark by design: a seen-but-unanswered
+    lane. Action counts ignore read state by design: a seen-but-unanswered
     question still owes a reply, so it must stay on the badge.
     """
     def _count(extra: Dict[str, Any]) -> int:
@@ -265,13 +272,37 @@ def _compute_lane_counts(db, base_and: List[Dict[str, Any]], watermark=None) -> 
         "obligation": "responded",
     })
     fyi_clause: Dict[str, Any] = {"category": "info", "status": "pending"}
+    if reader is not None:
+        fyi_clause["read_by"] = {"$ne": reader}
     if watermark is not None:
         fyi_clause["created_at"] = {"$gt": watermark}
     fyi_waiting = _count(fyi_clause)
+
+    # FYI aging signal (GUIDANCE, not force): age in hours of the OLDEST unread
+    # FYI, so a long-session agent can be nudged to drain before info ages out at
+    # MESSAGE_INFO_TTL_HOURS (48h). Pure data — nothing auto-expires/blocks on it;
+    # the agent/plugin decides whether/how to surface "FYIs aging, check soon".
+    # null when there are no waiting FYIs.
+    fyi_oldest_age_hours = None
+    if fyi_waiting:
+        oldest = next(iter(
+            db.messages.find({"$and": base_and + [fyi_clause]})
+                       .sort([("created_at", 1)]).limit(1)
+        ), None)
+        oc = (oldest or {}).get("created_at")
+        if oc is not None:
+            try:
+                fyi_oldest_age_hours = round(
+                    (utc_now() - oc).total_seconds() / 3600.0, 1
+                )
+            except TypeError:  # non-datetime created_at — skip the signal
+                fyi_oldest_age_hours = None
     return {
         "pending_action_open": action_open,
         "pending_action_responded": action_responded,
         "pending_fyi_waiting": fyi_waiting,
+        "pending_fyi_oldest_age_hours": fyi_oldest_age_hours,
+        "fyi_ttl_hours": MESSAGE_INFO_TTL_HOURS,
     }
 
 
@@ -393,6 +424,27 @@ def _advance_messages_seen_through(db, project: str, agent: str, ts) -> None:
         pass
 
 
+def _mark_messages_read(db, message_ids, instance: str) -> None:
+    """Mark messages READ by `instance` — per-message read state, the SOURCE OF
+    TRUTH for unread (design:server-authoritative-delivery-v0 §E / contract:
+    message-lanes-v0 §E5, build-plan task 2). Replaces the auto-advancing
+    messages_seen_through watermark, which conflated "I glanced at a new message"
+    with "every older message is read". Idempotent ($addToSet read_by); marks ONLY
+    the given messages (per-message), so a truncated page never marks the
+    unreturned tail read. Does NOT touch the watermark (now a coarse floor only).
+    Best-effort: a read-state write must never break the read itself.
+    """
+    if db is None or not instance or not message_ids:
+        return
+    try:
+        db.messages.update_many(
+            {"_id": {"$in": list(message_ids)}},
+            {"$addToSet": {"read_by": instance}},
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        log.debug("read-state: mark-read failed for %s: %s", instance, e)
+
+
 def _advance_parent_obligation_on_reply(db, parent_id: str, replier: str, now) -> None:
     """Auto-ack: when a reply's sender is the parent's OWNER, advance the parent's
     obligation (design:unified-messaging-v0 Stage 3 / lanes-B).
@@ -476,6 +528,7 @@ async def memory_send_message(
     require_human: bool = False,
     human_interacted: bool = False,
     component: str = None,
+    subject: str = None,
     ctx: Context = None
 ) -> str:
     """
@@ -523,6 +576,12 @@ async def memory_send_message(
             pub/sub fan-out + claiming arrive in Stages 2-3. null (default) =
             today's behavior, routes by to_instance. nimbus's direct-send world
             is the component=null degenerate case (nimbus-compat invariant).
+        subject: Optional sender-authored header line (<=80ch primary triage
+            signal — server-authoritative delivery §E3 / contract:message-lanes-v0).
+            Required-BY-GUIDELINE, not hard-rejected: a missing subject on an
+            action message renders "(no subject)" on the recipient side. A reply
+            (in_response_to set) with no explicit subject defaults to
+            "Re: <parent subject>". Surfaces in get_messages and the announce packet.
     """
     error = require_session(session_id)
     if error:
@@ -705,6 +764,18 @@ async def memory_send_message(
     )
     final_require_human = bool(require_human) or body_is_destructive
 
+    # ── SUBJECT (server-authoritative delivery §E3 / build-plan task 1) ──
+    # Sender-authored primary header signal. Required-by-guideline, NOT
+    # hard-rejected. A reply with no explicit subject defaults to
+    # "Re: <parent subject>" (one extra lookup only on a reply-without-subject;
+    # the chain_depth branch above doesn't always fetch the parent).
+    final_subject = subject.strip() if isinstance(subject, str) and subject.strip() else None
+    if final_subject is None and in_response_to:
+        _parent_subj = db.messages.find_one({"_id": in_response_to}, {"subject": 1})
+        _ps = (_parent_subj or {}).get("subject")
+        if _ps:
+            final_subject = _ps if _ps.startswith("Re: ") else f"Re: {_ps}"
+
     # ── Build and store message ──
     message_id = f"msg_{uuid.uuid4().hex[:12]}"
 
@@ -718,6 +789,11 @@ async def memory_send_message(
         "message": message,
         "priority": priority,
         "category": category,
+        "subject": final_subject,
+        # Per-message read state (build-plan task 2): the recipients who have
+        # READ this message (body-pull or ack). Empty = unread by everyone; the
+        # source of truth for the unread filter, replacing the seen-watermark.
+        "read_by": [],
         "reply_to": reply_to,
         "in_response_to": in_response_to,
         "chain_depth": final_depth,
@@ -806,7 +882,10 @@ async def memory_send_message(
     # / read_inbox) still surfaces the message — coordinator alert covers
     # visibility.
     if not suppress_push:
-        await _notify_inbox_for_send(msg_doc["to_project"], to_instance)
+        # Server-authoritative delivery §E: build the announce packet (None for
+        # badge-only/info) and content-push it alongside the resource-updated.
+        announce_packet = _build_announce_packet(msg_doc)
+        await _notify_inbox_for_send(msg_doc["to_project"], to_instance, announce_packet)
 
     # Subscriber count is read from the in-process subscription map, which
     # _notify_inbox_for_send may have just pruned of dead sessions. Reading
@@ -855,6 +934,9 @@ async def memory_get_messages(
     cursor: str = None,
     updated_within_days: int = None,
     include_seen: bool = False,
+    headers_only: bool = False,
+    created_after: str = None,
+    created_before: str = None,
     ctx: Context = None
 ) -> str:
     """
@@ -893,6 +975,17 @@ async def memory_get_messages(
             peeks always bypass it. The inbox:// resource (push delivery,
             control UI) is a separate path and is NOT affected by this filter.
             See design:message-read-watermark-v0.
+        headers_only: Default False. True returns metadata WITHOUT the message
+            body — a triage/reconcile scan that is READ-INERT (does NOT mark the
+            returned messages read), so an agent can scan unread headers and then
+            choose which bodies to pull. The go/park reconcile path
+            (design:server-authoritative-delivery-v0 §E). Pull a body (by
+            message_id or a normal non-headers read) or ack to mark read.
+        created_after: ISO timestamp — only messages with created_at strictly
+            AFTER this. Explicit lower bound (vs updated_within_days' rolling
+            approximation). Build-plan task 3.
+        created_before: ISO timestamp — only messages with created_at strictly
+            BEFORE this. Explicit upper bound. Build-plan task 3.
     """
     error = require_session(session_id)
     if error:
@@ -929,6 +1022,11 @@ async def memory_get_messages(
                 return json.dumps({"error": "Permission denied. Only admins/coordinators can view other agents' messages."})
             if msg_project and msg_project != my_project:
                 return json.dumps({"error": "Permission denied. Message belongs to a different project."})
+        # Body-pull marks read (build-plan task 2): fetching your OWN message's
+        # body by id is a canonical read. Skip when an admin peeks at a message
+        # addressed to someone else (don't mark read on their behalf).
+        if doc.get("to_instance", doc.get("to")) in (my_instance, "*"):
+            _mark_messages_read(db, [doc["_id"]], my_instance)
         entry = {
             "id": doc["_id"],
             "from": doc.get("from_instance", doc.get("from", "?")),
@@ -936,6 +1034,7 @@ async def memory_get_messages(
             "to": doc.get("to_instance", doc.get("to", "?")),
             "to_project": doc.get("to_project", ""),
             "category": doc.get("category", "info"),
+            "subject": doc.get("subject"),
             "message": doc["message"],
             "priority": doc.get("priority", "normal"),
             "status": doc.get("status", "?"),
@@ -1008,16 +1107,32 @@ async def memory_get_messages(
         recency_cutoff = utc_now() - timedelta(days=int(updated_within_days))
         query["$and"].append({"created_at": {"$gte": recency_cutoff}})
 
-    # ── Read-watermark filter (design:message-read-watermark-v0) ──
-    # A top read (no cursor) by the OWNING agent defaults to unseen-only:
-    # messages newer than the agent's messages_seen_through watermark. Cursor
-    # pagination and for_instance peeks always bypass it (pagination would
-    # break against a moving watermark; a peek must not advance someone else's
-    # marker). include_seen=True is the full-window catch-up escape hatch.
-    is_watermark_read = (
+    # Explicit created_at bounds (build-plan task 3). Distinct from cursor (which
+    # is a created_at < pagination key) and from updated_within_days (rolling).
+    # Silently ignore an unparseable bound rather than reject the whole read.
+    if created_after is not None:
+        _after_dt = parse_timestamp(created_after)
+        if _after_dt is not None:
+            query["$and"].append({"created_at": {"$gt": _after_dt}})
+    if created_before is not None:
+        _before_dt = parse_timestamp(created_before)
+        if _before_dt is not None:
+            query["$and"].append({"created_at": {"$lt": _before_dt}})
+
+    # ── Unread filter (build-plan task 2: per-message read state) ──
+    # A top read (no cursor) by the OWNING agent defaults to UNREAD-only. Read
+    # state is now PER-MESSAGE — read_by excludes the agent — replacing the
+    # single auto-advancing messages_seen_through watermark (which conflated
+    # "glanced at a new msg" with "older msgs read"). The watermark is DEMOTED to
+    # a coarse FLOOR: messages at/before it are treated as already-read, so an
+    # agent carrying a pre-task-2 watermark isn't re-flooded post-deploy. Cursor
+    # pagination and for_instance peeks bypass (I2/I3); include_seen is the
+    # full-window catch-up hatch (design:message-read-watermark-v0 invariants).
+    is_owner_read = (
         not include_seen and cursor is None and target_instance == my_instance
     )
-    if is_watermark_read:
+    if is_owner_read:
+        query["$and"].append({"read_by": {"$ne": my_instance}})
         watermark = _get_messages_seen_through(db, my_project, my_instance)
         if watermark is not None:
             query["$and"].append({"created_at": {"$gt": watermark}})
@@ -1060,7 +1175,10 @@ async def memory_get_messages(
             "from": doc.get("from_instance", doc.get("from", "?")),
             "from_project": doc.get("from_project", ""),
             "category": doc.get("category", "info"),
-            "message": doc.get("message", ""),
+            "subject": doc.get("subject"),
+            # headers_only (task 3) is a read-inert triage scan: omit the body so
+            # the recipient triages from headers and pulls bodies it wants.
+            "message": None if headers_only else doc.get("message", ""),
             "priority": doc.get("priority", "normal"),
             "status": doc.get("status", "pending"),
             "obligation": doc.get("obligation"),
@@ -1094,18 +1212,16 @@ async def memory_get_messages(
     if saw_human_message and target_instance == my_instance:
         _bump_human_interaction(db, my_project, my_instance)
 
-    # ── Advance read-watermark (design:message-read-watermark-v0) ──
-    # Only on the self top read, and ONLY when we handed over the COMPLETE
-    # unseen set (has_more=False). If has_more is True the agent saw a
-    # truncated page, so advancing would silently skip the older-unseen tail;
-    # we leave the watermark put and the agent re-reads (or raises limit /
-    # paginates) to drain. $max keeps it forward-only.
-    if is_watermark_read and not has_more and raw_docs:
-        newest = max(
-            (d.get("created_at") for d in raw_docs if d.get("created_at") is not None),
-            default=None,
-        )
-        _advance_messages_seen_through(db, my_project, my_instance, newest)
+    # ── Mark returned messages read (build-plan task 2: per-message read) ──
+    # Replaces the old watermark auto-advance. A body-returning owner read marks
+    # ONLY the messages handed over (per-message), so a truncated page never marks
+    # the unreturned tail read — the old has_more guard is no longer needed.
+    # INERT for resource reads (read_inbox / I1), cursor pages (I2) and
+    # include_seen catch-ups (I3): is_owner_read already excludes those. The
+    # headers-only scan (build-plan task 3) will opt OUT of this marking so a pure
+    # triage glance stays inert.
+    if is_owner_read and not headers_only and raw_docs:
+        _mark_messages_read(db, [d["_id"] for d in raw_docs], my_instance)
 
     # Lanes-A within-page display order (interface:lanes-a-server-wire-v0): tier
     # over recency over priority. This is the POST-FETCH re-sort, NOT the DB
@@ -1121,6 +1237,7 @@ async def memory_get_messages(
         db,
         [instance_match, project_match],
         watermark=_get_messages_seen_through(db, my_project, target_instance),
+        reader=target_instance,
     )
 
     return json.dumps({
@@ -1204,6 +1321,15 @@ async def memory_update_message_status(
 
     if result.matched_count == 0:
         return json.dumps({"error": f"Message not found: {message_id}"})
+
+    # Per-message read state (build-plan task 2): an ack (received) is an explicit
+    # "I've seen and handled this" → mark it read by the acking agent, the other
+    # half of body-pull-marks-read. Keeps the unread filter / badge consistent
+    # whether the agent pulled the body or just acked.
+    if status == "received":
+        caller_instance = active_sessions.get(session_id, {}).get("claude_instance")
+        if caller_instance:
+            _mark_messages_read(db, [message_id], caller_instance)
 
     # Stage-5 TTL: ack/completion is terminal for an action message → start its
     # 7d expiry. "delivered" is NOT terminal (delivered ≠ acted-on).
@@ -1535,6 +1661,7 @@ def _format_inbox_message(doc: Dict[str, Any]) -> Dict[str, Any]:
         "to": doc.get("to_instance", doc.get("to", "?")),
         "to_project": doc.get("to_project", ""),
         "category": doc.get("category", "info"),
+        "subject": doc.get("subject"),
         "message": doc.get("message", ""),
         "priority": doc.get("priority", "normal"),
         "status": doc.get("status", "pending"),
@@ -1665,10 +1792,16 @@ async def read_inbox(project: str, agent: str) -> str:
     if any(m.get("sent_by_human") for m in messages):
         _bump_human_interaction(db, project, agent)
 
-    # Lane badge counts over the full inbox. No read-watermark on the push path,
-    # so fyi counts all pending info (watermark=None); action counts are
-    # watermark-independent by design.
-    lane_counts = _compute_lane_counts(db, [instance_match, project_match])
+    # Lane badge counts over the full inbox. fyi M-count is per-message UNREAD
+    # (read_by excludes this agent) with the seen-watermark as a coarse floor —
+    # and this resource read is READ-INERT (never writes read_by), so surfacing
+    # the badge never zeroes M (build-plan task 2). action counts are read-state-
+    # independent by design.
+    lane_counts = _compute_lane_counts(
+        db, [instance_match, project_match],
+        watermark=_get_messages_seen_through(db, project, agent),
+        reader=agent,
+    )
 
     return json.dumps({
         "uri": inbox_uri(project, agent),
@@ -1694,13 +1827,106 @@ def _parse_inbox_uri(uri_str: str) -> tuple:
     return (normalize_project(m.group(1)), m.group(2))
 
 
-async def _notify_inbox_for_send(to_project: str, to_instance: str) -> None:
-    """Dispatch ResourceUpdated notifications after memory_send_message.
+# ── Server-authoritative content-push ──────────────────────────────────────
+# design:server-authoritative-delivery-v0 §ANNOUNCE-PUSH (v0.5.1), ratified into
+# contract:message-lanes-v0 §E. The server pushes a small content packet to each
+# CONNECTED subscriber session instead of relying on the plugin to pull the
+# inbox:// window on a payload-less resource-updated. The custom method below +
+# the packet shape in _build_announce_packet ARE the frozen wire contract (§E3);
+# the junto-inbox plugin registers a handler for this exact method.
+ANNOUNCE_METHOD = "notifications/junto/announce"
+
+
+def _announce_mode(category, priority, require_human, is_system_notice, obligation):
+    """Render mode for the announce push, or None when the message must NOT push.
+
+    INJECT (full body inline):  blocker | urgent | require_human | system_notice
+    HEADER (one line, body-on-pull):  any other ACTION-lane message
+    None  (badge-only, no push):  info / fyi / a resolved (cleared) action
+
+    classify_lane is the single source of truth for action-vs-fyi (§E1); mode only
+    adds the inject/header split on top of an action-lane message.
+    """
+    lane, _tier = classify_lane(category, obligation)
+    if lane != "action":
+        return None  # fyi or cleared → badge-only, never pushed
+    if category == "blocker" or priority == "urgent" or require_human or is_system_notice:
+        return "inject"
+    return "header"
+
+
+def _build_announce_packet(msg_doc):
+    """Build notifications/junto/announce params from a stored message doc, or
+    None when the message is badge-only (must not be pushed).
+
+    Frozen field set (contract:message-lanes-v0 §E3). Body is inlined ONLY for
+    mode=="inject"; header mode is metadata-only (body-on-pull). All values are
+    JSON primitives (created_at → ISO string) so the dict survives raw JSON-RPC
+    serialization on the write stream.
+    """
+    is_system_notice = bool(msg_doc.get("is_system_notice", False))
+    mode = _announce_mode(
+        msg_doc.get("category", "info"),
+        msg_doc.get("priority", "normal"),
+        bool(msg_doc.get("require_human", False)),
+        is_system_notice,
+        msg_doc.get("obligation"),
+    )
+    if mode is None:
+        return None
+    created_at = msg_doc.get("created_at")
+    packet = {
+        "mode": mode,
+        "from_agent": msg_doc.get("from_instance"),
+        "from_project": msg_doc.get("from_project"),
+        "category": msg_doc.get("category"),
+        "priority": msg_doc.get("priority"),
+        "msg_id": msg_doc.get("_id"),
+        "chain_depth": msg_doc.get("chain_depth"),
+        "in_response_to": msg_doc.get("in_response_to"),
+        "obligation_state": msg_doc.get("obligation"),
+        # SUBJECT (build-plan task 1) is not yet a field; carry None until it
+        # lands so the packet shape is already frozen at the wire contract.
+        "subject": msg_doc.get("subject"),
+        "require_human": bool(msg_doc.get("require_human", False)),
+        "is_system_notice": is_system_notice,
+        "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+    }
+    if mode == "inject":
+        packet["body"] = msg_doc.get("message")
+    return packet
+
+
+async def _content_push(session: Any, packet: Dict[str, Any]) -> None:
+    """Send one notifications/junto/announce content-push to a subscribed session.
+
+    A custom JSON-RPC method is NOT in the typed ServerNotification union, so
+    ServerSession.send_notification() would reject it. We build a raw
+    JSONRPCNotification and write it to the session's stream via the low-level
+    send_message escape hatch (mcp/server/session.py). SDK-coupling caveat:
+    send_message is documented 'low-level experimental' — see
+    learning_5dcf4824df37700f; the mcp SDK version is pinned. Raises on transport
+    failure so the caller prunes the dead session.
+    """
+    notif = JSONRPCNotification(jsonrpc="2.0", method=ANNOUNCE_METHOD, params=packet)
+    await session.send_message(SessionMessage(message=JSONRPCMessage(notif)))
+
+
+async def _notify_inbox_for_send(
+    to_project: str, to_instance: str, packet: Dict[str, Any] = None
+) -> None:
+    """Dispatch inbox notifications after memory_send_message.
 
     Direct messages → notify the named agent's inbox URI.
     Broadcasts (to_instance='*') → notify every subscribed inbox URI in the
     target project, since each subscriber will see the broadcast in their
     own get_messages/inbox view.
+
+    `packet` (server-authoritative delivery §E): when provided AND the message is
+    push-eligible (action lane), each session gets a content-push in ADDITION to
+    the resource-updated. None (wake-all / sync / scheduler / badge-only paths) =
+    resource-updated only, i.e. today's behavior. Broadcasts are info-lane only
+    by convention (§B), so their packet is None anyway.
     """
     if not to_project:
         return
@@ -1714,14 +1940,21 @@ async def _notify_inbox_for_send(to_project: str, to_instance: str) -> None:
             if p and a and a != "*":
                 targets.append((p, a))
         for project, agent in targets:
-            await _notify_inbox(project, agent)
+            await _notify_inbox(project, agent, packet)
         return
-    await _notify_inbox(to_project, to_instance)
+    await _notify_inbox(to_project, to_instance, packet)
 
 
-async def _notify_inbox(project: str, agent: str) -> None:
-    """Fire notifications/resources/updated to every session subscribed to
-    inbox://<project>/<agent>. Drops sessions whose send fails (dead transport).
+async def _notify_inbox(project: str, agent: str, packet: Dict[str, Any] = None) -> None:
+    """Notify every session subscribed to inbox://<project>/<agent>.
+
+    Always fires notifications/resources/updated (the pre-cutover plugin pulls the
+    inbox:// window on it). When `packet` is provided, ADDITIONALLY content-pushes
+    the announce packet (server-authoritative delivery §E2) — a post-cutover
+    plugin acts on this and ignores the resource-updated; a pre-cutover plugin
+    ignores the unknown announce method. Keeping BOTH during the transition means
+    a server-ahead-of-plugin (or plugin-ahead-of-server) state degrades to quiet,
+    never a flood (§E7). Drops sessions whose send fails (dead transport).
     Best-effort: a failure here must not break message insert.
     """
     if not project or not agent:
@@ -1741,6 +1974,8 @@ async def _notify_inbox(project: str, agent: str) -> None:
     for session in sessions:
         try:
             await session.send_resource_updated(url)
+            if packet is not None:
+                await _content_push(session, packet)
         except Exception as e:  # session closed / write end gone
             log.debug("inbox: drop dead subscriber for %s: %s", uri_str, e)
             dead.append(session)

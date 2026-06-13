@@ -41,8 +41,14 @@ def _match(doc, query):
                     return False
                 elif op == "$gte" and not (val is not None and val >= operand):
                     return False
-                elif op == "$ne" and val == operand:
-                    return False
+                elif op == "$ne":
+                    # array-aware: {field:{$ne:x}} excludes a doc whose array
+                    # field contains x (read_by membership), not just scalar ==
+                    if isinstance(val, list):
+                        if operand in val:
+                            return False
+                    elif val == operand:
+                        return False
                 elif op == "$in" and val not in operand:
                     return False
                 elif op == "$exists":
@@ -82,6 +88,19 @@ class _FakeMessages:
 
     def insert_one(self, doc):
         self._docs.append(dict(doc))
+
+    def update_many(self, query, update):
+        n = 0
+        for d in self._docs:
+            if _match(d, query):
+                n += 1
+                for k, v in (update.get("$addToSet") or {}).items():
+                    arr = d.setdefault(k, [])
+                    if v not in arr:
+                        arr.append(v)
+                for k, v in (update.get("$set") or {}).items():
+                    d[k] = v
+        return type("R", (), {"matched_count": n, "modified_count": n})()
 
 
 class _FakeAgentDirectory:
