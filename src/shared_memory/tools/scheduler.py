@@ -304,7 +304,7 @@ async def _materialize_one(db, sched_doc: dict) -> Optional[str]:
     and gets retried on the next tick).
     """
     # Local import: avoid module-load cycles via tools/__init__.py.
-    from shared_memory.tools.messaging import _notify_inbox_for_send, _build_announce_packet
+    from shared_memory.tools.messaging import _build_announce_packet, _notify_inbox_for_send
 
     agent = sched_doc["agent_instance"]
     project = sched_doc["agent_project"]

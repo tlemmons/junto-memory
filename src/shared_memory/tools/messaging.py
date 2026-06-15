@@ -19,13 +19,13 @@ from shared_memory.audit import log_audit
 from shared_memory.clients import get_mongo
 from shared_memory.config import (
     ACTION_CATEGORIES,
-    classify_lane,
     MESSAGE_ACTION_TTL_DAYS,
     MESSAGE_CATEGORIES,
     MESSAGE_INFO_TTL_HOURS,
     MESSAGE_PRIORITIES,
     MESSAGE_STATUSES,
     OBLIGATION_RESOLVE_ON_REPLY,
+    classify_lane,
 )
 from shared_memory.helpers import normalize_project, parse_timestamp, require_session, utc_now
 from shared_memory.intent import get_current_intent_id

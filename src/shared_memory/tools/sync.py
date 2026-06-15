@@ -1066,7 +1066,7 @@ async def _apply_message_sent(db, chroma, op):
         to_project = payload.get("to_project")
         to_instance = payload.get("to_instance")
         if to_project and to_instance:
-            from shared_memory.tools.messaging import _notify_inbox_for_send, _build_announce_packet
+            from shared_memory.tools.messaging import _build_announce_packet, _notify_inbox_for_send
             try:
                 # Server-authoritative delivery §E: content-push the announce for
                 # a federated-replicated message too (None for badge-only/info).
