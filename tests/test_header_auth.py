@@ -6,8 +6,9 @@ exercised against the live server; here we lock down the parsing + plumbing
 that the middleware depends on.
 """
 
-import shared_memory.auth as auth_mod
+import importlib
 
+import shared_memory.auth as auth_mod
 
 # ── parse_bearer_token ──
 
@@ -85,3 +86,46 @@ def test_via_tunnel_set_get_reset():
         auth_mod.reset_via_tunnel(token)
     # No leakage across requests.
     assert auth_mod.get_via_tunnel() is False
+
+
+# ── REQUIRE_KEY flag (design:auth-origin-trust-v0) ──
+# Rejects EVERY keyless session regardless of origin — the posture for a
+# Tailscale-only server (no tunnel header) where all clients already hold keys.
+# The flag is read at import, so we reload the module under a patched env and
+# restore the default afterwards so other tests see the off (default) state.
+
+def _reload_auth_with_env(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("JUNTO_REQUIRE_KEY", raising=False)
+    else:
+        monkeypatch.setenv("JUNTO_REQUIRE_KEY", value)
+    importlib.reload(auth_mod)
+
+
+def test_require_key_defaults_off(monkeypatch):
+    try:
+        _reload_auth_with_env(monkeypatch, None)
+        assert auth_mod.REQUIRE_KEY is False
+    finally:
+        monkeypatch.delenv("JUNTO_REQUIRE_KEY", raising=False)
+        importlib.reload(auth_mod)
+
+
+def test_require_key_truthy_values(monkeypatch):
+    try:
+        for v in ("true", "1", "yes", "TRUE", "Yes"):
+            _reload_auth_with_env(monkeypatch, v)
+            assert auth_mod.REQUIRE_KEY is True, f"{v!r} should enable REQUIRE_KEY"
+    finally:
+        monkeypatch.delenv("JUNTO_REQUIRE_KEY", raising=False)
+        importlib.reload(auth_mod)
+
+
+def test_require_key_falsey_values(monkeypatch):
+    try:
+        for v in ("false", "0", "no", ""):
+            _reload_auth_with_env(monkeypatch, v)
+            assert auth_mod.REQUIRE_KEY is False, f"{v!r} should leave REQUIRE_KEY off"
+    finally:
+        monkeypatch.delenv("JUNTO_REQUIRE_KEY", raising=False)
+        importlib.reload(auth_mod)

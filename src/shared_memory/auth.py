@@ -100,6 +100,17 @@ TUNNEL_REQUIRES_KEY = os.getenv("JUNTO_TUNNEL_REQUIRES_KEY", "true").lower() in 
     "true", "1", "yes",
 )
 
+# Require a valid API key for ALL connections, regardless of origin. Unlike
+# TUNNEL_REQUIRES_KEY (which only rejects keyless traffic detected as tunnel-origin
+# via CF-Connecting-IP), this rejects every keyless session — the correct posture
+# for a deployment where the transport (e.g. a Tailscale-only server) sets no
+# tunnel header, so origin-trust can't distinguish trusted-LAN from remote, AND
+# every legitimate client already holds a key. Default off preserves the
+# keyless-LAN soft-fallback. See design:auth-origin-trust-v0.
+REQUIRE_KEY = os.getenv("JUNTO_REQUIRE_KEY", "false").lower() in (
+    "true", "1", "yes",
+)
+
 
 def detect_tunnel_origin(headers) -> bool:
     """True if the request carries Cloudflare's CF-Connecting-IP header, i.e.

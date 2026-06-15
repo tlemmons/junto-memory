@@ -208,23 +208,28 @@ async def memory_start_session(
                         "allowed_projects": _auth_projects,
                     })
             else:
-                # No key presented. Origin trust (design:auth-origin-trust-v0):
-                # keyless → agent tier is allowed only for LAN/local origins.
-                # Requests that arrived over the public Cloudflare tunnel
-                # (CF-Connecting-IP present) must present a valid key.
-                from shared_memory.auth import TUNNEL_REQUIRES_KEY, get_via_tunnel
-                if TUNNEL_REQUIRES_KEY and get_via_tunnel():
+                # No key presented. Two rejection gates (design:auth-origin-trust-v0):
+                #   1. REQUIRE_KEY — reject EVERY keyless session, any origin. The
+                #      correct posture when the transport sets no tunnel header (so
+                #      origin-trust can't tell trusted-LAN from remote) and all
+                #      clients already hold keys (e.g. a Tailscale-only server).
+                #   2. TUNNEL_REQUIRES_KEY — reject keyless traffic detected as
+                #      tunnel-origin (CF-Connecting-IP present).
+                # Otherwise keyless → agent tier (LAN/local soft-fallback).
+                from shared_memory.auth import REQUIRE_KEY, TUNNEL_REQUIRES_KEY, get_via_tunnel
+                if REQUIRE_KEY or (TUNNEL_REQUIRES_KEY and get_via_tunnel()):
+                    _reject_reason = "no_api_key_required" if REQUIRE_KEY else "no_api_key_via_tunnel"
                     try:
                         from shared_memory.audit import log_audit
-                        log_audit("auth.tunnel_keyless_rejected", claude_instance, project,
-                                  {"reason": "no_api_key_via_tunnel"})
+                        log_audit("auth.keyless_rejected", claude_instance, project,
+                                  {"reason": _reject_reason})
                     except Exception:
                         pass
                     return json.dumps({
                         "error": (
-                            "This server requires an API key for connections over the "
-                            "public endpoint. Provide an 'Authorization: Bearer <key>' "
-                            "header (or pass api_key). Contact the operator for a key."
+                            "This server requires an API key. Provide an "
+                            "'Authorization: Bearer <key>' header (or pass api_key). "
+                            "Contact the operator for a key."
                         ),
                         "auth_required": True,
                     })
