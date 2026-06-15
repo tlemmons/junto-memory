@@ -216,5 +216,19 @@ def classify_lane(category, obligation):
 MESSAGE_INFO_TTL_HOURS = 48
 MESSAGE_ACTION_TTL_DAYS = 7
 
+# ── SSE notification-stream keepalive ──
+# The long-lived server→client SSE GET stream (Streamable HTTP) carries push
+# notifications. During quiet periods it has no traffic, so an idle-connection
+# reaper on the path (NAT/conntrack, Tailscale relay, proxy) silently drops it —
+# and nothing notices (transport.onclose doesn't fire on a half-open socket, and
+# the client heartbeat rides a SEPARATE POST channel). The server then "delivers"
+# into a dead socket. A periodic keepalive notification on the stream keeps it
+# warm so the path never idle-reaps it, and eventually surfaces a truly-dead
+# socket (the write blocks → times out → the session is pruned). Interval must be
+# shorter than the shortest idle-timeout on the path. See the half-open-SSE
+# incident (2026-06-15).
+SSE_KEEPALIVE_SECONDS = int(os.getenv("JUNTO_SSE_KEEPALIVE_SECONDS", "20"))
+SSE_KEEPALIVE_SEND_TIMEOUT = float(os.getenv("JUNTO_SSE_KEEPALIVE_TIMEOUT", "5"))
+
 # Auth roles (ordered by privilege)
 AUTH_ROLES = ["readonly", "agent", "admin", "owner"]

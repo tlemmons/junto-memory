@@ -101,12 +101,26 @@ async def app_lifespan(app):
         import logging
         logging.getLogger(__name__).error("lifespan: scheduler startup failed: %s", e)
 
+    # Start the SSE notification-stream keepalive (keeps long-lived push streams
+    # warm so idle network reapers don't silently half-open them).
+    try:
+        from shared_memory.tools.messaging import start_keepalive
+        start_keepalive()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error("lifespan: sse-keepalive startup failed: %s", e)
+
     yield {}
 
     # Shutdown cleanup.
     try:
         from shared_memory.tools.scheduler import stop_scheduler
         stop_scheduler()
+    except Exception:
+        pass
+    try:
+        from shared_memory.tools.messaging import stop_keepalive
+        stop_keepalive()
     except Exception:
         pass
     _chroma_client = None

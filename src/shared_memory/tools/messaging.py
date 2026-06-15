@@ -1,5 +1,6 @@
 """Inter-agent messaging tools - send/receive messages, agent status, discovery."""
 
+import asyncio
 import json
 import logging
 import re
@@ -25,6 +26,8 @@ from shared_memory.config import (
     MESSAGE_PRIORITIES,
     MESSAGE_STATUSES,
     OBLIGATION_RESOLVE_ON_REPLY,
+    SSE_KEEPALIVE_SECONDS,
+    SSE_KEEPALIVE_SEND_TIMEOUT,
     classify_lane,
 )
 from shared_memory.helpers import normalize_project, parse_timestamp, require_session, utc_now
@@ -1910,6 +1913,87 @@ async def _content_push(session: Any, packet: Dict[str, Any]) -> None:
     """
     notif = JSONRPCNotification(jsonrpc="2.0", method=ANNOUNCE_METHOD, params=packet)
     await session.send_message(SessionMessage(message=JSONRPCMessage(notif)))
+
+
+# ── SSE notification-stream keepalive ──────────────────────────────────────
+# A periodic no-op notification down each subscribed session's long-lived SSE
+# GET stream. PRIMARY purpose: keep the stream warm so an idle-connection reaper
+# on the path never silently drops it (the half-open-stream failure where the
+# server keeps "delivering" into a dead socket while the client's separate-socket
+# heartbeat keeps the session looking alive). SECONDARY: a genuinely dead socket
+# eventually blocks the write → the per-send timeout fires → we prune the
+# session. The plugin has no handler for this method, so it's ignored client-side
+# (same "unknown method degrades to quiet" property as the announce push).
+KEEPALIVE_METHOD = "notifications/junto/keepalive"
+_keepalive_task = None
+
+
+async def _send_keepalive(session: Any) -> None:
+    """Write one keepalive notification to a session's stream. Raises on transport
+    failure (and is cancellable by the wait_for timeout) so the caller prunes."""
+    notif = JSONRPCNotification(jsonrpc="2.0", method=KEEPALIVE_METHOD, params={})
+    await session.send_message(SessionMessage(message=JSONRPCMessage(notif)))
+
+
+async def _keepalive_one(uri_str: str, session: Any) -> None:
+    """Send a keepalive to one session under a per-send timeout; prune on failure.
+
+    The timeout is load-bearing: a half-open socket's write can BLOCK (the SDK's
+    notification stream is a zero-buffer memory stream, so send() waits for the
+    SSE writer to drain). Without the timeout one stuck session would wedge the
+    whole sweep. A timeout or transport error both mean "unusable" → drop it."""
+    try:
+        await asyncio.wait_for(_send_keepalive(session), timeout=SSE_KEEPALIVE_SEND_TIMEOUT)
+    except Exception as e:
+        log.debug("sse-keepalive: prune subscriber for %s: %s", uri_str, e)
+        bucket = inbox_subscriptions.get(uri_str)
+        if bucket is not None:
+            bucket.discard(session)
+            if not bucket:
+                inbox_subscriptions.pop(uri_str, None)
+
+
+async def _keepalive_sweep() -> None:
+    """One pass: keepalive every subscribed session concurrently (snapshot first
+    so prunes don't mutate what we're iterating). Concurrency means one slow/stuck
+    session can't serialize-block the others."""
+    tasks = [
+        _keepalive_one(uri_str, session)
+        for uri_str in list(inbox_subscriptions.keys())
+        for session in list(inbox_subscriptions.get(uri_str, ()))
+    ]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _keepalive_loop() -> None:
+    log.info("sse-keepalive: started (interval=%ss, send_timeout=%ss)",
+             SSE_KEEPALIVE_SECONDS, SSE_KEEPALIVE_SEND_TIMEOUT)
+    while True:
+        try:
+            await asyncio.sleep(SSE_KEEPALIVE_SECONDS)
+            await _keepalive_sweep()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # never let the loop die
+            log.error("sse-keepalive: loop error: %s", e)
+
+
+def start_keepalive() -> None:
+    """Start the SSE keepalive background task. Idempotent if already running."""
+    global _keepalive_task
+    if _keepalive_task is not None and not _keepalive_task.done():
+        return
+    _keepalive_task = asyncio.create_task(_keepalive_loop(), name="sse_keepalive")
+    log.info("sse-keepalive: background task created")
+
+
+def stop_keepalive() -> None:
+    """Cancel the keepalive task on shutdown."""
+    global _keepalive_task
+    if _keepalive_task is not None and not _keepalive_task.done():
+        _keepalive_task.cancel()
+    _keepalive_task = None
 
 
 async def _notify_inbox_for_send(
