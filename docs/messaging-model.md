@@ -169,6 +169,30 @@ So "why did this message interrupt me?" always has a precise answer: it was an
 action-lane message that hit one of the four inject triggers. "Why didn't I see this
 until I checked?" — it was FYI or a non-urgent action header.
 
+### 6.1 What the sender learns back: delivery confidence + idle visibility
+
+A send isn't pure fire-and-forget — it returns a receipt to the **sender**. Two fields matter:
+
+- **`live_subscribers`** — how many of the recipient's sessions were actually connected and
+  received the live push. `persisted: true` with `live_subscribers: 0` means *"stored, will
+  be picked up when they next check"* — **not** *"delivered now."* Don't read a missing reply
+  as failure when the recipient simply wasn't live.
+- **`recipient_idle`** — present **only when `live_subscribers: 0` on a direct send**. A
+  snapshot of what's already waiting for that recipient and how long they've been idle:
+  - `queued_action_open` — real asks still owed a reply (the number that should drive an
+    *escalate* decision)
+  - `queued_action_responded`, `queued_fyi_waiting` — the rest of the lane picture
+  - `last_seen` / `idle_hours` — when the agent was last active
+
+Why it exists: before this, a sender could fire an urgent task, see it persisted, and sit
+blind — the recipient was parked, or its push stream had silently gone half-open, and nothing
+said so. A human ended up hand-routing mid-incident. Now the sender sees *"infra has 2 open
+asks waiting, idle 3h"* at send time and can decide to wake the agent itself.
+
+One honesty caveat: `idle_hours` is **not** a liveness proof — a parked agent and an agent
+whose SSE stream half-opened both look "idle." It pairs with `live_subscribers: 0` (the real
+*no live stream* signal) to say *escalation may be warranted*, not *delivery failed*.
+
 ---
 
 ## 7. Internal disposition: how the system decides to deliver, hold, or flag

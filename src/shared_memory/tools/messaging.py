@@ -84,6 +84,74 @@ def _live_subscribers_count(to_project: str, to_instance: str) -> int:
     return len(inbox_subscriptions.get(uri_str, set()))
 
 
+def _recipient_idle_snapshot(db, to_project: str, to_instance: str):
+    """What's waiting for a recipient who has NO live subscriber, + how long
+    they've been idle — so the SENDER can decide to escalate (manually wake the
+    agent) instead of leaving a real ask blind. Read-side idle-queue visibility:
+    backlog_da56a6e0c46b, coordinator ask msg_5982f608ec7b.
+
+    Returns None (caller omits the field) for broadcasts, missing db, or missing
+    project — there's no single recipient to summarize. The counts MIRROR what the
+    recipient's own next get_messages would surface: same instance/project match,
+    same per-message-read + watermark-floor unread semantics (via
+    _compute_lane_counts), so the number the sender sees == the number the
+    recipient will actually find waiting.
+
+    `idle_hours` is derived from agent_directory.last_seen (bumped on start_session,
+    heartbeat, and human interaction). It is NOT a liveness proof — a parked agent
+    and a half-open-SSE agent can both look "idle"; pair it with live_subscribers=0,
+    which is the actual no-live-stream signal that triggers this snapshot.
+    """
+    if db is None or not to_project or not to_instance or to_instance == "*":
+        return None
+    proj = normalize_project(to_project)
+    # Mirror the recipient-side inbox match (see memory_get_messages): workers get
+    # direct-only; everyone else also matches broadcast (*). Project clause accepts
+    # the recipient's project plus legacy/empty-project broadcasts.
+    if to_instance.startswith("worker_"):
+        instance_match = {"to_instance": to_instance}
+    else:
+        instance_match = {"$or": [{"to_instance": to_instance}, {"to_instance": "*"}]}
+    project_match = {
+        "$or": [
+            {"to_project": proj},
+            {"to_project": {"$exists": False}},
+            {"to_project": ""},
+        ]
+    }
+    watermark = _get_messages_seen_through(db, proj, to_instance)
+    lane = _compute_lane_counts(
+        db, [instance_match, project_match], watermark=watermark, reader=to_instance
+    )
+
+    last_seen = None
+    try:
+        doc = db.agent_directory.find_one(
+            {"project": proj, "instance": to_instance}, {"last_seen": 1}
+        )
+        if doc:
+            last_seen = parse_timestamp(doc.get("last_seen"))
+    except Exception:
+        last_seen = None
+    idle_hours = None
+    if last_seen is not None:
+        try:
+            idle_hours = round((utc_now() - last_seen).total_seconds() / 3600.0, 1)
+        except TypeError:
+            idle_hours = None
+
+    return {
+        # Real asks waiting on this recipient — the number that drives an escalate
+        # decision. Open obligations ignore read state (a seen-but-unanswered ask
+        # still owes a reply); responded are tracked-but-discharged.
+        "queued_action_open": lane["pending_action_open"],
+        "queued_action_responded": lane["pending_action_responded"],
+        "queued_fyi_waiting": lane["pending_fyi_waiting"],
+        "last_seen": last_seen.isoformat() if last_seen else None,
+        "idle_hours": idle_hours,
+    }
+
+
 def _resolve_caller_identity():
     """Look up the calling agent's app session by joining the current MCP
     transport session (from request_context) with the mcp_session_to_app map.
@@ -912,7 +980,7 @@ async def memory_send_message(
     # final_depth. Kept in the response shape for backward compat.
     effective_chain_depth = final_depth
 
-    return json.dumps({
+    response = {
         "status": "queued",
         "message_id": message_id,
         "to": to_instance,
@@ -936,7 +1004,20 @@ async def memory_send_message(
         "emission_count": emission_count,
         "recency_bypass": recency_bypass,
         "live_subscribers": 0 if suppress_push else live_subscribers,
-    })
+    }
+
+    # Read-side idle-queue visibility (backlog_da56a6e0c46b). When the recipient
+    # has NO live stream to receive this push, tell the sender what's already
+    # waiting + how long they've been idle, so the sender can decide to escalate
+    # (manually wake the agent) rather than sit blind on an unanswered ask. Only
+    # on direct sends with a genuinely absent subscriber — a live recipient is
+    # getting the push, no escalation question to answer.
+    if live_subscribers == 0 and to_instance != "*":
+        idle = _recipient_idle_snapshot(db, msg_doc["to_project"], to_instance)
+        if idle is not None:
+            response["recipient_idle"] = idle
+
+    return json.dumps(response)
 
 
 @mcp.tool()
