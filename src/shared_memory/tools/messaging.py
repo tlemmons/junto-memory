@@ -448,7 +448,7 @@ def _mark_messages_read(db, message_ids, instance: str) -> None:
         log.debug("read-state: mark-read failed for %s: %s", instance, e)
 
 
-def _advance_parent_obligation_on_reply(db, parent_id: str, replier: str, now) -> None:
+def _advance_parent_obligation_on_reply(db, parent_id: str, replier: str, now) -> "str | None":
     """Auto-ack: when a reply's sender is the parent's OWNER, advance the parent's
     obligation (design:unified-messaging-v0 Stage 3 / lanes-B).
 
@@ -464,23 +464,29 @@ def _advance_parent_obligation_on_reply(db, parent_id: str, replier: str, now) -
     Never downgrades an already-resolved parent (idempotent re-reply). Broadcast
     parents (to_instance="*") never match a concrete replier -> never auto-ack.
     Best-effort: a failure here must never break the underlying send.
+
+    RETURNS the new obligation state ("responded"|"resolved") iff it advanced an
+    open/responded ACTION parent, else None. The caller uses a non-None return to
+    PROMOTE this reply to push even if the reply's own category is badge-only
+    (contract:reply-promotion-v0) — the advance conditions ARE the promotion
+    conditions (action-lane parent + owner-guard + not-already-resolved).
     """
     if db is None or not parent_id or not replier:
-        return
+        return None
     try:
         parent = db.messages.find_one(
             {"_id": parent_id},
             {"category": 1, "to_instance": 1, "owner": 1, "obligation": 1},
         )
         if not parent:
-            return
+            return None
         if parent.get("category") not in ACTION_CATEGORIES:
-            return  # info / non-action messages carry no obligation
+            return None  # info / non-action messages carry no obligation
         owner = parent.get("owner") or parent.get("to_instance")
         if not owner or replier != owner:
-            return  # scope guard: only the addressed owner's own reply clears it
+            return None  # scope guard: only the addressed owner's own reply clears it
         if parent.get("obligation") == "resolved":
-            return  # terminal — never downgrade
+            return None  # terminal — never downgrade (follow-up chatter, not promoted)
         if parent["category"] in OBLIGATION_RESOLVE_ON_REPLY:
             update = {"obligation": "resolved", "responded_at": now, "resolved_at": now}
         else:  # task, blocker — engaged but not done
@@ -491,8 +497,9 @@ def _advance_parent_obligation_on_reply(db, parent_id: str, replier: str, now) -
         # resolve branch ages the message out.
         if update.get("obligation") == "resolved":
             _set_action_message_expiry(db, parent_id)
+        return update["obligation"]
     except Exception:
-        pass
+        return None
 
 
 def _set_action_message_expiry(db, message_id):
@@ -865,9 +872,12 @@ async def memory_send_message(
     # A reply (in_response_to set) from the parent's owner advances the parent
     # off the action lane (resolved) or marks it engaged (responded). Owner
     # defaults to the named recipient (forward-compatible with Stage-2 claiming).
-    # Best-effort — never blocks the send.
+    # Best-effort — never blocks the send. A non-None return means this reply
+    # advanced an open/responded action obligation → PROMOTE it to push even if
+    # its own category is badge-only (contract:reply-promotion-v0).
+    advanced_obligation = None
     if in_response_to:
-        _advance_parent_obligation_on_reply(
+        advanced_obligation = _advance_parent_obligation_on_reply(
             db, in_response_to, session_info["claude_instance"], now
         )
 
@@ -887,7 +897,9 @@ async def memory_send_message(
     if not suppress_push:
         # Server-authoritative delivery §E: build the announce packet (None for
         # badge-only/info) and content-push it alongside the resource-updated.
-        announce_packet = _build_announce_packet(msg_doc)
+        # contract:reply-promotion-v0: an obligation-closing reply is promoted to
+        # push even if its own category is badge-only, so the requester isn't blind.
+        announce_packet = _build_announce_packet(msg_doc, promoted=bool(advanced_obligation))
         await _notify_inbox_for_send(msg_doc["to_project"], to_instance, announce_packet)
 
     # Subscriber count is read from the in-process subscription map, which
@@ -1858,7 +1870,7 @@ def _announce_mode(category, priority, require_human, is_system_notice, obligati
     return "header"
 
 
-def _build_announce_packet(msg_doc):
+def _build_announce_packet(msg_doc, promoted: bool = False):
     """Build notifications/junto/announce params from a stored message doc, or
     None when the message is badge-only (must not be pushed).
 
@@ -1866,17 +1878,26 @@ def _build_announce_packet(msg_doc):
     mode=="inject"; header mode is metadata-only (body-on-pull). All values are
     JSON primitives (created_at → ISO string) so the dict survives raw JSON-RPC
     serialization on the write stream.
+
+    `promoted` (contract:reply-promotion-v0): when this reply advanced an open
+    action obligation but its OWN category is badge-only (e.g. an `info`-tagged
+    answer to a question), promote it to push so the requester isn't left blind.
+    INJECT if the reply is itself urgent/blocker/require_human/system_notice, else
+    HEADER. The reply still carries no NEW obligation — this only changes whether
+    it pushes, not its lane membership (push ≠ new obligation).
     """
     is_system_notice = bool(msg_doc.get("is_system_notice", False))
-    mode = _announce_mode(
-        msg_doc.get("category", "info"),
-        msg_doc.get("priority", "normal"),
-        bool(msg_doc.get("require_human", False)),
-        is_system_notice,
-        msg_doc.get("obligation"),
-    )
+    category = msg_doc.get("category", "info")
+    priority = msg_doc.get("priority", "normal")
+    require_human = bool(msg_doc.get("require_human", False))
+    mode = _announce_mode(category, priority, require_human, is_system_notice, msg_doc.get("obligation"))
     if mode is None:
-        return None
+        if not promoted:
+            return None
+        # Obligation-closing reply whose own category doesn't push → promote it.
+        mode = "inject" if (
+            category == "blocker" or priority == "urgent" or require_human or is_system_notice
+        ) else "header"
     created_at = msg_doc.get("created_at")
     packet = {
         "mode": mode,
