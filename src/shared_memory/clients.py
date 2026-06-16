@@ -281,6 +281,21 @@ def get_mongo():
         guidelines_col.create_index("scope")
         guidelines_col.create_index("name", unique=True)
 
+        # Seed code-defined GLOBAL guidelines (scope="global") into the DB so a
+        # guidance change travels with the deploy to every server — incl. the
+        # isolated work box — without federating data. Idempotent: writes only
+        # rows whose content differs (a no-change boot does zero writes), and
+        # NEVER touches project-scoped rows. Best-effort: a seed failure must not
+        # block mongo init (agents would just keep the prior DB guidance).
+        try:
+            from shared_memory.global_guidelines import seed_global_guidelines
+            seed_global_guidelines(_mongo_db)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(
+                "guidelines: global-guidance code-seed failed: %s", e
+            )
+
         # Ensure indexes for audit_log collection
         audit_col = _mongo_db.audit_log
         audit_col.create_index("event_type")
