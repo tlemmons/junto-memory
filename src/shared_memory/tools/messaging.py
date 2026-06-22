@@ -34,7 +34,7 @@ from shared_memory.helpers import normalize_project, parse_timestamp, require_se
 from shared_memory.intent import get_current_intent_id
 from shared_memory.op_log import with_op_log
 from shared_memory.state import active_sessions, mcp_session_to_app
-from shared_memory.tools.projects import _fuzzy_match_agent, _is_project_admin
+from shared_memory.tools.projects import _fuzzy_match_agent, _is_project_admin, resolve_agent_name
 
 log = logging.getLogger(__name__)
 
@@ -697,14 +697,25 @@ async def memory_send_message(
     normalized_project = normalize_project(target_project)
     registered_project = db.projects.find_one({"name": normalized_project})
 
-    if registered_project:
-        # Project is registered - validate the target agent
-        if to_instance != "*":
-            registered_agent = db.registered_agents.find_one({
-                "project": normalized_project,
-                "name": to_instance
-            })
-            if not registered_agent:
+    if to_instance != "*":
+        # Resolve the recipient: a live agent name passes through; a
+        # nickname/alias (e.g. "coordinator" -> "emailTriage") is redirected
+        # to the canonical live agent; an unknown name returns None.
+        resolved = resolve_agent_name(db, normalized_project, to_instance)
+        if resolved:
+            to_instance = resolved
+        else:
+            # Unknown recipient. Fail loud whenever we have a roster to
+            # validate against — a REGISTERED project, OR an unregistered
+            # project that nonetheless has registered agents (e.g.
+            # emailtriage, which was silently voiding misrouted sends before
+            # the registered_project gate was relaxed). Only a project with
+            # no roster at all falls through (back-compat: a project being
+            # set up before any agent has registered).
+            has_roster = bool(registered_project) or db.registered_agents.find_one(
+                {"project": normalized_project}, {"_id": 1}
+            )
+            if has_roster:
                 # Agent not registered - hard reject with suggestions
                 suggestions = _fuzzy_match_agent(db, normalized_project, to_instance)
                 error_msg = f"Agent '{to_instance}' is not registered in project '{normalized_project}'."
@@ -718,8 +729,8 @@ async def memory_send_message(
                     if all_agents:
                         error_msg += f" Valid agents: {', '.join(all_agents)}"
                 return json.dumps({"error": error_msg})
-    # If project not registered, allow message through (backward compatibility)
-    # This lets messaging work before projects are fully set up
+            # No roster yet — allow message through (backward compatibility).
+            # This lets messaging work before projects are fully set up.
 
     # ── Dedup check ──
     # Reject identical messages to same target within 5 minutes

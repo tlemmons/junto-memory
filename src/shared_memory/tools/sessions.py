@@ -114,6 +114,7 @@ async def memory_start_session(
     spawned_by: str = None,
     api_key: str = None,
     subscribed_components: List[str] = None,
+    aliases: List[str] = None,
     ctx: Context = None
 ) -> str:
     """
@@ -150,6 +151,12 @@ async def memory_start_session(
             recently active in any of these components. Stage 1 is discovery
             only — component-addressed pub/sub delivery + claiming arrive in
             Stages 2-3. Omit (default) for nimbus's direct-send world.
+        aliases: Optional alternate names this agent should also receive
+            messages under (e.g. a lead agent claiming "coordinator"). Senders
+            addressing any alias are redirected to this agent. Enforced unique
+            per project — an alias that collides with a live agent name or
+            another agent's alias is rejected (surfaced in `registry_warning`).
+            None = leave existing aliases untouched; [] = clear them.
     """
     # Cleanup stale sessions on each new session start
     cleanup_stale_sessions()
@@ -410,6 +417,24 @@ async def memory_start_session(
                 },
                 upsert=True
             )
+
+            # Self-declared recipient aliases (e.g. a lead claiming
+            # "coordinator"). Persisted on registered_agents — the collection
+            # send-validation resolves against. Uniqueness-checked per project.
+            if aliases is not None and not _is_worker:
+                from shared_memory.tools.projects import persist_agent_aliases
+                _alias_result = persist_agent_aliases(
+                    db, normalized_project, claude_instance, aliases
+                )
+                if _alias_result["rejected"]:
+                    _rej = "; ".join(
+                        f"'{k}' ({v})" for k, v in _alias_result["rejected"].items()
+                    )
+                    _alias_msg = f"Alias(es) rejected (must be unique per project): {_rej}."
+                    _registry_warning = (
+                        f"{_registry_warning} {_alias_msg}" if _registry_warning
+                        else _alias_msg
+                    )
 
             # Check if agent still needs a role_description
             if not role_description and not _is_worker:
