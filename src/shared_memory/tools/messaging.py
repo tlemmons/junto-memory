@@ -342,6 +342,17 @@ def _compute_lane_counts(db, base_and: List[Dict[str, Any]], watermark=None,
         "category": {"$in": ACTION_CATEGORIES}, "status": "pending",
         "obligation": "responded",
     })
+    # High-signal subset for the statusline (Tom UX, 2026-06-22 via coordinator):
+    # UNRESOLVED blockers addressed to the agent — category=blocker that has NOT
+    # cleared. open|responded|None all count (a blocker stays blocking until
+    # EXPLICITLY resolved; a reply leaves it "responded", still unresolved). This
+    # is a subset of the action counts above, surfaced separately because blocker
+    # is rare + high-signal (usually 0, spikes meaningfully) whereas action_open
+    # is inflated by responded-but-unclosed obligations.
+    blocker_open = _count({
+        "category": "blocker", "status": "pending",
+        "obligation": {"$in": ["open", "responded", None]},
+    })
     fyi_clause: Dict[str, Any] = {"category": "info", "status": "pending"}
     if reader is not None:
         fyi_clause["read_by"] = {"$ne": reader}
@@ -371,6 +382,7 @@ def _compute_lane_counts(db, base_and: List[Dict[str, Any]], watermark=None,
     return {
         "pending_action_open": action_open,
         "pending_action_responded": action_responded,
+        "pending_blocker_open": blocker_open,
         "pending_fyi_waiting": fyi_waiting,
         "pending_fyi_oldest_age_hours": fyi_oldest_age_hours,
         "fyi_ttl_hours": MESSAGE_INFO_TTL_HOURS,

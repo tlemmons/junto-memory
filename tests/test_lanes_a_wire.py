@@ -266,6 +266,29 @@ async def test_lane_counts_mixed_inbox(monkeypatch):
         sessions.pop(sid, None)
 
 
+async def test_lane_counts_blocker_open(monkeypatch):
+    """pending_blocker_open = UNRESOLVED blockers only (Tom statusline UX 2026-06-22).
+    open + responded blockers count (still blocking); resolved excluded; non-blocker
+    action categories never count toward it."""
+    now = utc_now()
+    docs = [
+        _msg("b_open", now, category="blocker", obligation="open"),
+        _msg("b_resp", now, category="blocker", obligation="responded"),  # still unresolved
+        _msg("b_done", now, category="blocker", obligation="resolved"),   # excluded
+        _msg("t_open", now, category="task", obligation="open"),          # not a blocker
+        _msg("q_open", now, category="question", obligation="open"),      # not a blocker
+    ]
+    sid, m, sessions = _setup(monkeypatch, _FakeDB(docs))
+    try:
+        res = json.loads(await m.memory_get_messages(session_id=sid, include_seen=True))
+        lc = res["lane_counts"]
+        assert lc["pending_blocker_open"] == 2, lc          # b_open + b_resp
+        assert lc["pending_action_open"] == 3, lc           # b_open + t_open + q_open
+        assert lc["pending_action_responded"] == 1, lc      # b_resp
+    finally:
+        sessions.pop(sid, None)
+
+
 async def test_lane_counts_watermark_asymmetry(monkeypatch):
     """A SEEN-but-open action still counts (obligations are read-independent);
     a SEEN fyi does NOT (FYIs are noise once seen); an UNSEEN fyi does.
