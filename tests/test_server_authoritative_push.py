@@ -4,7 +4,8 @@ design:server-authoritative-delivery-v0 v0.5.1, ratified into
 contract:message-lanes-v0 §E. Pins the SERVER half of the delivery flip:
 
   - _announce_mode: the inject/header/badge-only classification on top of
-    classify_lane (action lane only; info/cleared never push).
+    classify_lane. Since push-all-info-v0 (2026-06-24) info/fyi pushes as a HEADER
+    too; ONLY a resolved/cleared action stays badge-only (None).
   - _build_announce_packet: the FROZEN wire packet (§E3) — field set, inline body
     iff inject, created_at as an ISO string, and JSON-serializability (the dict
     rides a raw JSON-RPC notification on the write stream).
@@ -13,7 +14,7 @@ contract:message-lanes-v0 §E. Pins the SERVER half of the delivery flip:
     method) — learning_5dcf4824df37700f.
   - _notify_inbox: content-push is ADDITIVE — resource-updated still fires (pre-
     cutover plugin), the announce push rides alongside (post-cutover plugin), and
-    packet=None (wake-all / badge-only) keeps today's resource-updated-only path.
+    packet=None (wake-all / cleared-action) keeps the resource-updated-only path.
 """
 
 import json
@@ -65,12 +66,23 @@ def test_mode_header_for_plain_action():
         assert m._announce_mode(cat, "low", False, False, "open") == "header"
 
 
-def test_mode_none_for_fyi_and_cleared():
-    # info → badge-only
-    assert m._announce_mode("info", "normal", False, False, None) is None
-    assert m._announce_mode("info", "urgent", False, False, None) is None  # info never injects
-    # a RESOLVED action is "cleared" lane → no push
+def test_mode_header_for_info():
+    # push-all-info-v0: a plain info now pushes as a metadata-only header
+    assert m._announce_mode("info", "normal", False, False, None) == "header"
+    assert m._announce_mode("info", "low", False, False, None) == "header"
+
+
+def test_mode_info_escalates_to_inject_when_must_read_now():
+    # urgent / require_human / system_notice info escalates to a full-body inject
+    assert m._announce_mode("info", "urgent", False, False, None) == "inject"
+    assert m._announce_mode("info", "normal", True, False, None) == "inject"   # require_human
+    assert m._announce_mode("info", "normal", False, True, None) == "inject"   # system_notice
+
+
+def test_mode_none_only_for_cleared():
+    # the ONLY badge-only case left: a RESOLVED action (lane "cleared")
     assert m._announce_mode("task", "normal", False, False, "resolved") is None
+    assert m._announce_mode("question", "normal", False, False, "resolved") is None
 
 
 # ── _build_announce_packet ──────────────────────────────────────────────────
@@ -82,8 +94,18 @@ FROZEN_FIELDS = {
 }
 
 
-def test_packet_none_for_info():
-    assert m._build_announce_packet(_doc(category="info")) is None
+def test_packet_header_for_info():
+    # push-all-info-v0: info builds a header packet (subject+from, NO body)
+    pkt = m._build_announce_packet(_doc(category="info"))
+    assert pkt is not None
+    assert pkt["mode"] == "header"
+    assert "body" not in pkt
+    assert set(pkt.keys()) == FROZEN_FIELDS
+
+
+def test_packet_none_for_cleared_action():
+    # a resolved action is the only badge-only (None) case now
+    assert m._build_announce_packet(_doc(category="task", obligation="resolved")) is None
 
 
 def test_packet_header_has_frozen_fields_no_body():
@@ -94,7 +116,7 @@ def test_packet_header_has_frozen_fields_no_body():
     assert pkt["msg_id"] == "m1"
     assert pkt["from_agent"] == "peer"
     assert pkt["obligation_state"] == "open"
-    assert pkt["subject"] is None  # task-1 field not yet present
+    assert pkt["subject"] is None  # subject field present, None when sender omits it
 
 
 def test_packet_inject_inlines_body():

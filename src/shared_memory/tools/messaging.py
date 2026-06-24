@@ -1960,15 +1960,23 @@ def _announce_mode(category, priority, require_human, is_system_notice, obligati
     """Render mode for the announce push, or None when the message must NOT push.
 
     INJECT (full body inline):  blocker | urgent | require_human | system_notice
-    HEADER (one line, body-on-pull):  any other ACTION-lane message
-    None  (badge-only, no push):  info / fyi / a resolved (cleared) action
+    HEADER (one line, body-on-pull):  any other ACTION-lane OR fyi-lane (info) message
+    None  (badge-only, no push):  ONLY a resolved (cleared) action
 
-    classify_lane is the single source of truth for action-vs-fyi (§E1); mode only
-    adds the inject/header split on top of an action-lane message.
+    info/fyi now pushes as a metadata-only HEADER (subject+from, body-on-pull) rather
+    than badge-only — directed AND broadcast (push-all-info-v0, Tom 2026-06-24: "info
+    has bitten us too often, push it like action; limit data to subject+from"). The
+    fyi lane keeps its no-obligation, ~48h-TTL semantics — only the PUSH changes, not
+    the lane (push ≠ obligation). A resolved action (lane "cleared") is the one case
+    that must NOT re-push. classify_lane is the single source of truth for the lane
+    (§E1); mode only adds the inject/header split on top.
     """
     lane, _tier = classify_lane(category, obligation)
-    if lane != "action":
-        return None  # fyi or cleared → badge-only, never pushed
+    if lane == "cleared":
+        return None  # a resolved action must not re-push
+    # action OR fyi → push. Escalate to a full-body inject only for must-read-now
+    # signals; everything else (incl. normal info) is a metadata-only header so the
+    # context cost is one line (subject + from), body pulled on demand.
     if category == "blocker" or priority == "urgent" or require_human or is_system_notice:
         return "inject"
     return "header"
@@ -1984,11 +1992,13 @@ def _build_announce_packet(msg_doc, promoted: bool = False):
     serialization on the write stream.
 
     `promoted` (contract:reply-promotion-v0): when this reply advanced an open
-    action obligation but its OWN category is badge-only (e.g. an `info`-tagged
-    answer to a question), promote it to push so the requester isn't left blind.
-    INJECT if the reply is itself urgent/blocker/require_human/system_notice, else
-    HEADER. The reply still carries no NEW obligation — this only changes whether
-    it pushes, not its lane membership (push ≠ new obligation).
+    action obligation but its OWN mode would be None, promote it to push so the
+    requester isn't left blind. Since push-all-info-v0 (2026-06-24) info pushes as
+    a header natively, so the only mode==None case left is a CLEARED action reply —
+    promotion now triggers rarely, but the safety net is kept. INJECT if the reply
+    is itself urgent/blocker/require_human/system_notice, else HEADER. The reply
+    still carries no NEW obligation — this only changes whether it pushes, not its
+    lane membership (push ≠ new obligation).
     """
     is_system_notice = bool(msg_doc.get("is_system_notice", False))
     category = msg_doc.get("category", "info")
@@ -2013,8 +2023,8 @@ def _build_announce_packet(msg_doc, promoted: bool = False):
         "chain_depth": msg_doc.get("chain_depth"),
         "in_response_to": msg_doc.get("in_response_to"),
         "obligation_state": msg_doc.get("obligation"),
-        # SUBJECT (build-plan task 1) is not yet a field; carry None until it
-        # lands so the packet shape is already frozen at the wire contract.
+        # SUBJECT is the primary triage line for a header push (info now pushes as
+        # header → subject+from is all the recipient sees until they pull the body).
         "subject": msg_doc.get("subject"),
         "require_human": bool(msg_doc.get("require_human", False)),
         "is_system_notice": is_system_notice,
@@ -2132,10 +2142,12 @@ async def _notify_inbox_for_send(
     own get_messages/inbox view.
 
     `packet` (server-authoritative delivery §E): when provided AND the message is
-    push-eligible (action lane), each session gets a content-push in ADDITION to
-    the resource-updated. None (wake-all / sync / scheduler / badge-only paths) =
-    resource-updated only, i.e. today's behavior. Broadcasts are info-lane only
-    by convention (§B), so their packet is None anyway.
+    push-eligible, each session gets a content-push in ADDITION to the
+    resource-updated. None (wake-all / sync / scheduler / cleared-action paths) =
+    resource-updated only. Since push-all-info-v0 (2026-06-24) info pushes as a
+    header, so broadcasts (info-lane by convention, §B) now DO carry a packet and
+    content-push to every subscriber in the target project — project-scoped, never
+    cross-project (the prefix below pins it to to_project).
     """
     if not to_project:
         return

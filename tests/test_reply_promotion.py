@@ -75,9 +75,14 @@ def _info_reply_doc():
     }
 
 
-def test_info_reply_not_promoted_is_badge_only():
-    # Unchanged baseline: an info reply without promotion does NOT push.
-    assert m._build_announce_packet(_info_reply_doc(), promoted=False) is None
+def test_info_reply_pushes_natively_since_push_all_info():
+    # push-all-info-v0 (2026-06-24) subsumes promotion for info: an info reply now
+    # pushes as a header whether or not it closes an obligation. Promotion remains
+    # only for the residual mode==None case (a cleared-action reply).
+    pkt = m._build_announce_packet(_info_reply_doc(), promoted=False)
+    assert pkt is not None
+    assert pkt["mode"] == "header"
+    assert "body" not in pkt
 
 
 def test_info_reply_promoted_pushes_as_header():
