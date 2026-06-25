@@ -563,6 +563,24 @@ def get_scope_matched_skills(
     Ranking: pinned first, then most-recently-updated. Headers only — the agent
     pulls the full body with memory_get_skill when it actually needs it.
     """
+    docs = _active_scope_matched_docs(
+        project, claude_instance, role_description, working_directory, limit
+    )
+    return [{"id": d["_id"], "name": d.get("name"), "trigger": d.get("trigger")}
+            for d in docs]
+
+
+def _active_scope_matched_docs(
+    project: str,
+    claude_instance: str = None,
+    role_description: str = None,
+    working_directory: str = None,
+    limit: int = 8,
+):
+    """Shared scope-matcher: ACTIVE skills in `project` matching this agent's
+    role/directory, pinned-first then updated-desc, capped at `limit`. Returns
+    full Mongo docs. Best-effort: [] on any failure. Used by both the Phase-1
+    header surfacer and the Phase-2 SKILL.md exporter so they never diverge."""
     try:
         db = get_mongo()
         if db is None or not project:
@@ -590,7 +608,104 @@ def get_scope_matched_skills(
         docs = [d for d in docs if matches(d)]
         docs.sort(key=lambda d: d.get("updated", ""), reverse=True)
         docs.sort(key=lambda d: 0 if d.get("pin") else 1)
-        return [{"id": d["_id"], "name": d.get("name"), "trigger": d.get("trigger")}
-                for d in docs[:max(1, limit)]]
+        return docs[:max(1, limit)]
     except Exception:
         return []
+
+
+# ── Phase-2 surfacing: SKILL.md materialization payload ─────────────────────
+# The server canNOT write .claude/skills/ on each agent's box (it's a container
+# on sage; those dirs live on the inbox/nimbus/… hosts). So Phase 2 is a TWO-
+# sided contract: the server EXPOSES ready-to-write SKILL.md docs here, and the
+# per-box LAUNCHER (junto-launch.sh / junto-workspace.ps1, tlemmons/junto) writes
+# them under .claude/skills/<name>/SKILL.md BEFORE Claude Code boots (CC discovers
+# skills at startup; a mid-session write is too late). Contract: spec
+# interface:skill-materialization-v0.
+def _skillmd_frontmatter_value(s: str) -> str:
+    """YAML-safe single-line value for the SKILL.md frontmatter. CC reads
+    `name`/`description` from here; keep them flat (quote, strip newlines)."""
+    flat = " ".join((s or "").split())
+    return '"' + flat.replace('"', "'") + '"'
+
+
+def render_skill_md(doc: dict) -> str:
+    """Render a skill doc to Claude-Code SKILL.md text: YAML frontmatter
+    (name + description=trigger, the fields CC's matcher reads) followed by a
+    markdown body (when-to-use / preconditions / steps / gotchas)."""
+    name = doc.get("name", "unnamed")
+    trigger = doc.get("trigger", "")
+    fm = [
+        "---",
+        f"name: {_skillmd_frontmatter_value(name)}",
+        f"description: {_skillmd_frontmatter_value(trigger)}",
+        "---",
+        "",
+        f"# {name}",
+        "",
+        f"**When to use:** {trigger}",
+    ]
+    if doc.get("preconditions"):
+        fm += ["", "## Preconditions", "", doc["preconditions"]]
+    fm += ["", "## Steps", "", doc.get("steps", "")]
+    if doc.get("gotchas"):
+        fm += ["", "## Gotchas", "", doc["gotchas"]]
+    deps = doc.get("depends_on") or []
+    if deps:
+        fm += ["", "## Depends on", "", ", ".join(deps)]
+    fm += [
+        "",
+        "---",
+        f"<!-- junto skill {doc.get('_id')} v{doc.get('version')} "
+        f"status={doc.get('status')} — materialized from junto-memory; "
+        f"edit the source via memory_register_skill, not this file. -->",
+        "",
+    ]
+    return "\n".join(fm)
+
+
+@mcp.tool()
+async def memory_export_skills(
+    session_id: str,
+    project: str = None,
+    role: str = None,
+    directory: str = None,
+    working_directory: str = None,
+    limit: int = 25,
+    ctx: Context = None,
+) -> str:
+    """Phase-2 producer: export ACTIVE scope-matched skills as ready-to-write
+    SKILL.md materialization payloads. The per-box LAUNCHER consumes this and
+    writes each `relpath` under .claude/skills/ before Claude Code starts, so
+    CC's native matcher fires the skill MID-TURN. See interface:skill-
+    materialization-v0. The server cannot write these files itself.
+
+    Args:
+        session_id: Your session ID.
+        project: Project to export (defaults to your session's).
+        role: Role to scope to (defaults to your session's agent name). Role-
+            agnostic skills are always included.
+        directory / working_directory: Directory scope to match (working_directory
+            is the agent's cwd; directory-agnostic skills always included).
+        limit: Max skills to export (default 25).
+
+    Returns: {project, count, skills: [{id, name, relpath, content}]} where
+    relpath is "<name>/SKILL.md" and content is the full SKILL.md text.
+    """
+    error = require_session(session_id)
+    if error:
+        return error
+
+    session_info = active_sessions[session_id]
+    proj = normalize_project(project) if project else session_info.get("project")
+    role = role if role is not None else session_info.get("claude_instance")
+
+    docs = _active_scope_matched_docs(
+        proj, role, session_info.get("role_description"), working_directory, limit
+    )
+    skills = [{
+        "id": d["_id"],
+        "name": d.get("name"),
+        "relpath": f"{d.get('name')}/SKILL.md",
+        "content": render_skill_md(d),
+    } for d in docs]
+    return json.dumps({"project": proj, "count": len(skills), "skills": skills}, indent=2)

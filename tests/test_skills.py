@@ -278,3 +278,36 @@ def test_surfacing_pin_ranks_first(db):
     _run(sk.memory_pin_skill(session_id="s_owner", name_or_id="pinned", project="junto"))
     out = sk.get_scope_matched_skills("junto")
     assert out[0]["name"] == "pinned"
+
+
+# --- Phase-2 SKILL.md export -------------------------------------------------
+def test_render_skill_md_shape(db):
+    r = _reg(name="run-eval-gate", preconditions="Mongo up; gold CSVs present",
+             gotchas="run_eval.py hard-exits on a missing gold CSV")
+    doc = db.skills.find_one({"_id": r["id"]})
+    md = sk.render_skill_md(doc)
+    # YAML frontmatter with name + description (CC matcher reads these)
+    assert md.startswith("---\n")
+    assert "name: " in md and "description: " in md
+    assert md.count("---") >= 2  # frontmatter delimiters
+    # body sections present
+    assert "## Preconditions" in md
+    assert "## Steps" in md
+    assert "## Gotchas" in md
+    # description is single-line (trigger flattened) — no newline inside the value
+    desc_line = [l for l in md.splitlines() if l.startswith("description: ")][0]
+    assert "\\n" not in desc_line
+
+
+def test_export_only_active_and_payload_shape(db):
+    import json
+    _reg(name="ready")
+    _activate("ready")
+    _reg(name="draft-skill")  # not confirmed → must not export
+    out = json.loads(_run(sk.memory_export_skills(session_id="s_owner", project="junto")))
+    assert out["count"] == 1
+    item = out["skills"][0]
+    assert item["name"] == "ready"
+    assert item["relpath"] == "ready/SKILL.md"
+    assert item["content"].startswith("---\n")
+    assert "junto skill" in item["content"]  # provenance footer
