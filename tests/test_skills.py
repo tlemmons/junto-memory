@@ -133,6 +133,7 @@ def test_content_edit_reverts_active_to_draft(db):
     r2 = _reg(steps="1. activate venv\n2. python run_eval.py --strict")
     assert r2["status"] == "updated"
     assert r2["skill_status"] == "draft"
+    assert r2["version"] == "1.0.1"  # response reports the BUMPED version
     doc = db.skills.find_one({"_id": r["id"]})
     assert doc["status"] == "draft"
     assert doc["confirmed_by"] is None
@@ -145,6 +146,7 @@ def test_metadata_edit_preserves_active(db):
     _run(sk.memory_confirm_skill(session_id="s_owner", name_or_id=r["id"]))
     r2 = _reg(tags=["eval", "qa"])  # body identical → content_hash unchanged
     assert r2["skill_status"] == "active"
+    assert r2["version"] == "1.0.0"  # response reports unchanged version
     doc = db.skills.find_one({"_id": r["id"]})
     assert doc["status"] == "active"
     assert doc["version"] == "1.0.0"  # no bump

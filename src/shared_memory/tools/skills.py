@@ -246,6 +246,7 @@ async def memory_register_skill(
         skills_col.update_one({"_id": skill_id}, {"$set": update})
         action = "updated"
         result_status = new_status
+        result_version = new_version
     else:
         doc = {
             "_id": skill_id,
@@ -274,6 +275,7 @@ async def memory_register_skill(
         skills_col.insert_one(doc)
         action = "registered"
         result_status = "draft"
+        result_version = doc["version"]
         status_note = None
 
     try:
@@ -288,7 +290,7 @@ async def memory_register_skill(
         "id": skill_id,
         "name": name,
         "skill_status": result_status,
-        "version": (version or (existing.get("version") if existing else "1.0.0")),
+        "version": result_version,
         "note": "Draft only — promote with memory_confirm_skill before it is trusted/surfaced.",
     }
     if status_note:
