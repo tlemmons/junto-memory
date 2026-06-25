@@ -43,7 +43,12 @@ from mcp.server.fastmcp import Context
 
 from shared_memory.app import mcp
 from shared_memory.clients import get_mongo
-from shared_memory.helpers import normalize_project, require_session, utc_now_iso
+from shared_memory.helpers import (
+    _match_path_patterns,
+    normalize_project,
+    require_session,
+    utc_now_iso,
+)
 from shared_memory.state import active_sessions
 
 # Roles that may confirm a skill they do not own — a human operator (user) or
@@ -526,3 +531,66 @@ async def memory_pin_skill(
                           {"$set": {"pin": bool(pin), "updated": utc_now_iso()}})
     return json.dumps({"status": "pinned" if pin else "unpinned",
                        "id": doc["_id"], "name": doc.get("name")}, indent=2)
+
+
+# ── Phase-1 surfacing: onboarding-bundle injection ──────────────────────────
+# NOT an @mcp.tool — a plain helper called by memory_start_session to put
+# scope-matched ACTIVE skills into the onboarding bundle. This is the cheap,
+# de-risking half of surfacing (design Q7 Phase-1-first): the SHORT go->do->park
+# session sees its relevant procedures at the moment session-start IS the moment
+# of doing. Phase 2 (.claude/skills materialization for mid-turn match) is later.
+def get_scope_matched_skills(
+    project: str,
+    claude_instance: str = None,
+    role_description: str = None,
+    working_directory: str = None,
+    limit: int = 8,
+):
+    """Return up to `limit` ACTIVE skills scoped to this agent, as bundle
+    headers [{id, name, trigger}]. Drafts NEVER surface (trust gate). Best-
+    effort: any failure returns [] so it can't break session start.
+
+    Scope match (each axis is permissive — an unset axis on the skill applies
+    to everyone):
+      - project : exact (required).
+      - directory: skill.scope.directory unset → always; else included only
+        when working_directory is known AND matches (helpers._match_path_patterns).
+        Unknown working_directory is permissive (included) — we can't disprove
+        relevance, and hiding a procedure is worse than showing one extra.
+      - role: skill.scope.role unset → always; else included when it equals the
+        agent's instance name OR appears in its role_description.
+
+    Ranking: pinned first, then most-recently-updated. Headers only — the agent
+    pulls the full body with memory_get_skill when it actually needs it.
+    """
+    try:
+        db = get_mongo()
+        if db is None or not project:
+            return []
+        proj = normalize_project(project)
+        docs = list(db.skills.find({"project": proj, "status": "active"}))
+
+        rd = (role_description or "").lower()
+
+        def matches(doc):
+            sc = doc.get("scope", {}) or {}
+            directory = sc.get("directory")
+            if directory:
+                if working_directory and not _match_path_patterns(working_directory, [directory]):
+                    return False
+            srole = sc.get("role")
+            if srole:
+                if srole == claude_instance:
+                    return True
+                if rd and srole.lower() in rd:
+                    return True
+                return False
+            return True
+
+        docs = [d for d in docs if matches(d)]
+        docs.sort(key=lambda d: d.get("updated", ""), reverse=True)
+        docs.sort(key=lambda d: 0 if d.get("pin") else 1)
+        return [{"id": d["_id"], "name": d.get("name"), "trigger": d.get("trigger")}
+                for d in docs[:max(1, limit)]]
+    except Exception:
+        return []

@@ -210,3 +210,71 @@ def test_pin_requires_owner(db):
     bad = json.loads(_run(sk.memory_pin_skill(session_id="s_other", name_or_id=r["id"])))
     assert "error" in bad
     assert db.skills.find_one({"_id": r["id"]})["pin"] is False
+
+
+# --- Phase-1 surfacing helper -----------------------------------------------
+def _activate(name):
+    _run(sk.memory_confirm_skill(session_id="s_owner", name_or_id=name, project="junto"))
+
+
+def test_surfacing_only_active_skills(db):
+    _reg(name="active-one")
+    _activate("active-one")
+    _reg(name="still-draft")  # never confirmed
+    out = sk.get_scope_matched_skills("junto")
+    names = {s["name"] for s in out}
+    assert names == {"active-one"}
+    # headers only
+    assert set(out[0].keys()) == {"id", "name", "trigger"}
+
+
+def test_surfacing_project_scope(db):
+    _reg(name="ours")
+    _activate("ours")
+    assert sk.get_scope_matched_skills("other_project") == []
+
+
+def test_surfacing_directory_scope(db):
+    _reg(name="eval-only", directory="eval")
+    _activate("eval-only")
+    _reg(name="anywhere")
+    _activate("anywhere")
+    # working dir inside eval/ → both surface
+    in_eval = {s["name"] for s in sk.get_scope_matched_skills(
+        "junto", working_directory="/home/et/engine/eval/run.py")}
+    assert in_eval == {"eval-only", "anywhere"}
+    # working dir elsewhere → directory-scoped one excluded
+    elsewhere = {s["name"] for s in sk.get_scope_matched_skills(
+        "junto", working_directory="/home/et/web/app.py")}
+    assert elsewhere == {"anywhere"}
+    # unknown working dir → permissive (directory-scoped still shown)
+    unknown = {s["name"] for s in sk.get_scope_matched_skills("junto")}
+    assert unknown == {"eval-only", "anywhere"}
+
+
+def test_surfacing_role_scope(db):
+    _reg(name="engine-only", role="et-engine")
+    _activate("engine-only")
+    _reg(name="all-roles")
+    _activate("all-roles")
+    # match by instance name
+    by_instance = {s["name"] for s in sk.get_scope_matched_skills(
+        "junto", claude_instance="et-engine")}
+    assert by_instance == {"engine-only", "all-roles"}
+    # match by role_description substring
+    by_desc = {s["name"] for s in sk.get_scope_matched_skills(
+        "junto", role_description="the et-engine eval runner")}
+    assert by_desc == {"engine-only", "all-roles"}
+    # no role context → role-scoped excluded
+    none_ctx = {s["name"] for s in sk.get_scope_matched_skills("junto")}
+    assert none_ctx == {"all-roles"}
+
+
+def test_surfacing_pin_ranks_first(db):
+    _reg(name="plain")
+    _activate("plain")
+    _reg(name="pinned")
+    _activate("pinned")
+    _run(sk.memory_pin_skill(session_id="s_owner", name_or_id="pinned", project="junto"))
+    out = sk.get_scope_matched_skills("junto")
+    assert out[0]["name"] == "pinned"

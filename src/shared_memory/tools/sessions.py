@@ -529,6 +529,21 @@ async def memory_start_session(
     except Exception:
         pass
 
+    # Scope-matched skills (DYNAMIC — design:skill-registry-v0 Phase-1 surfacing).
+    # Active, scope-matched how-to procedures as {id,name,trigger} headers, so a
+    # short go->do->park session sees its relevant procedures right when session-
+    # start IS the moment of doing. Best-effort: never blocks session start.
+    _skills_block = None
+    try:
+        from shared_memory.tools.skills import get_scope_matched_skills
+        _matched = get_scope_matched_skills(
+            project, claude_instance, role_description, working_directory
+        )
+        if _matched:
+            _skills_block = _matched
+    except Exception:
+        pass
+
     # Active work by other Claudes (DYNAMIC)
     _other_active = []
     for sid, info in active_sessions.items():
@@ -627,6 +642,8 @@ async def memory_start_session(
     output["session_id"] = session_id
     if _learnings_titles:
         output["learnings"] = _learnings_titles
+    if _skills_block:
+        output["skills"] = _skills_block
     if _patterns_titles:
         output["patterns"] = _patterns_titles
     if _other_active:
