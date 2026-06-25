@@ -2,13 +2,16 @@
 
 
 def test_all_tools_register():
-    """All 57 tools are registered with the MCP server."""
+    """All 62 tools are registered with the MCP server.
+
+    (57 + 5 skill-registry tools: register/confirm/get/list/pin_skill.)
+    """
     from shared_memory.app import create_app
 
     mcp = create_app()
     tools = mcp._tool_manager._tools
 
-    assert len(tools) == 57, f"Expected 57 tools, got {len(tools)}: {sorted(tools.keys())}"
+    assert len(tools) == 62, f"Expected 62 tools, got {len(tools)}: {sorted(tools.keys())}"
 
 
 def test_expected_tools_present():
@@ -29,6 +32,9 @@ def test_expected_tools_present():
         "memory_register_function", "memory_find_function",
         "memory_project", "memory_checklist", "memory_db",
         "memory_define_spec", "memory_list_agents", "memory_guidelines",
+        # Skill registry (design:skill-registry-v0, authoring layer)
+        "memory_register_skill", "memory_confirm_skill", "memory_get_skill",
+        "memory_list_skills", "memory_pin_skill",
         "memory_admin", "memory_standup",
         # Phase C1
         "memory_set_autopilot", "memory_pause_autopilot",

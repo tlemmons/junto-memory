@@ -336,6 +336,15 @@ def get_mongo():
         messages_col.create_index("chain_depth")
         messages_col.create_index("in_response_to")
 
+        # Skills registry (design:skill-registry-v0). Dedicated collection,
+        # Mongo-primary (lifecycle/owner/version/pin/confirm). Identity is
+        # (project, name); status is draft|active (confirm gate). See
+        # tools/skills.py.
+        skills_col = _mongo_db.skills
+        skills_col.create_index([("project", 1), ("name", 1)], unique=True)
+        skills_col.create_index("project")
+        skills_col.create_index([("project", 1), ("status", 1)])
+
         # Op-log (Phase 1 foundation, design v0.3.0 §4.2). Collection +
         # indexes only — no writers yet. Phase 1 #2 instruments mutation
         # tools to append here inside a Mongo transaction alongside their

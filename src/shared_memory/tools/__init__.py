@@ -23,6 +23,7 @@ from shared_memory.tools import (  # noqa: F401
     scheduler,
     search,
     sessions,
+    skills,
     specs,
     standup,
     storage,

@@ -154,6 +154,7 @@ PERMISSIONS: Dict[str, List[str]] = {
     "locking":          ["agent", "admin", "owner"],
     "functions":        ["agent", "admin", "owner"],
     "specs":            ["agent", "admin", "owner"],
+    "skills":           ["agent", "user", "admin", "owner"],
     "lifecycle":        ["agent", "admin", "owner"],
     "checklists":       ["agent", "user", "admin", "owner"],
     "database":         ["agent", "user", "admin", "owner"],
