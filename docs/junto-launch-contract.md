@@ -162,6 +162,39 @@ is scoped to the launch env only (absent from `~/.bashrc`/global profile).
 
 ---
 
+## R6 — Skill materialization  *(optional — Phase-2 native skill surfacing)*
+
+Standing launcher behavior (the durable counterpart of the one-time
+`skill-materialization-rollout` directive). Without it, agents still get
+scope-matched skills as **headers** in the `start_session` bundle (`skills`
+field — Phase 1, server-side, no launcher work). With it, active skills also
+become **native Claude Code skills** that the model's matcher fires mid-turn —
+the win for long sessions where the session-start list scrolls out of context.
+
+Because Claude Code discovers skills **at startup**, this MUST happen in the
+launcher, before `claude` is invoked (a plugin writing them mid-session is too
+late, and the server can't write the agent's filesystem). Steps:
+
+1. After identity is resolved and the MCP server is reachable, call
+   `memory_export_skills` (project + agent name + cwd). Needs a session id —
+   reuse the launch's `start_session` or a short-lived export session.
+2. Write each returned `skills[].content` to `<repo>/.claude/skills/<relpath>`
+   (`relpath` = `<name>/SKILL.md`), creating directories.
+3. **Prune** previously-materialized junto skills no longer in the export:
+   identify junto-managed files by the provenance footer
+   `<!-- junto skill … -->` and delete only those — **never** touch a
+   hand-authored `SKILL.md`.
+4. Idempotent: only rewrite when content changed (byte-compare / content-hash),
+   so a no-change launch does zero writes.
+5. `.claude/skills/` is gitignored on consumer repos (materialized artifacts,
+   not source).
+
+Full producer/consumer contract + open questions: spec
+`interface:skill-materialization-v0`. This is launcher work (`tlemmons/junto`);
+the server half (`memory_export_skills`) is live.
+
+---
+
 ## Profiles — what each environment needs
 
 Same contract, different surface depending on whether the server requires auth and whether the
@@ -203,6 +236,8 @@ non-compliance.
       auth), `JUNTO_AGENT`/`JUNTO_PROJECT`. Key scoped to the launch invocation, **not** rc
       files / global profile.
 - [ ] **R5** MDM persistence + 1M model handled if the environment needs them.
+- [ ] **R6** (optional) Skill materialization: `memory_export_skills` written to
+      `.claude/skills/` pre-launch, footer-pruned, idempotent, gitignored.
 
 ## On variation between launches
 

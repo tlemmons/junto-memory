@@ -544,6 +544,17 @@ async def memory_start_session(
     except Exception:
         pass
 
+    # Fleet directives (DYNAMIC — cross-server "what you need to do" banners).
+    # Active, target-matched, un-acked directives for this agent. Best-effort.
+    _directives_block = None
+    try:
+        from shared_memory.directives import get_pending_directives
+        _pending = get_pending_directives(get_mongo(), normalized_project, claude_instance)
+        if _pending:
+            _directives_block = _pending
+    except Exception:
+        pass
+
     # Active work by other Claudes (DYNAMIC)
     _other_active = []
     for sid, info in active_sessions.items():
@@ -640,6 +651,10 @@ async def memory_start_session(
 
     # 4. DYNAMIC: session_id (unique per call) and all per-call query results.
     output["session_id"] = session_id
+    # Directives lead the dynamic block — they're must-action notices that
+    # persist until the agent acks them with memory_ack_directive.
+    if _directives_block:
+        output["directives"] = _directives_block
     if _learnings_titles:
         output["learnings"] = _learnings_titles
     if _skills_block:

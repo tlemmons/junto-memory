@@ -345,6 +345,25 @@ def get_mongo():
         skills_col.create_index("project")
         skills_col.create_index([("project", 1), ("status", 1)])
 
+        # Fleet directives (cross-server "what you need to do" banners). Code-
+        # seeded like global_guidelines so the TEXT travels with the deploy to
+        # every server incl. the air-gapped work box; acks are per-server. See
+        # shared_memory.directives + tools/directives.py.
+        directives_col = _mongo_db.directives
+        directives_col.create_index("key", unique=True)
+        directives_col.create_index("active")
+        directive_acks_col = _mongo_db.directive_acks
+        directive_acks_col.create_index("key")
+        directive_acks_col.create_index([("project", 1), ("agent", 1)])
+        try:
+            from shared_memory.directives import seed_directives
+            seed_directives(_mongo_db)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(
+                "directives: code-seed failed: %s", e
+            )
+
         # Op-log (Phase 1 foundation, design v0.3.0 §4.2). Collection +
         # indexes only — no writers yet. Phase 1 #2 instruments mutation
         # tools to append here inside a Mongo transaction alongside their
