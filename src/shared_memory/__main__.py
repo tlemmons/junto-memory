@@ -16,6 +16,89 @@ from shared_memory.helpers import utc_now
 from shared_memory.state import active_sessions, active_signals, file_locks
 
 
+async def _export_skills_payload(body, api_key, via_tunnel=False):
+    """Pure request→response logic for POST /export-skills, split out from the
+    Starlette route so it is unit-testable without a live server. Returns
+    (status_code, dict).
+
+    `body` is the parsed JSON (any type — validated here). `api_key` is the
+    Bearer token parsed from the header by the ASGI middleware (None if absent);
+    `via_tunnel` is that middleware's CF-Connecting-IP flag.
+
+    Auth MIRRORS memory_start_session's Path B soft-auth (sessions.py) exactly —
+    do not invent a stricter policy here or the keyless-home launcher path
+    (which the whole endpoint exists for) breaks:
+      - AUTH disabled → open.
+      - valid key → tenant check (403 if the key lacks the project).
+      - invalid key → hard reject (401).
+      - NO key → soft-fall to agent tier (export allowed), UNLESS a rejection
+        gate fires: REQUIRE_KEY (reject every keyless) or TUNNEL_REQUIRES_KEY
+        and this request is tunnel-origin.
+    The launcher prunes SKILL.md files by footer, so a DB outage MUST fail loud
+    (503/500) rather than return an empty 200 that would wipe every materialized
+    skill — see build_skill_export's strict path."""
+    from shared_memory.auth import (
+        AUTH_ENABLED,
+        REQUIRE_KEY,
+        TUNNEL_REQUIRES_KEY,
+        check_project_access,
+        validate_api_key,
+    )
+    from shared_memory.tools.skills import build_skill_export
+
+    if not isinstance(body, dict):
+        return 400, {"error": "JSON body must be an object"}
+
+    project = (body.get("project") or "").strip()
+    if not project:
+        return 400, {"error": "'project' is required"}
+
+    if AUTH_ENABLED:
+        if api_key:
+            key_info = validate_api_key(api_key)
+            if not key_info:
+                return 401, {"error": "invalid or revoked API key"}
+            if not check_project_access(key_info.get("projects", []), project):
+                return 403, {
+                    "error": f"API key lacks access to project '{project}'",
+                    "allowed_projects": key_info.get("projects", []),
+                }
+        elif REQUIRE_KEY or (TUNNEL_REQUIRES_KEY and via_tunnel):
+            # Keyless rejected by an origin-trust gate (design:auth-origin-trust-v0).
+            return 401, {
+                "error": ("This server requires an API key. Provide an "
+                          "'Authorization: Bearer <key>' header."),
+                "auth_required": True,
+            }
+        # else: keyless LAN/local → agent tier, export allowed (no tenant gate).
+
+    # Clamp limit defensively — this is an unauthenticated-from-bash surface on
+    # keyless home; a bad/huge value must not become a giant query.
+    try:
+        limit = int(body.get("limit", 25))
+    except (TypeError, ValueError):
+        limit = 25
+    limit = max(1, min(limit, 100))
+
+    # Fast, clear 503 for the common outage (cold Mongo). A mid-life query error
+    # surfaces as 500 via build_skill_export's strict matcher; either way the
+    # launcher sees a non-2xx and holds off pruning.
+    if get_mongo() is None:
+        return 503, {"error": "MongoDB unavailable"}
+
+    try:
+        result = build_skill_export(
+            project,
+            role=body.get("role"),
+            role_description=body.get("role_description"),
+            working_directory=body.get("working_directory"),
+            limit=limit,
+        )
+    except Exception as e:
+        return 500, {"error": f"skill export failed: {e}"}
+    return 200, result
+
+
 def main():
     parser = argparse.ArgumentParser(description="Shared Memory MCP Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
@@ -289,6 +372,42 @@ def main():
             })
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
+
+    # ── Skill export (session-less REST for the Phase-2 launcher consumer) ──
+    # Plain HTTP alongside /health — NO MCP handshake. The per-box launcher
+    # (tlemmons/junto) hand-rolling MCP initialize→Mcp-Session-Id→tools/call from
+    # bash/PowerShell proved too brittle (nimbus dry-run), so materialization
+    # pulls skills through this single POST. Same response shape as
+    # memory_export_skills. Contract: interface:skill-materialization-v0.
+    @mcp.custom_route("/export-skills", methods=["POST"])
+    async def export_skills_rest(request):
+        """Session-less SKILL.md export.
+
+        Body (JSON): {project REQUIRED, role?, role_description?,
+                      working_directory?, limit?}
+        Auth mirrors memory_start_session's Path B soft-auth: a valid Bearer key
+        is tenant-checked; an invalid key is rejected; a MISSING key soft-falls
+        to agent tier (export allowed) unless the REQUIRE_KEY / tunnel-origin
+        gates fire. So keyless LAN/local callers (home) need no header.
+        Returns 200 {project, count, skills:[{id,name,relpath,content}]}.
+        Errors: 400 missing/invalid body · 401 invalid key OR keyless-rejected
+                by an origin gate · 403 valid key lacks project access ·
+                503 MongoDB unavailable.
+        The launcher MUST prune materialized SKILL.md files ONLY on a 200 — any
+        non-2xx means "state unknown, do not prune" (a DB outage fails loud here
+        rather than returning an empty export that would wipe every skill)."""
+        from starlette.responses import JSONResponse
+
+        from shared_memory.auth import get_header_api_key, get_via_tunnel
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid or missing JSON body"}, status_code=400)
+
+        status_code, payload = await _export_skills_payload(
+            body, get_header_api_key(), get_via_tunnel())
+        return JSONResponse(payload, status_code=status_code)
 
     # Run with the selected transport.
     # For streamable-http we go through uvicorn manually so we can install

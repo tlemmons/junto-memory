@@ -576,14 +576,25 @@ def _active_scope_matched_docs(
     role_description: str = None,
     working_directory: str = None,
     limit: int = 8,
+    strict: bool = False,
 ):
     """Shared scope-matcher: ACTIVE skills in `project` matching this agent's
     role/directory, pinned-first then updated-desc, capped at `limit`. Returns
-    full Mongo docs. Best-effort: [] on any failure. Used by both the Phase-1
-    header surfacer and the Phase-2 SKILL.md exporter so they never diverge."""
+    full Mongo docs. Used by both the Phase-1 header surfacer and the Phase-2
+    SKILL.md exporter so they never diverge.
+
+    strict controls failure mode. Default (strict=False) is BEST-EFFORT: any
+    DB-unavailability or query error returns [] so it can never break session
+    start. strict=True is FAIL-LOUD: an unreachable DB (or a query error)
+    RAISES instead of masquerading as an empty result. The export path uses
+    strict=True because its consumer (the launcher) PRUNES SKILL.md files by
+    footer — a silent empty result on a DB outage would make it delete every
+    materialized skill. See build_skill_export."""
     try:
         db = get_mongo()
         if db is None or not project:
+            if strict and db is None:
+                raise RuntimeError("MongoDB unavailable")
             return []
         proj = normalize_project(project)
         docs = list(db.skills.find({"project": proj, "status": "active"}))
@@ -610,6 +621,8 @@ def _active_scope_matched_docs(
         docs.sort(key=lambda d: 0 if d.get("pin") else 1)
         return docs[:max(1, limit)]
     except Exception:
+        if strict:
+            raise
         return []
 
 
@@ -663,6 +676,41 @@ def render_skill_md(doc: dict) -> str:
     return "\n".join(fm)
 
 
+def build_skill_export(
+    project: str,
+    role: str = None,
+    role_description: str = None,
+    working_directory: str = None,
+    limit: int = 25,
+) -> dict:
+    """Shared export CORE for the Phase-2 SKILL.md producer. Called by BOTH the
+    memory_export_skills MCP tool AND the POST /export-skills REST route so the
+    two surfaces can never diverge in shape (the REST contract promises a body
+    IDENTICAL to memory_export_skills).
+
+    Session-less: takes the scope axes explicitly — no active_sessions lookup —
+    which is exactly why the REST route (no session to default from) can reuse
+    it. `project` is normalized here (idempotent). Fail-loud: passes strict=True
+    to the matcher so a DB outage RAISES rather than returning a misleading
+    empty export (the launcher prunes by footer; count:0 on an outage would
+    wipe every materialized skill). Drafts are never exported.
+
+    Returns the exact wire shape:
+        {project, count, skills: [{id, name, relpath, content}]}
+    """
+    proj = normalize_project(project)
+    docs = _active_scope_matched_docs(
+        proj, role, role_description, working_directory, limit, strict=True
+    )
+    skills = [{
+        "id": d["_id"],
+        "name": d.get("name"),
+        "relpath": f"{d.get('name')}/SKILL.md",
+        "content": render_skill_md(d),
+    } for d in docs]
+    return {"project": proj, "count": len(skills), "skills": skills}
+
+
 @mcp.tool()
 async def memory_export_skills(
     session_id: str,
@@ -696,16 +744,14 @@ async def memory_export_skills(
         return error
 
     session_info = active_sessions[session_id]
-    proj = normalize_project(project) if project else session_info.get("project")
+    proj = project if project else session_info.get("project")
     role = role if role is not None else session_info.get("claude_instance")
 
-    docs = _active_scope_matched_docs(
-        proj, role, session_info.get("role_description"), working_directory, limit
-    )
-    skills = [{
-        "id": d["_id"],
-        "name": d.get("name"),
-        "relpath": f"{d.get('name')}/SKILL.md",
-        "content": render_skill_md(d),
-    } for d in docs]
-    return json.dumps({"project": proj, "count": len(skills), "skills": skills}, indent=2)
+    try:
+        result = build_skill_export(
+            proj, role, session_info.get("role_description"), working_directory, limit
+        )
+    except Exception as e:
+        # Fail loud: don't hand the pruning launcher a misleading empty export.
+        return json.dumps({"error": f"skill export failed: {e}"})
+    return json.dumps(result, indent=2)
