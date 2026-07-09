@@ -241,7 +241,7 @@ This applies doubly to junto-memory itself: you're the project that owns the rec
 1. **Use Task subagents for research, not your main context.** Every file read stays in context permanently. `Task(subagent_type="Explore")` for finding/exploring; direct reads only when you know the file + line range.
 2. **Find before read.** `memory_find_function` before opening source.
 3. **Filter memory queries.** `assigned_to`, `limit`, specific queries.
-4. **Park before you die.** Quality degrades gradually. Park around ~100 exchanges or when you notice quality dropping. Clean restart from state spec beats limping with degraded context.
+4. **Park on evidence, not vibes.** On 1M-context models use the server-guideline bands: <500K tokens = keep working (do NOT park mid-task "to preserve context"); 500–800K = watch for degradation symptoms (re-reading known files, re-asking settled questions, contradicting earlier decisions), park at the next clean stopping point; >800K = park even mid-task with detailed handoff. Any park recommendation must cite the actual token count and/or named symptoms (learning_11048dc8b45c1bfc). The old "~100 exchanges" rule was calibrated to 200K contexts and is superseded. Parking is not free — unrecorded texture dies at park; clean restart beats limping ONLY when degradation is real.
 
 ---
 
