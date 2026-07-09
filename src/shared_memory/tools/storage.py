@@ -1,6 +1,7 @@
 """Storage tools - store documents and record learnings."""
 
 import json
+import logging
 from typing import Dict, List
 
 from mcp.server.fastmcp import Context
@@ -10,6 +11,7 @@ from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import MAX_CONTENT_SIZE, MEMORY_TYPES
 from shared_memory.helpers import (
     calculate_expiry,
+    calculate_relevance,
     check_duplicate,
     check_overlap,
     format_overlap_warning,
@@ -17,12 +19,15 @@ from shared_memory.helpers import (
     generate_doc_id,
     get_project_collection,
     get_shared_collection,
+    is_expired,
     normalize_project,
     require_session,
     utc_now_iso,
 )
 from shared_memory.op_log import emit_op_log_from_context, fetch_embedding_for_op_log
 from shared_memory.state import active_sessions
+
+logger = logging.getLogger(__name__)
 
 
 @mcp.tool()
@@ -246,6 +251,71 @@ async def memory_store(
     return json.dumps(result)
 
 
+# Write-time contradiction gate (threshold stage). When a new learning is
+# recorded, surface near-prior learnings so the author can catch a duplicate or
+# a contradiction of an existing note before it silently lands (root case:
+# 2026-07 mesh-offline — a wrong learning recorded over its contradicting prior,
+# no query). THRESHOLD-ONLY v0: embedding similarity only. It surfaces near
+# priors of ALL kinds — a true contradiction and a consistent restatement look
+# alike to a cosine floor (they can be lexically near-identical; only semantics
+# separate them). Telling the two apart needs a claim-extraction + classifier
+# layer on top (backlog_6471d8348393); this stage just says "these are close,
+# check them." Advisory only — it NEVER blocks the write.
+# TODO: promote SIMILAR_LEARNING_THRESHOLD to the three-layer query_config knob
+# once calibrated against coordinator@nimbus's expanded dataset.
+SIMILAR_LEARNING_THRESHOLD = 0.6  # normalized [0,1] similarity (helpers.calculate_relevance)
+
+
+async def _find_similar_learnings(
+    collection,
+    query_text: str,
+    exclude_id: str,
+    threshold: float = SIMILAR_LEARNING_THRESHOLD,
+    k: int = 5,
+) -> List[Dict]:
+    """Active, non-expired prior learnings whose embedding similarity to
+    query_text is >= threshold, as header pointers (id/title/score/updated, no
+    bodies) sorted by score desc.
+
+    Single-key Chroma where-filter only: multi-key filters silently return
+    nothing in this Chroma version (see the memory_list_specs gotcha, commit
+    28570d4). So filter type in the query, status/expiry in Python.
+    """
+    results = await collection.query(
+        query_texts=[query_text],
+        n_results=k + 5,  # over-fetch; Python-side filtering drops some
+        where={"type": "learning"},
+    )
+    id_rows = results.get("ids") or []
+    if not id_rows or not id_rows[0]:
+        return []
+    ids = id_rows[0]
+    metas = results["metadatas"][0]
+    dists = results["distances"][0]
+
+    hits: List[Dict] = []
+    for doc_id, meta, dist in zip(ids, metas, dists):
+        if doc_id == exclude_id:
+            continue
+        meta = meta or {}
+        if meta.get("status", "active") != "active":
+            continue
+        if is_expired(meta):
+            continue
+        score = calculate_relevance(dist)
+        if score < threshold:
+            continue
+        hits.append({
+            "id": doc_id,
+            "title": meta.get("title", ""),
+            "score": round(score, 3),
+            "updated": meta.get("updated") or meta.get("created"),
+        })
+
+    hits.sort(key=lambda h: h["score"], reverse=True)
+    return hits[:k]
+
+
 @mcp.tool()
 async def memory_record_learning(
     session_id: str,
@@ -300,10 +370,23 @@ async def memory_record_learning(
         chroma_collection_name = "shared_patterns"
 
     doc_id = f"learning_{generate_doc_id(title, 'learning')}"
+    document_text = f"# {title}\n\n{details}"
+
+    # Write-time contradiction gate (threshold stage): retrieve near-prior
+    # learnings BEFORE the add, so the new doc cannot match itself. Best-effort
+    # by contract — an advisory-lookup failure must NEVER block recording the
+    # learning (the write is the load-bearing operation; the surfacing is not).
+    similar_prior: List[Dict] = []
+    try:
+        similar_prior = await _find_similar_learnings(
+            collection, document_text, exclude_id=doc_id
+        )
+    except Exception as e:  # noqa: BLE001 - advisory path, degrade to no-surfacing
+        logger.warning("write-time gate similar-learning lookup failed: %s", e)
 
     await collection.add(
         ids=[doc_id],
-        documents=[f"# {title}\n\n{details}"],
+        documents=[document_text],
         metadatas=[{
             "title": title,
             "type": "learning",
@@ -339,4 +422,15 @@ async def memory_record_learning(
         },
     )
 
-    return json.dumps({"status": "recorded", "id": doc_id})
+    result = {"status": "recorded", "id": doc_id}
+    if similar_prior:
+        # Pointers, not conclusions: surface the near priors + why, let the
+        # author judge. Threshold-only can't tell contradiction from restatement,
+        # so the wording asks the author to check, not asserts a conflict.
+        result["similar_prior"] = similar_prior
+        result["note"] = (
+            f"{len(similar_prior)} existing learning(s) are similar to this one — "
+            "review for duplication or contradiction before relying on both. If this "
+            "supersedes one, mark it: memory_change_status(new_status='superseded')."
+        )
+    return json.dumps(result)
