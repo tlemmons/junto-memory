@@ -13,9 +13,6 @@ Exercises:
      max(parent+1, caller, 0) math.
   7. destructive_still_blocks: user-tier sending "deploy production" still
      gets require_human=True via the destructive gate.
-  8. autopilot_bypass: memory_autopilot_check_budget returns
-     allowed=True + sent_by_human_bypass=True for a sent_by_human message,
-     even when chain_depth would otherwise breach depth_cap.
 
 Requires the tom-web user-tier key. Pass via TOM_WEB_KEY env var.
 """
@@ -195,45 +192,6 @@ async def main() -> int:
             f"depth={send4.get('chain_depth')} sent_by_human={send4.get('sent_by_human')}",
         ))
         await end(agent_sess, agent_sid)
-
-    # 8. autopilot bypass: simulate the receiver's plugin checking budget.
-    # Need autopilot enabled for main@claude_terminal. Set it temporarily.
-    async with open_mcp() as bypass_sess:
-        bp_out = await start(bypass_sess, "smoke-bypass", project="claude_terminal", api_key=TOM_WEB_KEY)
-        bp_sid = bp_out.get("session_id", "")
-        await call(bypass_sess, "memory_set_autopilot", {
-            "session_id": bp_sid,
-            "project": "claude_terminal",
-            "agent": "main",
-            "enabled": True,
-            "depth_cap": 1,
-            "hourly_budget": 10,
-            "destructive_gate": True,
-        })
-        # Check budget for the human send (msg1) — expect bypass.
-        check = await call(bypass_sess, "memory_autopilot_check_budget", {
-            "session_id": bp_sid,
-            "project": "claude_terminal",
-            "agent": "main",
-            "message_id": msg1_id,
-            "chain_depth": 0,
-            "require_human": False,
-        })
-        ok_bypass = (
-            check.get("allowed") is True
-            and check.get("sent_by_human_bypass") is True
-            and check.get("reason") == "sent_by_human bypass"
-        )
-        results.append((
-            "autopilot_sent_by_human_bypass",
-            ok_bypass,
-            f"allowed={check.get('allowed')} reason={check.get('reason')}",
-        ))
-        # Also confirm a regular agent-tier message (msg4 above) follows
-        # normal gating — since msg4 had chain_depth=1 (== depth_cap),
-        # it is NOT a breach (breach is strictly >). Should be allowed
-        # with current_count=1 (this is the first event recorded).
-        await end(bypass_sess, bp_sid)
 
     # ── Cleanup: drop the test messages we sent so main's inbox isn't spammed ──
     import subprocess

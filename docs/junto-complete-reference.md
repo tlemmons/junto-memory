@@ -97,7 +97,7 @@ The developer's `claude` process connects to the junto-memory server via HTTP (M
 - Keys are provisioned by an admin via `memory_admin(action="create_key")`.
 - Auth is Bearer header: `Authorization: Bearer smk_...` in `~/.mcp.json`. The key does not need to be passed as a tool argument.
 - When `JUNTO_REQUIRE_KEY=true` (recommended for non-localhost deployments), keyless sessions are rejected outright.
-- Four key tiers: `owner` (full admin + key management), `admin` (project-scoped admin), `user` (human-tier, bypasses some autopilot gates), `agent` (default, project-scoped access).
+- Four key tiers: `owner` (full admin + key management), `admin` (project-scoped admin), `user` (human-tier — its messages start fresh chains at depth 0), `agent` (default, project-scoped access).
 
 **Network isolation:**
 - The server binds MCP (8080) to `127.0.0.1` + the tailnet/LAN IP. It does NOT bind to `0.0.0.0`.

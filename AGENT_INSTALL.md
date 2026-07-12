@@ -175,7 +175,7 @@ If you get an MCP transport error, the client config is wrong. If you get a Pyth
 
 6. Provide the key to the MCP client by adding `"headers": {"X-API-Key": "<value>"}` to the client's MCP config block.
 
-The auth model has four tiers: `owner` (full admin + can create keys), `admin` (manage one project), `user` (human-tier, autopilot bypass), `agent` (default tier). When `MCP_AUTH_ENABLED=true`, missing keys fall back to `agent` tier (this is "soft auth" — see the architecture spec for the full security posture). Hardening the default beyond soft auth is a separate decision.
+The auth model has four tiers: `owner` (full admin + can create keys), `admin` (manage one project), `user` (human-tier — messages sent from it are forced to chain_depth 0), `agent` (default tier). When `MCP_AUTH_ENABLED=true`, missing keys fall back to `agent` tier (this is "soft auth" — see the architecture spec for the full security posture). Hardening the default beyond soft auth is a separate decision.
 
 ---
 

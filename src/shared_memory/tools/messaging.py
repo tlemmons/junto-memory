@@ -390,7 +390,7 @@ def _compute_lane_counts(db, base_and: List[Dict[str, Any]], watermark=None,
 
 
 # Phase C1.1: destructive content gate. Body containing any of these patterns
-# automatically gets require_human=True so autopilot never auto-acts on it.
+# automatically gets require_human=True so clients never auto-act on it.
 # This regex is gated by chain_depth>0 in the caller — a depth-0 send is
 # deliberate (human or new agent chain) and trusted to set require_human itself.
 #
@@ -642,9 +642,9 @@ async def memory_send_message(
             blocker - STOP work until discussed with coordinator or user
         to_project: Target project (defaults to your project; use for cross-project notes)
         reply_to: Note ID this is replying to (for threading conversations)
-        in_response_to: Message ID this is a programmatic auto-response to (Phase C autopilot).
+        in_response_to: Message ID this is a programmatic auto-response to.
             If set, server computes chain_depth = parent.chain_depth + 1.
-        chain_depth: Override chain depth (Phase C autopilot). Server takes the
+        chain_depth: Override chain depth. Server takes the
             max of (parent_depth+1, caller-provided). Above the configured
             push-control depth_cap (default 12 per project) the message is
             persisted but its push notification is suppressed (it sits in the
@@ -658,7 +658,7 @@ async def memory_send_message(
             an in-progress human prompt at this moment (e.g., a plugin marks
             this on outbound sends made while processing a Tom-typed prompt).
             When True, refreshes the sender's per-agent recency window. Trusted
-            in non-adversarial environments; default False on autopilot replies.
+            in non-adversarial environments; default False on automated replies.
         component: Optional sub-group under the project this message belongs to
             (design:unified-messaging-v0 Stage 1 — ADDRESSING). Free-form,
             human-chosen (e.g. "camera-sync"). Stage 1 carries it as first-class
@@ -855,10 +855,10 @@ async def memory_send_message(
     )
 
     # ── Phase C1.1: destructive content gate, chain-depth-gated ──
-    # Auto-flag only when this is a relayed/autopilot message (chain_depth>0).
+    # Auto-flag only when this is a relayed/automated message (chain_depth>0).
     # Depth-0 sends are deliberate (human-tier or new agent chain) — the caller
     # is presumed to know what they're doing and can pass require_human=True
-    # explicitly. The gate is here to break runaway autopilot loops, not to
+    # explicitly. The gate is here to break runaway auto-reply loops, not to
     # police prose. backlog_6bcf2d646772.
     body_is_destructive = (
         final_depth > 0 and bool(_DESTRUCTIVE_KEYWORDS.search(message))
@@ -944,7 +944,7 @@ async def memory_send_message(
     # insert and its op_log entry land atomically. If commit fails, neither
     # write is observable to peers or readers — no half-state to reconcile.
     # First user of with_op_log(); pattern reusable for other Mongo-backed
-    # mutations (autopilot events, agent heartbeats, locks).
+    # mutations (agent heartbeats, locks).
     with with_op_log(db) as (session, append):
         db.messages.insert_one(msg_doc, session=session)
         append(
