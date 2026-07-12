@@ -131,6 +131,17 @@ def test_throttle_skips_recent_sweep(_reap_on):
     assert db.registered_agents.deleted == []
 
 
+def test_fresh_row_without_last_seen_protected_by_created_at(_reap_on):
+    """Coordinator's None-last_seen edge (msg_35b9ba284875): a hypothetical
+    just-created pending row with no last_seen must ride created_at through
+    the grace window, not be treated as ancient."""
+    fresh = _row("just-added", last_seen=None)
+    fresh["created_at"] = _ago(1)  # created an hour ago, inside grace
+    db = _DB([fresh])
+    assert identity_gc.maybe_reap_pending_agents(db, {}) == []
+    assert db.registered_agents.deleted == []
+
+
 def test_as_utc_handles_naive_iso_and_none():
     naive = datetime(2026, 7, 1, 12, 0, 0)
     assert identity_gc._as_utc(naive).tzinfo is not None

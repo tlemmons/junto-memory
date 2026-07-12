@@ -96,7 +96,13 @@ def maybe_reap_pending_agents(db, active_sessions: Dict[str, dict]) -> List[dict
         proj, name = row.get("project"), row.get("name")
         if (proj, name) in live:
             continue
-        if _as_utc(row.get("last_seen")) >= cutoff:
+        # Grace check on last_seen, falling back to created_at: no current
+        # path creates a pending row without last_seen (auto-register always
+        # stamps it; add_agent rejects tier="pending"), but if one ever
+        # appears, its AGE — not the field's absence — decides eligibility.
+        # Both missing → ancient → eligible (that shape is precisely the
+        # legacy seed-ghost class this reaper exists for).
+        if _as_utc(row.get("last_seen") or row.get("created_at")) >= cutoff:
             continue
         # Open inbound obligations: someone is still waiting on this agent.
         # Reaping now would orphan their question/task/blocker forever.
