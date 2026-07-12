@@ -129,6 +129,13 @@ services:
       - JUNTO_CLAIM_GATE_ENABLED=${JUNTO_CLAIM_GATE_ENABLED:-false}
       - JUNTO_CLAIM_GATE_URL=${JUNTO_CLAIM_GATE_URL:-http://host.docker.internal:11434/v1}
       - JUNTO_CLAIM_GATE_MODEL=${JUNTO_CLAIM_GATE_MODEL:-phi4:14b}
+      # Pending-agent GC (identity_gc.py, design:identity-lifecycle-v0
+      # Mechanism B). Reaps PENDING-tier roster ghosts idle past the grace
+      # window (never named/admin; blocked by live sessions and open inbound
+      # obligations). Default OFF — enable only after the roster's legitimate
+      # long-livers are promoted to named (done on sage 2026-07-12).
+      - JUNTO_PENDING_REAP_ENABLED=${JUNTO_PENDING_REAP_ENABLED:-false}
+      - JUNTO_PENDING_REAP_GRACE_HOURS=${JUNTO_PENDING_REAP_GRACE_HOURS:-48}
     extra_hosts:
       # Lets the container reach host services (Ollama :11434) on Linux,
       # where host.docker.internal is not automatic.

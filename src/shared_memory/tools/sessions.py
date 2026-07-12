@@ -171,6 +171,15 @@ async def memory_start_session(
     # Cleanup stale sessions on each new session start
     cleanup_stale_sessions()
 
+    # Pending-agent GC scan (design:identity-lifecycle-v0 Mechanism B).
+    # Throttled + pending-tier-scoped inside; default-disabled by env knob.
+    # Best-effort: a GC failure must never block a session start.
+    try:
+        from shared_memory.identity_gc import maybe_reap_pending_agents
+        maybe_reap_pending_agents(get_mongo(), active_sessions)
+    except Exception as _gc_err:  # noqa: BLE001
+        print(f"[MCP] pending-agent GC scan failed (non-fatal): {_gc_err}")
+
     # ── Drain gate ──
     # When an operator has set drain=true via memory_admin (typically during a
     # graceful-restart prep window), refuse NEW sessions. Existing sessions

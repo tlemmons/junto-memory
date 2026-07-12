@@ -163,7 +163,10 @@ async def memory_project(
     action="create" - Create a new project (any Claude can bootstrap)
         Required: name
         Optional: display_name
-        Auto-creates: "coordinator" agent as co-admin with human
+        "coordinator" is included in the admins LIST but NO roster row is
+        manufactured for it — a real coordinator auto-registers on its first
+        session (identity-lifecycle Mechanism B; never-sessioned rows were a
+        message-swallow hazard)
 
     action="set_owner" - Set the discoverable OWNER of a project (admin only)
         Required: name (project), owner (agent name to contact for cross-project
@@ -231,7 +234,14 @@ async def memory_project(
         if existing:
             return json.dumps({"error": f"Project '{project_name}' already exists"})
 
-        # Create project - human is always admin, coordinator auto-added
+        # Create project - human is always admin; "coordinator" stays in the
+        # admins LIST (admin powers apply if/when a real coordinator opens a
+        # session and registers), but NO roster row is manufactured for it.
+        # A never-sessioned coordinator row is a message-swallow hazard:
+        # resolve_agent_name resolves any registered name regardless of
+        # liveness (design:identity-lifecycle-v0 Mechanism B / Flag 3,
+        # learning_b965ce5dd60f713c). A real coordinator auto-registers on
+        # its first memory_start_session like any other agent.
         admins = [IMPLICIT_ADMIN, "coordinator"]
         if caller not in admins:
             admins.append(caller)
@@ -246,30 +256,13 @@ async def memory_project(
             "updated_at": now
         })
 
-        # Auto-register coordinator as admin agent
-        db.registered_agents.update_one(
-            {"project": project_name, "name": "coordinator"},
-            {"$setOnInsert": {
-                "project": project_name,
-                "name": "coordinator",
-                "tier": "admin",
-                "role_description": f"Coordinator for {project_name} - manages cross-team work, delegates tasks, tracks progress",
-                "path_patterns": [],
-                "created_by": caller,
-                "created_at": now,
-                "last_seen": None,
-                "session_count": 0
-            }},
-            upsert=True
-        )
-
         return json.dumps({
             "status": "created",
             "project": project_name,
             "display_name": display_name or name,
             "admins": admins,
             "owner": owner,
-            "auto_registered": ["coordinator"]
+            "auto_registered": []
         }, indent=2)
 
     # -- SET_OWNER --
@@ -441,9 +434,19 @@ async def memory_project(
         if not _is_project_admin(db, project_name, caller):
             return json.dumps({"error": f"Permission denied. Only project admins can remove agents. You are '{caller}'."})
 
-        # Don't allow removing coordinator (always exists)
+        # Protect only a REAL coordinator (one that has actually opened a
+        # session). Never-sessioned rows — the seed-ghost class — are
+        # removable; blanket-blocking them made the message-swallow hazard
+        # permanent (identity-lifecycle Mechanism B / Flag 3).
         if agent == "coordinator":
-            return json.dumps({"error": "Cannot remove coordinator - it is required for every project."})
+            _coord_row = db.registered_agents.find_one(
+                {"project": project_name, "name": agent}
+            )
+            if _coord_row and _coord_row.get("session_count", 0) > 0:
+                return json.dumps({"error": (
+                    "Cannot remove coordinator - it has session history in this "
+                    "project. (Never-sessioned seed rows are removable.)"
+                )})
 
         result = db.registered_agents.delete_one({"project": project_name, "name": agent})
         if result.deleted_count == 0:
