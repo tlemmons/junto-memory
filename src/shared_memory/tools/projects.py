@@ -76,13 +76,18 @@ def resolve_agent_name(db, project_name: str, target_name: str) -> Optional[str]
     """
     if db is None or not target_name:
         return None
+    # Retired identities (identity-lifecycle Mechanism C) are terminal and
+    # NOT addressable — excluded here so a send to a retired name fails loud
+    # like any unknown recipient instead of queueing mail nobody will read.
     direct = db.registered_agents.find_one(
-        {"project": project_name, "name": target_name}, {"name": 1}
+        {"project": project_name, "name": target_name,
+         "tier": {"$ne": "retired"}}, {"name": 1}
     )
     if direct:
         return direct["name"]
     aliased = db.registered_agents.find_one(
-        {"project": project_name, "aliases": target_name}, {"name": 1}
+        {"project": project_name, "aliases": target_name,
+         "tier": {"$ne": "retired"}}, {"name": 1}
     )
     if aliased:
         return aliased["name"]
@@ -185,6 +190,15 @@ async def memory_project(
         Optional: role_description, tier (admin/named, default: named), path_patterns
 
     action="remove_agent" - Remove an agent from a project (admin/coordinator only)
+        Required: name (project), agent (agent name)
+
+    action="decommission" - Retire a finished temp agent (admin only; identity-
+        lifecycle Mechanism C). Revokes its '<agent>'/'<agent>-*' API keys,
+        archives its state spec, flips tier to terminal 'retired' (cannot
+        session, cannot receive messages, gone from roster/standup/active-work),
+        drops its directory rows. ARTIFACTS ARE PRESERVED. Refused while the
+        agent has a live session. Un-retire deliberately via update_agent
+        tier='named'.
         Required: name (project), agent (agent name)
 
     action="update_agent" - Update agent details (admin/coordinator only)
@@ -515,5 +529,113 @@ async def memory_project(
             "updated_fields": list(update_fields.keys())
         })
 
+    # -- DECOMMISSION (identity-lifecycle Mechanism C: any-tier → retired) --
+    elif action == "decommission":
+        if not name or not agent:
+            return json.dumps({"error": "name (project) and agent required for decommission"})
+
+        project_name = name.lower().replace("-", "_").replace(" ", "_")
+
+        if not _is_project_admin(db, project_name, caller):
+            return json.dumps({"error": f"Permission denied. Only project admins can decommission agents. You are '{caller}'."})
+
+        row = db.registered_agents.find_one({"project": project_name, "name": agent})
+        if not row:
+            return json.dumps({"error": f"Agent '{agent}' not found in {project_name}"})
+        if row.get("tier") == "retired":
+            return json.dumps({"error": f"Agent '{agent}' is already retired (since {row.get('retired_at')})."})
+
+        # Live-session guard: decommission is a deliberate terminal act on a
+        # QUIET agent. A live session means someone is mid-work — park first.
+        for _info in active_sessions.values():
+            if (_info.get("project") == project_name
+                    and _info.get("claude_instance") == agent):
+                return json.dumps({"error": (
+                    f"Agent '{agent}' has a LIVE session. Park/end it first — "
+                    "decommission of a working agent is refused."
+                )})
+
+        # (a) Revoke the agent's scoped keys. Keys carry no agent binding, so
+        # match by naming convention: exact name or '<agent>-*' prefix. The
+        # response lists what was revoked so the operator can audit for
+        # unconventionally-named keys this matcher can't see.
+        import re
+        revoked_keys = []
+        try:
+            _pat = f"^{re.escape(agent)}(-|$)"
+            from shared_memory.auth import revoke_api_key
+            for k in db.api_keys.find(
+                {"active": True, "name": {"$regex": _pat}}, {"name": 1}
+            ):
+                if revoke_api_key(k["name"]):
+                    revoked_keys.append(k["name"])
+        except Exception:
+            pass  # best-effort; surfaced via the (possibly empty) list
+
+        # (b) Archive the agent's state spec (best-effort — spec may not exist).
+        state_spec_archived = False
+        try:
+            from shared_memory.clients import get_chroma
+            from shared_memory.helpers import get_project_collection
+            _chroma = await get_chroma()
+            _coll = await get_project_collection(_chroma, project_name)
+            _sid = f"spec_state_{agent}"  # memory_define_spec id scheme: ':' -> '_'
+            _got = await _coll.get(ids=[_sid], include=["metadatas"])
+            if _got.get("ids"):
+                _meta = (_got.get("metadatas") or [{}])[0] or {}
+                _meta["status"] = "archived"
+                _meta["archived_reason"] = f"agent decommissioned {now}"
+                await _coll.update(ids=[_sid], metadatas=[_meta])
+                state_spec_archived = True
+        except Exception:
+            pass
+
+        # (c) Terminal tier flip + drop enumeration presence. The roster row
+        # is KEPT (tier=retired + retired_at/by = the historical record);
+        # the agent_directory rows go (same as Mechanism B reap). Artifacts
+        # (messages, learnings, specs history, audit) are never touched.
+        db.registered_agents.update_one(
+            {"project": project_name, "name": agent},
+            {"$set": {
+                "tier": "retired",
+                "retired_at": now,
+                "retired_by": caller,
+                "updated_at": now,
+            }}
+        )
+        db.agent_directory.delete_many({"project": project_name, "instance": agent})
+        db.projects.update_one(
+            {"name": project_name},
+            {"$pull": {"admins": agent}, "$set": {"updated_at": now}}
+        )
+
+        try:
+            from shared_memory.audit import log_audit
+            log_audit("agent.decommissioned", agent, project_name, {
+                "by": caller,
+                "previous_tier": row.get("tier"),
+                "keys_revoked": revoked_keys,
+                "state_spec_archived": state_spec_archived,
+                "purpose": row.get("purpose"),
+                "sunset": str(row.get("sunset")) if row.get("sunset") else None,
+            }, session_id)
+        except Exception:
+            pass
+
+        return json.dumps({
+            "status": "decommissioned",
+            "project": project_name,
+            "agent": agent,
+            "previous_tier": row.get("tier"),
+            "keys_revoked": revoked_keys,
+            "state_spec_archived": state_spec_archived,
+            "artifacts": "preserved (messages, learnings, specs history, audit)",
+            "note": (
+                "Terminal: the identity can no longer start sessions or receive "
+                "messages. Un-retire (deliberate) via memory_project("
+                "action='update_agent', tier='named')."
+            ),
+        })
+
     else:
-        return json.dumps({"error": f"Unknown action '{action}'. Must be one of: create, get, list, set_owner, delete, add_agent, remove_agent, update_agent"})
+        return json.dumps({"error": f"Unknown action '{action}'. Must be one of: create, get, list, set_owner, delete, add_agent, remove_agent, update_agent, decommission"})

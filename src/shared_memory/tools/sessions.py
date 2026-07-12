@@ -361,6 +361,20 @@ async def memory_start_session(
                     "project": normalized_project,
                     "name": claude_instance
                 })
+                if registered_agent and registered_agent.get("tier") == "retired":
+                    # Terminal identity (identity-lifecycle Mechanism C):
+                    # retired agents cannot start sessions. Deliberate
+                    # un-retire path: memory_project update_agent tier='named'.
+                    return json.dumps({"error": (
+                        f"Identity '{claude_instance}@{normalized_project}' is "
+                        f"RETIRED (decommissioned "
+                        f"{registered_agent.get('retired_at')}, by "
+                        f"{registered_agent.get('retired_by', 'unknown')}). "
+                        "Retired identities cannot start sessions. If this "
+                        "agent has a legitimate new purpose, an admin can "
+                        "un-retire it via memory_project(action='update_agent', "
+                        "tier='named'), or use a new name."
+                    ), "retired": True})
                 if registered_agent:
                     # Update last_seen on the registered agent
                     db.registered_agents.update_one(
