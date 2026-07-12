@@ -6,6 +6,7 @@ from typing import Dict, List
 
 from mcp.server.fastmcp import Context
 
+from shared_memory import claim_gate
 from shared_memory.app import mcp
 from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import MAX_CONTENT_SIZE, MEMORY_TYPES
@@ -424,13 +425,38 @@ async def memory_record_learning(
 
     result = {"status": "recorded", "id": doc_id}
     if similar_prior:
-        # Pointers, not conclusions: surface the near priors + why, let the
-        # author judge. Threshold-only can't tell contradiction from restatement,
-        # so the wording asks the author to check, not asserts a conflict.
-        result["similar_prior"] = similar_prior
-        result["note"] = (
-            f"{len(similar_prior)} existing learning(s) are similar to this one — "
-            "review for duplication or contradiction before relying on both. If this "
-            "supersedes one, mark it: memory_change_status(new_status='superseded')."
+        # Classifier stage (interface:claim-extraction-v0): annotate each
+        # surfaced prior with CONTRADICTS/CONSISTENT/UNRELATED. Advisory and
+        # fail-quiet by contract — classify_against_priors never raises; when
+        # the gate is disabled or the endpoint is down it hands the priors
+        # back untouched and we fall through to the threshold-only wording.
+        contradicted: List[str] = []
+        similar_prior, contradicted = await claim_gate.classify_against_priors(
+            db=get_mongo(),
+            collection=collection,
+            new_doc_id=doc_id,
+            new_title=title,
+            new_details=details,
+            priors=similar_prior,
         )
+        result["similar_prior"] = similar_prior
+        if contradicted:
+            result["note"] = (
+                f"CONTRADICTION: per the claim classifier, this learning "
+                f"contradicts {', '.join(contradicted)} — one of them is wrong. "
+                "If the prior no longer holds, supersede it: memory_change_status("
+                "doc_id=..., new_status='superseded', reason=...). If the prior "
+                "is still right, re-check this note before relying on it. "
+                "(Advisory — both records exist until you act.)"
+            )
+        else:
+            # Pointers, not conclusions: surface the near priors + why, let the
+            # author judge. Threshold similarity alone can't tell contradiction
+            # from restatement, so the wording asks the author to check, not
+            # asserts a conflict.
+            result["note"] = (
+                f"{len(similar_prior)} existing learning(s) are similar to this one — "
+                "review for duplication or contradiction before relying on both. If this "
+                "supersedes one, mark it: memory_change_status(new_status='superseded')."
+            )
     return json.dumps(result)
