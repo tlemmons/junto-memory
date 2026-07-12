@@ -424,6 +424,11 @@ async def memory_get_active_work(
 
     for sid, info in active_sessions.items():
         if sid != session_id:
+            # Service principals are invisible to active-work enumeration
+            # (design:identity-lifecycle-v0 Mechanism A) — this is the one
+            # enumerator keyed off the session rather than a registry row.
+            if info.get("is_principal"):
+                continue
             if project and normalize_project(info["project"]) != project:
                 continue
             if instance and info["claude_instance"] != instance:

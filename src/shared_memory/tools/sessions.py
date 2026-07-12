@@ -115,6 +115,7 @@ async def memory_start_session(
     api_key: str = None,
     subscribed_components: List[str] = None,
     aliases: List[str] = None,
+    principal: bool = False,
     ctx: Context = None
 ) -> str:
     """
@@ -157,6 +158,15 @@ async def memory_start_session(
             per project — an alias that collides with a live agent name or
             another agent's alias is rejected (surfaced in `registry_warning`).
             None = leave existing aliases untouched; [] = clear them.
+        principal: Service-principal session mode (design:identity-lifecycle-v0
+            Mechanism A; first consumer: subConscience runtime subs). Requires a
+            VALIDATED api key (arg or Bearer header) — keyless/soft-auth
+            sessions are rejected as principals. The session authenticates and
+            scopes like any other, but is INVISIBLE BY CONSTRUCTION: no
+            registered_agents row, no agent_directory row, and it is filtered
+            from active-work / other-claudes enumeration. A principal can never
+            be a message RECIPIENT (send-validation is roster-based, and there
+            is no roster row). Lifecycle = key lifecycle (revoke to kill).
     """
     # Cleanup stale sessions on each new session start
     cleanup_stale_sessions()
@@ -178,6 +188,7 @@ async def memory_start_session(
     # (user/admin/owner). Invalid keys remain hard-rejected.
     _auth_role = "agent"  # default when auth disabled OR soft-auth fallback
     _auth_projects = []   # empty = all projects
+    _key_validated = False  # true only when a real key passed validate_api_key
     try:
         from shared_memory.auth import AUTH_ENABLED, check_project_access, get_header_api_key, validate_api_key
         if AUTH_ENABLED:
@@ -201,6 +212,7 @@ async def memory_start_session(
 
                 _auth_role = key_info["role"]
                 _auth_projects = key_info.get("projects", [])
+                _key_validated = True
 
                 # Tenant isolation: check project access
                 if not check_project_access(_auth_projects, project):
@@ -251,6 +263,26 @@ async def memory_start_session(
     except ImportError:
         pass  # auth module not available, continue without auth
 
+    # ── Service-principal gate (design:identity-lifecycle-v0 Mechanism A) ──
+    # A principal session MUST ride a validated key: identity comes from key
+    # issuance, and revoking the key is the ONLY lifecycle exit. Letting a
+    # keyless/soft-auth caller go invisible would mean unattributable,
+    # unrevokable sessions.
+    if principal and not _key_validated:
+        try:
+            from shared_memory.audit import log_audit
+            log_audit("auth.principal_rejected", claude_instance, project,
+                      {"reason": "no_validated_key"})
+        except Exception:
+            pass
+        return json.dumps({
+            "error": (
+                "principal=True requires a validated API key (api_key arg or "
+                "Authorization: Bearer header). Keyless/soft-auth sessions "
+                "cannot be service principals."
+            ),
+        })
+
     # Normalize project name (single source of truth: helpers.normalize_project)
     normalized_project = normalize_project(project)
     project = normalized_project
@@ -296,7 +328,10 @@ async def memory_start_session(
 
     try:
         db = get_mongo()
-        if db is not None:
+        # Principals skip the ENTIRE registry block: no registered_agents
+        # auto-register, no agent_directory upsert, no aliases — invisible by
+        # construction (no row exists to filter out of any roster surface).
+        if db is not None and not principal:
             registered_project = db.projects.find_one({"name": normalized_project})
 
             # Path-to-identity: if instance is unknown and working_directory provided,
@@ -469,6 +504,10 @@ async def memory_start_session(
         "tmux_target": tmux_target,
         "role": _auth_role,
         "allowed_projects": _auth_projects,
+        # Mechanism A: active_sessions is the auth carrier so a principal MUST
+        # have an entry, but every session-keyed enumerator (get_active_work,
+        # the other_claudes briefing block) filters on this flag.
+        "is_principal": principal,
     }
 
     # Phase C2 inbox auth: bind this app-session to the underlying MCP
@@ -487,7 +526,9 @@ async def memory_start_session(
     # the agent is plausibly being supervised.
     try:
         db_for_recency = get_mongo()
-        if db_for_recency is not None:
+        # Principals skip the recency bump too — it upserts an agent_directory
+        # row, which would undo the registry-skip above.
+        if db_for_recency is not None and not principal:
             db_for_recency.agent_directory.update_one(
                 {"project": project, "instance": claude_instance},
                 {"$set": {"last_human_interaction": utc_now_iso(), "last_seen": utc_now_iso()}},
@@ -560,10 +601,14 @@ async def memory_start_session(
     except Exception:
         pass
 
-    # Active work by other Claudes (DYNAMIC)
+    # Active work by other Claudes (DYNAMIC). Principal sessions are filtered
+    # here — this briefing block enumerates active_sessions directly, making it
+    # the 4th enumeration surface alongside list_agents/standup/get_active_work
+    # (the spec's code map listed three; this one is session-keyed like
+    # get_active_work).
     _other_active = []
     for sid, info in active_sessions.items():
-        if sid != session_id:
+        if sid != session_id and not info.get("is_principal"):
             _other_active.append(f"{info['claude_instance']}@{info['project']}: {info['task'][:50]}")
             if len(_other_active) >= 20:
                 break
@@ -685,7 +730,8 @@ async def memory_start_session(
     try:
         from shared_memory.audit import log_audit
         log_audit("session.start", claude_instance, project,
-                  {"task": task_description, "worker": _is_worker, "role": _auth_role},
+                  {"task": task_description, "worker": _is_worker, "role": _auth_role,
+                   "principal": principal},
                   session_id)
     except Exception:
         pass
