@@ -219,7 +219,7 @@ async def memory_project(
         sunset: For add_agent/update_agent on temp agents — a date or milestone
             string marking when the agent is expected to retire (e.g.
             "2026-06-30" or "post-launch"). Tracking only; decommission is a
-            separate (future) action.
+            separate action (see decommission).
         purpose: For add_agent/update_agent — a short why-this-agent-exists note,
             useful for temp agents whose reason for being is time-bounded.
     """
@@ -229,10 +229,19 @@ async def memory_project(
 
     session_info = active_sessions[session_id]
     caller = session_info.get("claude_instance", "unknown")
+    caller_role = session_info.get("role", "agent")
 
     db = get_mongo()
     if db is None:
         return json.dumps({"error": "MongoDB unavailable"})
+
+    def _caller_is_admin(pn: str) -> bool:
+        # Owner/admin ROLE bypasses the per-project admins list (Tom-approved
+        # 2026-07-12): the auth matrix already trusts these roles with
+        # admin.write (key minting, renames), so name-scoping roster actions
+        # below that was an inconsistency, not a boundary. Name-listed admins
+        # (and IMPLICIT_ADMIN) continue to work for agent-tier sessions.
+        return caller_role in ("admin", "owner") or _is_project_admin(db, pn, caller)
 
     now = utc_now()
 
@@ -286,7 +295,7 @@ async def memory_project(
 
         project_name = name.lower().replace("-", "_").replace(" ", "_")
 
-        if not _is_project_admin(db, project_name, caller):
+        if not _caller_is_admin(project_name):
             return json.dumps({"error": f"Permission denied. Only project admins can set the owner. You are '{caller}'."})
 
         result = db.projects.update_one(
@@ -362,7 +371,7 @@ async def memory_project(
         project_name = name.lower().replace("-", "_").replace(" ", "_")
 
         # Only human or project admins can delete
-        if not _is_project_admin(db, project_name, caller):
+        if not _caller_is_admin(project_name):
             return json.dumps({"error": f"Permission denied. Only project admins can delete projects. You are '{caller}'."})
 
         result = db.projects.delete_one({"name": project_name})
@@ -391,7 +400,7 @@ async def memory_project(
             return json.dumps({"error": f"Project '{project_name}' not found. Create it first with action='create'."})
 
         # Admin check
-        if not _is_project_admin(db, project_name, caller):
+        if not _caller_is_admin(project_name):
             return json.dumps({"error": f"Permission denied. Only project admins can add agents. You are '{caller}'. Admins: {project.get('admins', [])}"})
 
         # Validate tier
@@ -445,7 +454,7 @@ async def memory_project(
         project_name = name.lower().replace("-", "_").replace(" ", "_")
 
         # Admin check
-        if not _is_project_admin(db, project_name, caller):
+        if not _caller_is_admin(project_name):
             return json.dumps({"error": f"Permission denied. Only project admins can remove agents. You are '{caller}'."})
 
         # Protect only a REAL coordinator (one that has actually opened a
@@ -486,7 +495,7 @@ async def memory_project(
         project_name = name.lower().replace("-", "_").replace(" ", "_")
 
         # Admin check
-        if not _is_project_admin(db, project_name, caller):
+        if not _caller_is_admin(project_name):
             return json.dumps({"error": f"Permission denied. Only project admins can update agents. You are '{caller}'."})
 
         existing = db.registered_agents.find_one({"project": project_name, "name": agent})
@@ -536,7 +545,7 @@ async def memory_project(
 
         project_name = name.lower().replace("-", "_").replace(" ", "_")
 
-        if not _is_project_admin(db, project_name, caller):
+        if not _caller_is_admin(project_name):
             return json.dumps({"error": f"Permission denied. Only project admins can decommission agents. You are '{caller}'."})
 
         row = db.registered_agents.find_one({"project": project_name, "name": agent})
