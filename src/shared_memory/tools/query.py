@@ -274,6 +274,23 @@ async def memory_query(
     results.sort(key=_sort_key)
     results = results[:limit]
 
+    # ── Facets inline delivery (design:memory-facets-v0 §consumer) ──
+    # Contract guarantee: when a result row's learning has facets, they ride
+    # the row itself — consumers (sub's rater) must never need a per-candidate
+    # get_by_id round-trip. Batched single find; absent rows stay absent (the
+    # facets container is optional forever). Best-effort by design.
+    try:
+        from shared_memory.facets import get_facets_for_ids
+        _facet_map = get_facets_for_ids(
+            get_mongo(), [r["id"] for r in results if str(r.get("id", "")).startswith("learning_")]
+        )
+        for r in results:
+            f = _facet_map.get(r.get("id"))
+            if f:
+                r["facets"] = f
+    except Exception:
+        pass
+
     # ── Preview-mode trim (backlog_6d5aa1a2849f) ──
     # After sort+limit, decide per-position whether to ship full content or
     # just a snippet. Top-N hits get content when `expand_top > 0`; rest get

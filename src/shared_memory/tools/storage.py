@@ -459,4 +459,13 @@ async def memory_record_learning(
                 "review for duplication or contradiction before relying on both. If this "
                 "supersedes one, mark it: memory_change_status(new_status='superseded')."
             )
+
+    # Write-time facets (design:memory-facets-v0): fire-and-forget extraction
+    # AFTER the write has landed — the response never waits on the model. When
+    # the claim gate ran above, the facet task reuses its cached claim.
+    from shared_memory import facets as facets_mod
+    if facets_mod.schedule_facet_extraction(
+        get_mongo(), collection, doc_id, title, details
+    ):
+        result["facets"] = "extraction scheduled"
     return json.dumps(result)
