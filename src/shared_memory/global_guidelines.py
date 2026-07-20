@@ -25,23 +25,17 @@ GLOBAL_GUIDELINES = [
     {
         "name": 'mandatory_memory_query',
         "priority": 3,
-        "rule": '''MEMORY FIRST — before guessing, failing, or asking. This applies to ALL work, not just "implementation tasks." BEFORE any of these actions, call memory_query and/or memory_find_function:
+        "rule": '''MEMORY FIRST — AT THE ARTIFACT. Call memory_query and/or memory_find_function at these five moments. Every trigger is an observable action — a thing you can watch yourself doing — NEVER a feeling of uncertainty:
 
-(1) Before writing code, SQL, build commands, or deploy scripts
-(2) Before asking the user how to do something (build steps, credentials, paths, processes)
-(3) Before assuming a path, column name, table name, config value, or command syntax
-(4) Before debugging something that "doesn't work" — someone may have hit the same issue
-(5) Before starting any task assigned via backlog or message
+(1) ABOUT TO RUN: before executing a build, SQL, deploy, or config command — the exact procedure is likely recorded.
+(2) ABOUT TO SEND: before sending a message that asserts a factual claim about system behavior or state you did not verify THIS session — query the claim's topic first. Asides and rationale sentences count the same as conclusions: recent cross-project misassertions all traveled as asides attached to routing messages, not as conclusions anyone scrutinised.
+(3) ABOUT TO PROBE: before empirically probing a DESIGNED subsystem to explain its behavior (SSH, logs, DB, grep) — pull its design and prior learnings first. Live symptoms are ambiguous without the design in hand; "reading reality" is not exempt.
+(4) ABOUT TO RECORD: before recording a learning that contradicts, supersedes, or surprises — query first. The server's write-time gate backstops this trigger, but the gate is advisory; the query is still yours.
+(5) ABOUT TO ASK: before asking the user for build steps, credentials, paths, or process — they are probably recorded.
 
-The knowledge base has 200+ learnings covering: build processes, signing configs, deployment steps, database schemas, API gotchas, debug solutions, and platform-specific workarounds. If you skip this step and then waste time on trial-and-error, or ask the user something already recorded, that is a failure.
+The knowledge base has 200+ learnings covering build processes, signing configs, deployment steps, database schemas, API gotchas, debug solutions, and platform-specific workarounds. Treat it like a senior teammate you would never bypass for trial-and-error.
 
-Common failures this rule prevents:
-- Mobile agent guessing build commands instead of querying "mobile build release" (exact commands are stored)
-- Server agent guessing SQL column names instead of checking db: specs (all 129 tables are stored)
-- Any agent asking the user for credentials/paths that are already in memory
-- Any agent re-debugging an issue another agent already solved
-
-Think of it this way: memory_query is your senior teammate. You wouldn't skip asking a teammate and go straight to trial-and-error. Treat the knowledge base the same way.''',
+WHY THE TRIGGERS CHANGED (2026-07-20): the old rule fired on "before you guess" — and nobody ever experiences themselves guessing. Two rules with that trigger shape failed on the identical failure signature (2026-07 mesh-offline misdiagnosis; 2026-07-20 parked-agent rederivation) even though one of them named the failure precisely. Rules that fire on an inspectable artifact get followed (db_write_safety, anti_sycophancy); rules that ask you to detect an absence do not. The former memory_first_designed_system rule is MERGED into trigger (3) — do not re-add it separately.''',
     },
     {
         "name": 'topic_scoped_parking',
@@ -96,7 +90,7 @@ RATIONALE: Agents consistently skip function registration and learning recording
     {
         "name": 'session_length_discipline',
         "priority": 8,
-        "rule": '''Park at the right time, not at the wrong time. With 1M context (Opus 4.7 [1m]) you have far more headroom than older models — quality degradation is gradual, not sudden. The primary park signal is TASK COMPLETION at a clean stopping point, not raw token count or exchange count.
+        "rule": '''Park at the right time, not at the wrong time. On 1M-context models you have far more headroom than older 200K-context models — quality degradation is gradual, not sudden. The primary park signal is TASK COMPLETION at a clean stopping point, not raw token count or exchange count.
 
 Concrete bands:
 - Under ~500K tokens used: keep working if you have a natural next step. Don't park mid-task to "preserve context." Don't anchor on the old "100 exchanges" or "after 1-3 tasks" rules — those were calibrated to 200K context, not 1M. The 5x context window IS an excuse for ~3x longer sessions when the work is coherent.
