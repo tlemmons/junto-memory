@@ -734,6 +734,19 @@ async def memory_start_session(
         output["skills"] = _skills_block
     if _patterns_titles:
         output["patterns"] = _patterns_titles
+    # Volatile-snapshot framing (backlog_940b9f9c66e1, coordinator@nimbus
+    # msg_56ca0826b5e9): live-state sections preloaded here read as knowledge
+    # rather than as a point-in-time snapshot, and get re-asserted as current
+    # hours later. Label them so the consuming agent knows to re-pull.
+    _has_volatile = bool(_other_active or _component_peers or _relevant_locks
+                         or _signals or _blocking)
+    if _has_volatile:
+        output["volatile_snapshot_note"] = (
+            f"SNAPSHOT AS OF {utc_now_iso()} — other_claudes, component_peers, "
+            "relevant_locks, signals, and blocking_others are LIVE STATE, not "
+            "knowledge. Re-pull (memory_get_active_work / memory_get_locks) "
+            "before asserting any of them later in your session."
+        )
     if _other_active:
         output["other_claudes"] = _other_active
     if _component_peers:

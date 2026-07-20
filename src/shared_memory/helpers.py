@@ -12,6 +12,7 @@ from shared_memory.config import (
     DEFAULT_EXPIRY_DAYS,
     OVERLAP_WINDOW_HOURS,
     PROJECT_PREFIX,
+    SESSION_IDLE_HOURS,
     SESSION_TTL_DAYS,
     SHARED_PREFIX,
     SIGNAL_RETENTION_HOURS,
@@ -194,11 +195,17 @@ def check_session(session_id: str) -> bool:
 
 
 def require_session(session_id: Optional[str]) -> str:
-    """Validate session exists, return error message if not."""
+    """Validate session exists, return error message if not.
+
+    On success, touches the session's last_activity so idle-expiry
+    (cleanup_stale_sessions) measures real inactivity — any authenticated
+    tool call counts as activity, not just update_work/heartbeat.
+    """
     if not session_id:
         return "ERROR: No session_id provided. You must call memory_start_session first and include the returned session_id in all subsequent calls."
     if not check_session(session_id):
         return f"ERROR: Session '{session_id}' not found. Call memory_start_session first to register your session."
+    active_sessions[session_id]["last_activity"] = utc_now_iso()
     return ""
 
 
@@ -389,13 +396,57 @@ def release_session_locks(session_id: str) -> List[str]:
     return released
 
 
+def _sids_with_live_subscription() -> set:
+    """App session ids that hold at least one live inbox SSE subscription.
+
+    Inverts mcp_session_to_app against the union of inbox_subscriptions
+    buckets. Best-effort: any failure returns the empty set, which only makes
+    idle-expiry MORE conservative callers-side when paired with `discard`
+    semantics — callers must treat membership as \"do not idle-expire\".
+    """
+    subscribed = set()
+    try:
+        from shared_memory.state import mcp_session_to_app
+        from shared_memory.tools.messaging import inbox_subscriptions
+        live_transports = set()
+        for bucket in inbox_subscriptions.values():
+            live_transports.update(bucket)
+        for transport, sid in mcp_session_to_app.items():
+            if transport in live_transports:
+                subscribed.add(sid)
+    except Exception:
+        pass
+    return subscribed
+
+
 def cleanup_stale_sessions():
-    """Remove sessions with no activity for SESSION_TTL_DAYS."""
+    """Expire stale sessions on two tiers (backlog_940b9f9c66e1):
+
+    1. Hard TTL: no activity for SESSION_TTL_DAYS (14d) — unconditional.
+    2. Idle expiry: no tool call for SESSION_IDLE_HOURS (default 6h, env
+       JUNTO_SESSION_IDLE_HOURS, 0 disables) AND no live inbox SSE
+       subscription. A subscribed-but-quiet plugin session is healthy and is
+       never idle-expired; a session whose process died (or whose socket
+       half-opened and got keepalive-pruned) has no subscription and goes.
+       require_session touches last_activity on every tool call, so tier 2
+       measures real inactivity.
+    """
     cutoff = utc_now() - timedelta(days=SESSION_TTL_DAYS)
+    idle_cutoff = (
+        utc_now() - timedelta(hours=SESSION_IDLE_HOURS)
+        if SESSION_IDLE_HOURS > 0 else None
+    )
+    subscribed_sids = _sids_with_live_subscription() if idle_cutoff else set()
     to_remove = []
     for sid, info in active_sessions.items():
         last_activity = parse_timestamp(info.get("last_activity", ""))
-        if last_activity and last_activity < cutoff:
+        if not last_activity:
+            continue
+        if last_activity < cutoff:
+            to_remove.append(sid)
+        elif (idle_cutoff is not None
+                and last_activity < idle_cutoff
+                and sid not in subscribed_sids):
             to_remove.append(sid)
     for sid in to_remove:
         # Release any locks held by this session
@@ -420,7 +471,8 @@ def cleanup_stale_sessions():
             pass
         del active_sessions[sid]
     if to_remove:
-        print(f"[MCP] Auto-expired {len(to_remove)} stale sessions (>{SESSION_TTL_DAYS} days idle)")
+        print(f"[MCP] Auto-expired {len(to_remove)} stale sessions "
+              f"(>{SESSION_TTL_DAYS}d TTL or >{SESSION_IDLE_HOURS}h idle with no live subscription)")
     return to_remove
 
 

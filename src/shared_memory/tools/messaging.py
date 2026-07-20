@@ -25,6 +25,7 @@ from shared_memory.config import (
     MESSAGE_INFO_TTL_HOURS,
     MESSAGE_PRIORITIES,
     MESSAGE_STATUSES,
+    NOTIFY_SEND_TIMEOUT,
     OBLIGATION_RESOLVE_ON_REPLY,
     SSE_KEEPALIVE_SECONDS,
     SSE_KEEPALIVE_SEND_TIMEOUT,
@@ -2191,13 +2192,23 @@ async def _notify_inbox(project: str, agent: str, packet: Dict[str, Any] = None)
         log.warning("inbox: cannot construct AnyUrl for %s", uri_str)
         return
 
+    async def _push_one(session: Any) -> None:
+        await session.send_resource_updated(url)
+        if packet is not None:
+            await _content_push(session, packet)
+
     dead: List[Any] = []
     for session in sessions:
         try:
-            await session.send_resource_updated(url)
-            if packet is not None:
-                await _content_push(session, packet)
-        except Exception as e:  # session closed / write end gone
+            # Per-send timeout (backlog_940b9f9c66e1): a half-open socket's
+            # write BLOCKS forever on the zero-buffer notification stream —
+            # the same failure the keepalive sweep guards against. Without
+            # this, one zombie subscriber wedges the loop and every LIVE
+            # subscriber after it in the list never receives the push
+            # (observed as delivered:false during active sessions on the
+            # work box). Timeout or transport error both mean "unusable".
+            await asyncio.wait_for(_push_one(session), timeout=NOTIFY_SEND_TIMEOUT)
+        except Exception as e:  # session closed / write end gone / stuck
             log.debug("inbox: drop dead subscriber for %s: %s", uri_str, e)
             dead.append(session)
 
