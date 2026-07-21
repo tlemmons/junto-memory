@@ -96,7 +96,8 @@ def _needs_facets(db, doc_id):
 
 
 async def _find_doc(chroma, doc_id, project=None):
-    """Locate (collection, title, details) for a doc id across collections."""
+    """Locate (collection, title, details, status) for a doc id across
+    collections."""
     for name in await _learning_collections(chroma, project):
         col = await chroma.get_collection(name)
         got = await col.get(ids=[doc_id], include=["documents", "metadatas"])
@@ -108,7 +109,7 @@ async def _find_doc(chroma, doc_id, project=None):
                 return None
             title = meta.get("title", "")
             details = claim_gate._strip_title_header(doc, title)
-            return col, title, details
+            return col, title, details, meta.get("status") or "active"
     return None
 
 
@@ -117,14 +118,25 @@ async def _process_one(db, chroma, doc_id, project=None):
     if not found:
         print(f"  {doc_id}: NOT FOUND in any collection")
         return None
-    col, title, details = found
+    col, title, details, status = found
     await facets._extract_and_store(db, col, doc_id, title, details)
     row = db[facets.FACETS_COLLECTION].find_one({"_id": doc_id})
     if not row:
         print(f"  {doc_id}: extraction produced no row (see server-side rules)")
         return None
+    # Status-gap fix (coordinator msg_2a7b44249fff): the targeted path — unlike
+    # batch mode — processes NON-ACTIVE docs deliberately (sub's A/B needs
+    # facets on historically-injected docs even if since superseded), but the
+    # row must SAY so, and downstream review/flagging must not re-litigate
+    # already-dispositioned docs.
+    if status != "active":
+        db[facets.FACETS_COLLECTION].update_one(
+            {"_id": doc_id}, {"$set": {"doc_status": status}}
+        )
+        row["doc_status"] = status
     print(f"  {doc_id}: operation={row.get('operation')} "
           f"shelf_life={row.get('shelf_life')} triggers={len(row.get('trigger', []))}"
+          f"{'  status=' + status if status != 'active' else ''}"
           f"  [{title[:60]}]")
     return row
 
@@ -210,8 +222,15 @@ async def main():
         ok = await run_probe(db, chroma)
         sys.exit(0 if ok else 1)
     if args.ids:
-        for doc_id in args.ids.split(","):
-            await _process_one(db, chroma, doc_id.strip(), args.project)
+        ids = [i.strip() for i in args.ids.split(",") if i.strip()]
+        if args.ids.startswith("@"):
+            ids = [line.strip() for line in open(args.ids[1:])
+                   if line.strip()]
+        for doc_id in ids:
+            if not _needs_facets(db, doc_id):
+                print(f"  {doc_id}: already faceted at {facets.FACETS_RECIPE_VERSION} — skip")
+                continue
+            await _process_one(db, chroma, doc_id, args.project)
         return
     if args.batch:
         await run_batch(db, chroma, args.batch, args.project, args.dry_run)
