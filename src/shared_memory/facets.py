@@ -194,6 +194,26 @@ async def _mirror_operation_to_chroma(collection, doc_id: str, operation: str) -
     await collection.update(ids=[doc_id], metadatas=[meta])
 
 
+def needs_extraction(db, doc_id: str) -> bool:
+    """True when a doc should be (re-)extracted by the MECHANICAL tier.
+
+    REVIEWED-ROW PRESERVATION (spec §operation-enum hard requirement): a row
+    carrying reviewed_by was judged by the strong-model tier — mechanical
+    re-extraction must NEVER touch it, regardless of recipe_version (a
+    recipe-mismatch re-extract would clobber judged shelf_life/trigger while
+    leaving the stale reviewed_by marker). Reviewed rows only change via a
+    new review pass.
+    """
+    if db is None:
+        return False
+    row = db[FACETS_COLLECTION].find_one({"_id": doc_id})
+    if row is None:
+        return True
+    if row.get("reviewed_by"):
+        return False
+    return row.get("recipe_version") != FACETS_RECIPE_VERSION
+
+
 def get_facets_for_ids(db, doc_ids: List[str]) -> Dict[str, Dict]:
     """Batched read for the delivery-surface guarantee (spec §consumer):
     memory_query attaches facets INLINE to result rows — consumers must never

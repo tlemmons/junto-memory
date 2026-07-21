@@ -91,8 +91,9 @@ async def _learning_collections(chroma, project=None):
 
 
 def _needs_facets(db, doc_id):
-    row = db[facets.FACETS_COLLECTION].find_one({"_id": doc_id})
-    return not row or row.get("recipe_version") != facets.FACETS_RECIPE_VERSION
+    # Delegates to the shared preservation-aware check: reviewed rows are
+    # NEVER re-extracted mechanically (facets.needs_extraction docstring).
+    return facets.needs_extraction(db, doc_id)
 
 
 async def _find_doc(chroma, doc_id, project=None):
