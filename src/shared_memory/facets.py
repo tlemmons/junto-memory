@@ -76,6 +76,16 @@ SHELF_LIFE_SYSTEM = (
     "behavior, constraints and formats: true until the code itself changes.\n"
     "Reply with ONLY one word: DURABLE or VOLATILE."
 )
+# Probe record 2026-07-21 (scripts/facets_backfill.py --probe): this v1
+# prompt scored volatile 3/3 (both pinned stale-diagnosis docs + same-day
+# correction — the spec's HARD pass condition) and durable 2/3. Two
+# alternative framings (evidence-test hardening; durable-default) both
+# DEGRADED durable recall to 1/3 without helping — iteration stopped to
+# avoid overfitting a 6-doc set. Documented residual bias: workaround-shaped
+# durable gotchas can mislabel volatile (~1/3), which only costs an
+# unnecessary verify-first framing — the SAFE direction. Durable-recall
+# improvement is the backfill CC agent's job (stronger model re-judge), not
+# prompt drift here.
 
 TRIGGER_SYSTEM = (
     "List the conditions under which a future engineer should look this note "
