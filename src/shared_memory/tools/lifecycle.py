@@ -177,25 +177,45 @@ async def memory_change_status(
     if project:
         project = normalize_project(project)
 
-    # Find the document
+    # Find the document. Scope resolution (learning_c5ea0608b8fe4c46,
+    # coordinator blocker msg_065a525bff50): when project is omitted, default
+    # to the SESSION's project first, then shared. The old shared-only
+    # fallback made an omitted arg silently narrow the search, so an
+    # in-project agent retiring its own project's doc got a hintless
+    # "not found" — indistinguishable from a missing doc, and it produced
+    # confident false conclusions fleet-wide. Cross-project writes stay
+    # explicit via project=.
+    candidates = []
     if project:
-        collection = await get_project_collection(chroma, project)
+        candidates.append((project, await get_project_collection(chroma, project)))
     else:
-        collection = None
+        session_project = active_sessions[session_id].get("project")
+        if session_project:
+            sp = normalize_project(session_project)
+            candidates.append((sp, await get_project_collection(chroma, sp)))
         for shared_name in ["patterns", "context"]:
-            shared = await get_shared_collection(chroma, shared_name)
-            result = await shared.get(ids=[doc_id])
-            if result["ids"]:
-                collection = shared
-                break
+            candidates.append((f"shared:{shared_name}",
+                               await get_shared_collection(chroma, shared_name)))
 
-        if not collection:
-            return json.dumps({"error": f"Document not found: {doc_id}"}, indent=2)
+    collection = result = None
+    searched = []
+    for label, col in candidates:
+        searched.append(label)
+        r = await col.get(ids=[doc_id], include=["documents", "metadatas"])
+        if r["ids"]:
+            collection, result = col, r
+            break
 
-    result = await collection.get(ids=[doc_id], include=["documents", "metadatas"])
-
-    if not result["ids"]:
-        return json.dumps({"error": f"Document not found: {doc_id}"}, indent=2)
+    if result is None:
+        return json.dumps({
+            "error": f"Document not found: {doc_id}",
+            "searched": searched,
+            "hint": ("Check the project parameter — an omitted or wrong "
+                     "project narrows the search and reads exactly like a "
+                     "missing doc. Pass project=<owning project> (docs are "
+                     "scoped to the project they were recorded in), or use "
+                     "memory_query() to locate the doc first."),
+        }, indent=2)
 
     # Update metadata
     meta = result["metadatas"][0]
