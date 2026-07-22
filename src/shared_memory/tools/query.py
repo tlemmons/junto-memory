@@ -185,6 +185,12 @@ async def memory_query(
                         "age": format_age(meta.get("updated") or meta.get("created")),
                         "content": doc,
                         "access_count": meta.get("access_count", 0),
+                        # Creation identity (ratified authored_by v1.1.0,
+                        # msg_96c9f7fc73ee): the claude_instance stamped at
+                        # record_learning/store time, never rewritten by any
+                        # update path. None when the doc predates identity
+                        # capture — consumers fail open on null.
+                        "authored_by": meta.get("claude_instance"),
                         "warning": warning if warning else None
                     })
 
@@ -244,6 +250,7 @@ async def memory_query(
                             "age": format_age(meta.get("updated") or meta.get("created")),
                             "content": doc[:500] + "..." if len(doc) > 500 else doc,
                             "access_count": meta.get("access_count", 0),
+                            "authored_by": meta.get("claude_instance"),
                             "warning": staleness if staleness else None
                         })
 
