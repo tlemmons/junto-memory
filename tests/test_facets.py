@@ -1,4 +1,4 @@
-"""Write-time facets (design:memory-facets-v0 v0.3.0).
+"""Write-time facets (design:memory-facets-v0 v0.4.0).
 
 Pins the contract-load-bearing behaviors:
   1. Dormant by default — no env knob, no task scheduled, no response field.

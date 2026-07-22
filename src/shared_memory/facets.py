@@ -1,4 +1,4 @@
-"""Write-time facets on learnings (design:memory-facets-v0 v0.3.0).
+"""Write-time facets on learnings (design:memory-facets-v0 v0.4.0).
 
 Four structured fields extracted once at write time so retrieval consumers
 (sub's rater, the future task-declared preload, plain memory_query readers)
@@ -7,8 +7,9 @@ get indexing signal a topic-embedding cannot carry:
   claim      one-sentence assertion — interface:claim-extraction-v0 v1.0.2
              VERBATIM, shared claim cache (`learning_claims`) with the
              write-time gate; never re-extracted when the gate already did.
-  operation  activity class, closed enum (PROVISIONAL per spec §operation-enum:
-             diagnose | deploy | config | build | query | process); no-match
+  operation  activity class, closed enum (RATIFIED at 8 per spec
+             §operation-enum, msg_1a50fa44207e: diagnose | deploy | config |
+             build | query | process | decision | reference); no-match
              → omitted.
   trigger    ≤3 applies-when conditions, free text, format convention
              "when <observable condition>" / "before <action> on <object>".
@@ -46,11 +47,14 @@ from shared_memory import claim_gate
 logger = logging.getLogger(__name__)
 
 # Bump with spec §facets changes; a mismatch marks a row for backfill re-run.
-FACETS_RECIPE_VERSION = "0.3.0"
+FACETS_RECIPE_VERSION = "0.4.0"
 
 FACETS_COLLECTION = "learning_facets"
 
-OPERATION_ENUM = ("diagnose", "deploy", "config", "build", "query", "process")
+OPERATION_ENUM = (
+    "diagnose", "deploy", "config", "build", "query", "process",
+    "decision", "reference",
+)
 
 OPERATION_SYSTEM = (
     "Classify the primary activity this engineering note is about, as exactly "
@@ -61,6 +65,9 @@ OPERATION_SYSTEM = (
     "build — implementing code, features, schemas\n"
     "query — looking up, reading, searching data or docs\n"
     "process — workflow, coordination, procedure, policy\n"
+    "decision — a ruling, choice, or standing directive that was decided\n"
+    "reference — an architecture map, survey, or decision-support overview "
+    "with no verdict\n"
     "Reply with ONLY the one word. If none fits, reply NONE."
 )
 
