@@ -45,9 +45,12 @@ RULES
 - Write detail to FILES; your final return text is ONE line of counts
   (e.g. "50 docs, 50 rows, 2 enum-misses, 3 pair verdicts"). Context stays flat.
 - No mongo writes unless your prompt explicitly says COMMIT mode — the orchestrator
-  applies your JSONL. In COMMIT mode stamp rows exactly:
-  {recipe_version: "0.4.0-librarian", model: "claude-librarian", reviewed_by: "librarian",
-   reviewed_at: <iso now>, extracted_at: <iso now>} — via upsert on _id=doc_id, and NEVER
-  overwrite a row already carrying reviewed_by.
+  applies your JSONL. In COMMIT mode the row schema is EXACTLY these fields and no
+  others (existing corpus rows have this shape; do not add doc_id or anything else):
+  {_id: <doc_id>, claim, operation, trigger, shelf_life,
+   recipe_version: "0.4.0-librarian", model: "claude-librarian", reviewed_by: "librarian",
+   reviewed_at: <iso now>, extracted_at: <iso now>} — via upsert on _id, and NEVER
+  overwrite a row already carrying reviewed_by. (The JSONL export uses doc_id instead
+  of _id; the mongo row does not carry doc_id.)
 - Work from the slice file only; do not query the memory server for extra context.
 - temp-0 mindset: same doc should get the same facets on a re-run.
