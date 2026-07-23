@@ -289,6 +289,49 @@ def _add_lane_fields(entry: Dict[str, Any]) -> None:
     entry["tier"] = tier
 
 
+def _message_entry(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Full single-message wire entry, lane fields stamped.
+
+    Shared by the memory_get_messages message_id branch and memory_get_by_id's
+    msg_* dispatch (backlog_f6f950b3b4ce) so the two single-message surfaces
+    cannot diverge in shape.
+    """
+    entry = {
+        "id": doc["_id"],
+        "from": doc.get("from_instance", doc.get("from", "?")),
+        "from_project": doc.get("from_project", ""),
+        "to": doc.get("to_instance", doc.get("to", "?")),
+        "to_project": doc.get("to_project", ""),
+        "category": doc.get("category", "info"),
+        "subject": doc.get("subject"),
+        "message": doc["message"],
+        "priority": doc.get("priority", "normal"),
+        "status": doc.get("status", "?"),
+        "obligation": doc.get("obligation"),
+        "component": doc.get("component"),
+        "owner": doc.get("owner"),
+        "claimed_at": doc["claimed_at"].isoformat() if hasattr(doc.get("claimed_at"), "isoformat") else doc.get("claimed_at"),
+        "expire_at": doc["expire_at"].isoformat() if hasattr(doc.get("expire_at"), "isoformat") else doc.get("expire_at"),
+        "created": doc["created_at"].isoformat() if doc.get("created_at") else (doc["created"].isoformat() if doc.get("created") else None),
+        "chain_depth": doc.get("chain_depth", 0),
+        "require_human": bool(doc.get("require_human", False)),
+        "user_originated": bool(doc.get("user_originated", False)),
+        "sent_by_human": bool(doc.get("sent_by_human", False)),
+        "human_interacted": bool(doc.get("human_interacted", False)),
+        "push_suppressed": bool(doc.get("push_suppressed", False)),
+        "push_suppress_reason": doc.get("push_suppress_reason"),
+        "recency_bypass": bool(doc.get("recency_bypass", False)),
+        "is_system_notice": bool(doc.get("is_system_notice", False)),
+        "system_notice_kind": doc.get("system_notice_kind"),
+    }
+    if doc.get("reply_to"):
+        entry["reply_to"] = doc["reply_to"]
+    if doc.get("in_response_to"):
+        entry["in_response_to"] = doc["in_response_to"]
+    _add_lane_fields(entry)
+    return entry
+
+
 # Lanes-A within-page ordering rank (interface:lanes-a-server-wire-v0): an
 # un-engaged ask sorts above an engaged one, and both above everything cleared
 # or FYI. Anything not (action, 0/1) collapses to rank 2.
@@ -1147,40 +1190,7 @@ async def memory_get_messages(
         # addressed to someone else (don't mark read on their behalf).
         if doc.get("to_instance", doc.get("to")) in (my_instance, "*"):
             _mark_messages_read(db, [doc["_id"]], my_instance)
-        entry = {
-            "id": doc["_id"],
-            "from": doc.get("from_instance", doc.get("from", "?")),
-            "from_project": doc.get("from_project", ""),
-            "to": doc.get("to_instance", doc.get("to", "?")),
-            "to_project": doc.get("to_project", ""),
-            "category": doc.get("category", "info"),
-            "subject": doc.get("subject"),
-            "message": doc["message"],
-            "priority": doc.get("priority", "normal"),
-            "status": doc.get("status", "?"),
-            "obligation": doc.get("obligation"),
-            "component": doc.get("component"),
-            "owner": doc.get("owner"),
-            "claimed_at": doc["claimed_at"].isoformat() if hasattr(doc.get("claimed_at"), "isoformat") else doc.get("claimed_at"),
-            "expire_at": doc["expire_at"].isoformat() if hasattr(doc.get("expire_at"), "isoformat") else doc.get("expire_at"),
-            "created": doc["created_at"].isoformat() if doc.get("created_at") else (doc["created"].isoformat() if doc.get("created") else None),
-            "chain_depth": doc.get("chain_depth", 0),
-            "require_human": bool(doc.get("require_human", False)),
-            "user_originated": bool(doc.get("user_originated", False)),
-            "sent_by_human": bool(doc.get("sent_by_human", False)),
-            "human_interacted": bool(doc.get("human_interacted", False)),
-            "push_suppressed": bool(doc.get("push_suppressed", False)),
-            "push_suppress_reason": doc.get("push_suppress_reason"),
-            "recency_bypass": bool(doc.get("recency_bypass", False)),
-            "is_system_notice": bool(doc.get("is_system_notice", False)),
-            "system_notice_kind": doc.get("system_notice_kind"),
-        }
-        if doc.get("reply_to"):
-            entry["reply_to"] = doc["reply_to"]
-        if doc.get("in_response_to"):
-            entry["in_response_to"] = doc["in_response_to"]
-        _add_lane_fields(entry)
-        return json.dumps({"count": 1, "messages": [entry]})
+        return json.dumps({"count": 1, "messages": [_message_entry(doc)]})
 
     # ── Querying for another agent's messages ──
     # Self-read (for_instance == my_instance) is always allowed.

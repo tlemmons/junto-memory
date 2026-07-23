@@ -331,10 +331,17 @@ async def memory_get_by_id(
     ctx: Context = None
 ) -> str:
     """
-    Retrieve a document by its exact ID.
+    Retrieve a document by its ID.
 
     Use this when you have a specific document ID (from memory_store, memory_query, etc.)
     and want to retrieve the full content.
+
+    Also accepts:
+    - Message IDs (msg_*) — returns the message in the same shape as
+      memory_get_messages(message_id=...), same permission rules.
+    - Unique ID prefixes of 12+ chars, with or without the type prefix
+      (e.g. "7cc0b78f0e53" or "learning_7cc0b78f0e53" for
+      "learning_7cc0b78f0e53b4bb"). Ambiguous prefixes return the candidates.
 
     Args:
         session_id: Your session ID
@@ -344,6 +351,56 @@ async def memory_get_by_id(
     error = require_session(session_id)
     if error:
         return error
+
+    # ── Message dispatch (backlog_f6f950b3b4ce) ──
+    # Messages live in Mongo, not Chroma. Same auth + read-marking semantics
+    # as memory_get_messages(message_id=...); entry shape shared via
+    # _message_entry so the two surfaces cannot diverge.
+    if doc_id.startswith("msg_"):
+        from shared_memory.tools.messaging import _mark_messages_read, _message_entry
+        from shared_memory.tools.projects import _is_project_admin
+
+        db = get_mongo()
+        if db is None:
+            return json.dumps({"found": False, "id": doc_id, "error": "MongoDB unavailable"})
+        doc = db.messages.find_one({"_id": doc_id})
+        if not doc:
+            return json.dumps({
+                "found": False,
+                "id": doc_id,
+                "error": f"Message not found: {doc_id}"
+            }, indent=2)
+        session_info = active_sessions[session_id]
+        my_instance = session_info["claude_instance"]
+        my_project = normalize_project(session_info.get("project", ""))
+        my_role = session_info.get("role", "agent")
+        is_admin = (my_role in ("admin", "user")) or _is_project_admin(db, my_project, my_instance)
+        if not is_admin:
+            msg_to = doc.get("to_instance", doc.get("to", ""))
+            msg_project = doc.get("to_project", "")
+            if msg_to != my_instance and msg_to != "*":
+                return json.dumps({
+                    "found": False,
+                    "id": doc_id,
+                    "error": "Permission denied. Only admins/coordinators can view other agents' messages."
+                }, indent=2)
+            if msg_project and msg_project != my_project:
+                return json.dumps({
+                    "found": False,
+                    "id": doc_id,
+                    "error": "Permission denied. Message belongs to a different project."
+                }, indent=2)
+        # Body-pull marks read — canonical read of your own message; skip when
+        # an admin peeks at someone else's (don't mark read on their behalf).
+        if doc.get("to_instance", doc.get("to")) in (my_instance, "*"):
+            _mark_messages_read(db, [doc["_id"]], my_instance)
+        return json.dumps({
+            "found": True,
+            "id": doc_id,
+            "collection": "messages",
+            "type": "message",
+            "message": _message_entry(doc)
+        }, indent=2)
 
     chroma = await get_chroma()
 
@@ -366,7 +423,46 @@ async def memory_get_by_id(
             if col.name.startswith(PROJECT_PREFIX) or col.name.startswith(SHARED_PREFIX):
                 collections_to_search.append(col)
 
-    # Search for the document
+    async def _found_response(col, found_id: str, meta: dict, doc: str,
+                              resolved_from: str = None) -> str:
+        # Update access tracking
+        meta["access_count"] = meta.get("access_count", 0) + 1
+        meta["last_accessed"] = utc_now_iso()
+        await col.update(ids=[found_id], metadatas=[meta])
+
+        payload = {
+            "found": True,
+            "id": found_id,
+            "collection": col.name,
+            "title": meta.get("title", "Untitled"),
+            "type": meta.get("type", "unknown"),
+            "status": meta.get("status", "active"),
+            "project": meta.get("project", ""),
+            "tags": json.loads(meta.get("tags", "[]")),
+            "created": meta.get("created"),
+            "updated": meta.get("updated"),
+            # Creation identity (interface:recall-v0 §authored_by; the
+            # get_by_id surface gap was a proven false-clear trap,
+            # backlog_601d268dbe6b). Null = pre-identity-capture doc —
+            # consumers fail open.
+            "authored_by": meta.get("claude_instance"),
+            "content": doc
+        }
+        if resolved_from:
+            payload["resolved_from_prefix"] = resolved_from
+        # Facets ride the follow-through surface too (get_by_id is the
+        # documented pointer-chase for /recall). Best-effort, learnings only.
+        if found_id.startswith("learning_"):
+            try:
+                from shared_memory.facets import get_facets_for_ids
+                f = get_facets_for_ids(get_mongo(), [found_id]).get(found_id)
+                if f:
+                    payload["facets"] = f
+            except Exception:
+                pass
+        return json.dumps(payload, indent=2)
+
+    # Exact-ID lookup
     for col in collections_to_search:
         try:
             result = await col.get(
@@ -377,33 +473,61 @@ async def memory_get_by_id(
             if result["ids"]:
                 meta = result["metadatas"][0]
                 doc = result["documents"][0] if result["documents"] else ""
-
-                # Update access tracking
-                meta["access_count"] = meta.get("access_count", 0) + 1
-                meta["last_accessed"] = utc_now_iso()
-                await col.update(ids=[doc_id], metadatas=[meta])
-
-                return json.dumps({
-                    "found": True,
-                    "id": doc_id,
-                    "collection": col.name,
-                    "title": meta.get("title", "Untitled"),
-                    "type": meta.get("type", "unknown"),
-                    "status": meta.get("status", "active"),
-                    "project": meta.get("project", ""),
-                    "tags": json.loads(meta.get("tags", "[]")),
-                    "created": meta.get("created"),
-                    "updated": meta.get("updated"),
-                    "content": doc
-                }, indent=2)
+                return await _found_response(col, doc_id, meta, doc)
         except Exception:
             continue
+
+    # ── Prefix resolution fallback (backlog_fa06355f851b) ──
+    # Agents cite 12-char ID prefixes in messages/logs. On exact miss, scan
+    # ids (cheap, ids-only get) for a unique startswith match. A typed input
+    # ("learning_abc...") only matches that type; a bare hex input matches
+    # against each id's post-type tail. Minimum 12 chars of tail to keep
+    # matches meaningful.
+    tail = doc_id.split("_", 1)[1] if "_" in doc_id else doc_id
+    if len(tail) >= 12:
+        matches = {}  # full_id -> collection (dedupe: same id in 2 collections)
+        for col in collections_to_search:
+            try:
+                res = await col.get(include=[])
+                for fid in res["ids"]:
+                    if fid in matches:
+                        continue
+                    if "_" in doc_id:
+                        matched = fid.startswith(doc_id)
+                    else:
+                        ftail = fid.split("_", 1)[1] if "_" in fid else fid
+                        matched = fid.startswith(doc_id) or ftail.startswith(doc_id)
+                    if matched:
+                        matches[fid] = col
+            except Exception:
+                continue
+
+        if len(matches) == 1:
+            fid, col = next(iter(matches.items()))
+            try:
+                result = await col.get(ids=[fid], include=["metadatas", "documents"])
+                if result["ids"]:
+                    meta = result["metadatas"][0]
+                    doc = result["documents"][0] if result["documents"] else ""
+                    return await _found_response(col, fid, meta, doc,
+                                                 resolved_from=doc_id)
+            except Exception:
+                pass
+        elif len(matches) > 1:
+            return json.dumps({
+                "found": False,
+                "id": doc_id,
+                "error": f"Ambiguous prefix: {len(matches)} documents match",
+                "candidates": sorted(matches.keys())[:10]
+            }, indent=2)
 
     return json.dumps({
         "found": False,
         "id": doc_id,
         "error": f"Document not found with ID: {doc_id}",
-        "hint": "Try memory_query() to search by content, or check the project parameter"
+        "hint": "Try memory_query() to search by content, or check the project parameter. "
+                "ID prefixes need at least 12 chars (excluding the type prefix); "
+                "msg_* IDs resolve from the message store."
     }, indent=2)
 
 
