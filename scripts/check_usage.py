@@ -24,6 +24,13 @@ try:
     data = json.load(urllib.request.urlopen(req, timeout=15))
     five = int(data["five_hour"]["utilization"])
     week = int(data["seven_day"]["utilization"])
+    # The blended seven_day number is NOT the binding constraint when a
+    # model-scoped weekly limit exists (e.g. "Fable" weekly_scoped runs
+    # hotter than weekly_all while the waves are pure-Fable traffic).
+    # Throttle on the max of every weekly-group limit the account has.
+    for lim in data.get("limits") or []:
+        if lim.get("group") == "weekly" and lim.get("percent") is not None:
+            week = max(week, int(lim["percent"]))
     print(f"FIVE_HOUR={five} SEVEN_DAY={week}")
 except Exception as e:  # noqa: BLE001 — fail-safe: no reading, no spending
     print(f"usage check failed: {e}", file=sys.stderr)
