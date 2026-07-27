@@ -1,0 +1,58 @@
+{"id": "learning_66ce35d381dd62f3", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the function `get_mongo()` prints a connection "}
+{"id": "d5d30d9451fe1b17", "defects": ["truncated"], "claim_head": "1. Claude Code hooks cannot inject a new prompt or restart an idle session; they"}
+{"id": "dcde1cb838516490", "defects": ["meta_opener"], "claim_head": "The engineering note claims that when a team attributes a decision to an individ"}
+{"id": "learning_e6ee83da874c576d", "defects": ["truncated"], "claim_head": "The system consists of multiple distinct components with specific roles and conf"}
+{"id": "learning_68a67880613c8ff0", "defects": ["truncated"], "claim_head": "1. There are two MongoDB volumes on disk, with only one being the current active"}
+{"id": "learning_d380a93f6fb42909", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the ET schema migration was incomplete, resulti"}
+{"id": "learning_99895fa30823eb5b", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the ET MongoDB will be rebuilt from scratch usi"}
+{"id": "learning_8838110e269d6461", "defects": ["meta_opener"], "claim_head": "The note claims that specific MongoDB collections and a Docker volume must be ba"}
+{"id": "learning_454f290aeed7d8ec", "defects": ["truncated"], "claim_head": "1. The system recommends using Qwen3-14B in non-thinking/instruct mode for fast "}
+{"id": "learning_abf4db7b0c25054f", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the ET multi-agent team adopts Nimbus's steward"}
+{"id": "learning_76816d97b92fa968", "defects": ["truncated"], "claim_head": "1. The user_behavior_profiles collection does not exist in any database and is r"}
+{"id": "a39d32a69a155d1e", "defects": ["meta_opener"], "claim_head": "The engineering note claims that a locking mechanism for specifications involves"}
+{"id": "learning_c8ca3c0c0f934bcb", "defects": ["meta_opener"], "claim_head": "The engineering note claims that reindexing in Meili to drop hidden artwork requ"}
+{"id": "learning_26020563c9e656f0", "defects": ["meta_opener"], "claim_head": "The engineering note claims that a new Cloudflare DNS-01 token for nimbusdigital"}
+{"id": "learning_3128ef382d51127b", "defects": ["meta_opener"], "claim_head": "The engineering note claims that for version 26 frames, field repairs via the BL"}
+{"id": "learning_459d00dc2fb58a59", "defects": ["meta_opener"], "claim_head": "The engineering note claims that Loki error-log recency lags behind current proc"}
+{"id": "learning_4c5926e8e9a58c36", "defects": ["meta_opener"], "claim_head": "The engineering note claims that cutover-test.nimbusframe.net shares the same II"}
+{"id": "learning_5964a0b0ee85d6ae", "defects": ["meta_opener"], "claim_head": "The note claims that using `git merge-base --is-ancestor <sha> master` to check "}
+{"id": "learning_7c3e3dc1ede84456", "defects": ["meta_opener"], "claim_head": "The engineering note claims two distinct bugs affecting Meural frames: 1. A serv"}
+{"id": "learning_7ef51a6bbd54dd6b", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the repository structure for Frames/raspframe h"}
+{"id": "learning_86674a8441bb3ffd", "defects": ["meta_opener"], "claim_head": "The engineering note claims that when replacing WordPress with static files behi"}
+{"id": "learning_9c8342d2166808c5", "defects": ["meta_opener", "truncated"], "claim_head": "The engineering note claims that the online status of a system is determined by "}
+{"id": "learning_a00473ffb03f72ef", "defects": ["meta_opener"], "claim_head": "The engineering note claims that there is a potential issue where the web applic"}
+{"id": "learning_a03513d03589f496", "defects": ["meta_opener"], "claim_head": "The engineering note claims that while the server-side provisioning for standalo"}
+{"id": "learning_a28a800e98a52a54", "defects": ["meta_opener"], "claim_head": "The engineering note claims that all eight CRLF-armed frames are offline due to "}
+{"id": "learning_d0722601b1fbdc7b", "defects": ["meta_opener"], "claim_head": "The engineering note claims that when a wire payload collapses three distinct re"}
+{"id": "learning_d27ccc8266c7069c", "defects": ["meta_opener"], "claim_head": "The engineering note claims that a blanket update of the \"Normal\" cohort from ap"}
+{"id": "learning_d2abd3c54f6a957d", "defects": ["truncated"], "claim_head": "The system experiences a hang when attempting to restart Apache via the RTC on a"}
+{"id": "learning_dc4444c76cf0f22d", "defects": ["truncated"], "claim_head": "The system uses an HTTP endpoint to fetch playlists, requiring TCP or MQTT authe"}
+{"id": "learning_de6bf60bafbe13e8", "defects": ["meta_opener"], "claim_head": "The engineering note claims that there is no existing WooCommerce subscriber/car"}
+{"id": "learning_e52eb102bc44081e", "defects": ["meta_opener"], "claim_head": "The note claims that using the `spec_owner` field enforces a structural separati"}
+{"id": "learning_ec9442219251cc78", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the v26 self-expanding golden image can be adap"}
+{"id": "learning_f49af0f92fa34418", "defects": ["meta_opener"], "claim_head": "The engineering note claims that when comparing timestamps across different syst"}
+{"id": "learning_bba7cfe61edd0553", "defects": ["meta_opener"], "claim_head": "The engineering note claims that `learning_2c4930a2f7a2289e` incorrectly cites a"}
+{"id": "learning_225ebf9f1ec5a441", "defects": ["meta_opener"], "claim_head": "The engineering note claims that six failures occurred during a single session d"}
+{"id": "ed5251956e9a4ed2", "defects": ["meta_opener"], "claim_head": "The note claims that for long-term hobbyist projects managed by a technical owne"}
+{"id": "learning_671a2f384fa00140", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the handoff path for gtchurch's visual design i"}
+{"id": "learning_d86c3509fde33911", "defects": ["meta_opener"], "claim_head": "The engineering note claims that to download files from Google Drive onto a syst"}
+{"id": "learning_b9154b620c5394e0", "defects": ["meta_opener"], "claim_head": "The engineering note claims that images break under a fixed site URL when using "}
+{"id": "learning_af3ba263b4fb84b8", "defects": ["meta_opener"], "claim_head": "The engineering note claims that a redesign architecture using a PopularFX child"}
+{"id": "learning_9a3662945e591807", "defects": ["meta_opener"], "claim_head": "The engineering note claims that components.css should be built by porting styli"}
+{"id": "0260627400662751", "defects": ["meta_opener"], "claim_head": "The engineering note records several main learnings from a session, including DB"}
+{"id": "42ab525febd46f20", "defects": ["meta_opener"], "claim_head": "The engineering note claims that there are no new learnings in the current micro"}
+{"id": "learning_c676ca71bdc49168", "defects": ["meta_opener"], "claim_head": "The engineering note claims that Sichuan AI-Link Technology is commonly used as "}
+{"id": "learning_be76d1451905a2e6", "defects": ["meta_opener"], "claim_head": "The engineering note claims that when verifying gateway/router facts, it is esse"}
+{"id": "learning_ef377c4ef86c1788", "defects": ["meta_opener"], "claim_head": "The engineering note claims that auto-memory files can contain stale or inaccura"}
+{"id": "learning_56d47e2344ea4d87", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the `energy/save_prefs` websocket schema in HA "}
+{"id": "learning_e225e996840c4dc5", "defects": ["meta_opener"], "claim_head": "The engineering note claims that there is an ongoing issue with MQTT publish-tim"}
+{"id": "learning_70fa6c833ef7c041", "defects": ["meta_opener"], "claim_head": "The engineering note claims that sites with uId 2238 and 2423 successfully conta"}
+{"id": "learning_76bc9a6d2d0d20cb", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the server team designed a MeuralFix portrait s"}
+{"id": "learning_03496f563107c576", "defects": ["meta_opener"], "claim_head": "The engineering note claims that fresh builds of picFrameWeb require three manua"}
+{"id": "learning_da20f6cbae1fdea1", "defects": ["meta_opener"], "claim_head": "The engineering note describes the configuration and deployment of tiered alert "}
+{"id": "learning_665451748dd68213", "defects": ["meta_opener"], "claim_head": "The engineering note claims the following about the system: 1. The HA alert suit"}
+{"id": "learning_044ccd84834efd7b", "defects": ["truncated"], "claim_head": "1. Jessie's CA store does not include the ISRG Root X1 certificate, causing Let'"}
+{"id": "learning_b954b1ce52ffec32", "defects": ["meta_opener"], "claim_head": "The engineering note claims that Nimbus Frame #710acf54 is powered and within BL"}
+{"id": "learning_5dbe7f001e651c71", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the visible \"adopting user override\" warning on"}
+{"id": "learning_6394cdeb6dd9365a", "defects": ["meta_opener"], "claim_head": "The note claims that two paths for remote BLE WiFi provisioning of a v26 frame f"}
+{"id": "learning_1df4bb3a83f0ca2b", "defects": ["meta_opener"], "claim_head": "The note claims that content-ID is ineffective for identifying episodes on Blu-r"}
