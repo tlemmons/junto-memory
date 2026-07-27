@@ -99,6 +99,223 @@ async def _export_skills_payload(body, api_key, via_tunnel=False):
     return 200, result
 
 
+# Server-side cap on /recall query text (~2k tokens). Launcher windows should
+# stay under this; longer bodies are truncated, never rejected (contract).
+RECALL_QUERY_CAP_CHARS = 8000
+RECALL_SCOPE_TYPES = {
+    "all": None,
+    "learnings": ["learning"],
+    "specs": ["spec", "architecture"],
+    "functions": ["function_ref"],
+}
+
+
+def _recall_where(scope_types):
+    """Chroma where-clause for /recall. Multiple top-level keys in a Chroma
+    where dict are unreliable across versions (the 28570d4 family of silent
+    empty results) — always compose multi-condition filters with an explicit
+    $and."""
+    conds = [{"status": "active"}]
+    if scope_types:
+        conds.append({"type": {"$in": scope_types}})
+    return conds[0] if len(conds) == 1 else {"$and": conds}
+
+
+def _recall_one_line(claim, content):
+    """Header summary for a /recall snippet: claim facet when the doc has one
+    (the better assertion surface), else the content head. <= ~120 chars,
+    single line, never the body (contract: HEADERS ONLY)."""
+    src = (claim or "").strip() or " ".join((content or "").split())
+    src = " ".join(src.split())
+    return src[:117] + "..." if len(src) > 120 else src
+
+
+async def _recall_payload(body, api_key, via_tunnel=False):
+    """Pure request→response logic for POST /recall (interface:recall-v0
+    v1.1.2), split from the Starlette route for unit-testability — same
+    pattern as _export_skills_payload above. Returns (status_code, dict).
+
+    Auth mirrors Path B soft-auth exactly (see _export_skills_payload's
+    docstring; same gates, same order). The optional `agent` field is accepted
+    per contract but carries no extra tier data in soft-auth v0 — the key's
+    project list is the tenant gate.
+
+    Fail-loud split (contract §Errors): CHROMA is the load-bearing store —
+    any chroma failure is a 503/500, NEVER a 200 count:0 (a consumer cannot
+    tell "nothing relevant" from "backend down"). Mongo is best-effort here:
+    it only enriches one_line (claim facets) and resolves the floor config;
+    mongo-down degrades to content-head one_lines + code-default floor without
+    faking emptiness.
+
+    Deliberate non-behavior: no access-stat updates (recall fires every user
+    turn; inflating access_count from ambient scans would poison the stats the
+    pull path keeps)."""
+    import time as _time
+
+    from shared_memory import query_config
+    from shared_memory.auth import (
+        AUTH_ENABLED,
+        REQUIRE_KEY,
+        TUNNEL_REQUIRES_KEY,
+        check_project_access,
+        validate_api_key,
+    )
+    from shared_memory.helpers import (
+        get_project_collection,
+        get_shared_collection,
+        is_expired,
+        normalize_project,
+    )
+    from shared_memory.tools.query import calculate_relevance
+
+    t0 = _time.monotonic()
+
+    if not isinstance(body, dict):
+        return 400, {"error": "JSON body must be an object"}
+    project = (body.get("project") or "").strip()
+    if not project:
+        return 400, {"error": "'project' is required"}
+    qtext = (body.get("query") or "").strip()
+    if not qtext:
+        return 400, {"error": "'query' is required"}
+    qtext = qtext[:RECALL_QUERY_CAP_CHARS]
+
+    scope = body.get("scope") or "all"
+    if scope not in RECALL_SCOPE_TYPES:
+        return 400, {"error": f"'scope' must be one of {sorted(RECALL_SCOPE_TYPES)}"}
+
+    k_raw = body.get("k")
+    try:
+        k = 5 if k_raw is None else int(k_raw)
+    except (TypeError, ValueError):
+        return 400, {"error": "'k' must be an integer"}
+    k = max(1, min(k, 15))
+
+    threshold = body.get("threshold")
+    if threshold is not None:
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError):
+            return 400, {"error": "'threshold' must be a number"}
+        if not 0.0 <= threshold <= 1.0:
+            return 400, {"error": "'threshold' must be in [0, 1]"}
+
+    if AUTH_ENABLED:
+        if api_key:
+            key_info = validate_api_key(api_key)
+            if not key_info:
+                return 401, {"error": "invalid or revoked API key"}
+            if not check_project_access(key_info.get("projects", []), project):
+                return 403, {
+                    "error": f"API key lacks access to project '{project}'",
+                    "allowed_projects": key_info.get("projects", []),
+                }
+        elif REQUIRE_KEY or (TUNNEL_REQUIRES_KEY and via_tunnel):
+            return 401, {
+                "error": ("This server requires an API key. Provide an "
+                          "'Authorization: Bearer <key>' header."),
+                "auth_required": True,
+            }
+
+    project = normalize_project(project)
+
+    # One mongo resolution per request — it's consulted twice (floor config +
+    # claim facets) and a mongo outage must cost at most ONE connect timeout
+    # on this per-turn hot path.
+    mongo = get_mongo()
+
+    # Floor: explicit request threshold wins; else the three-layer config
+    # merge (code default 0.6 → server doc → project override).
+    floor = threshold
+    if floor is None:
+        floor = float(query_config.get_effective_config(
+            mongo, project)["recall_floor"])
+
+    # Chroma is load-bearing — fail loud, never mask an outage as count:0.
+    try:
+        chroma = await get_chroma()
+        if chroma is None:
+            raise RuntimeError("chroma client unavailable")
+    except Exception as e:
+        return 503, {"error": f"ChromaDB unavailable: {e}"}
+
+    where = _recall_where(RECALL_SCOPE_TYPES[scope])
+    candidates = []
+    embed_ms = None
+
+    async def _scan(collection, source, n):
+        nonlocal embed_ms
+        t_q = _time.monotonic()
+        got = await collection.query(query_texts=[qtext], n_results=n, where=where)
+        if embed_ms is None:
+            # First query call carries the embedding of qtext (MiniLM path);
+            # subsequent calls reuse chroma's per-call embed. Reported as the
+            # embedding-layer latency signal the contract asks for.
+            embed_ms = int((_time.monotonic() - t_q) * 1000)
+        if not got["documents"] or not got["documents"][0]:
+            return
+        for i, (doc, meta, dist) in enumerate(zip(
+                got["documents"][0], got["metadatas"][0], got["distances"][0])):
+            if is_expired(meta):
+                continue
+            score = calculate_relevance(dist)
+            if score < floor:
+                continue
+            candidates.append({
+                "id": got["ids"][0][i],
+                "type": meta.get("type"),
+                "title": meta.get("title", "Untitled"),
+                "score": round(score, 3),
+                "updated": meta.get("updated") or meta.get("created", ""),
+                "authored_by": meta.get("claude_instance"),
+                "_content": doc,
+                "_source": source,
+            })
+
+    try:
+        await _scan(await get_project_collection(chroma, project),
+                    f"project:{project}", k)
+        # Shared collections ride along exactly as memory_query's do (max 2
+        # each), at the SAME floor — 0.6 already sits above memory_query's
+        # shared bump (0.4).
+        for shared_name in ("patterns", "context"):
+            await _scan(await get_shared_collection(chroma, shared_name),
+                        f"shared:{shared_name}", min(2, k))
+    except Exception as e:
+        return 500, {"error": f"recall query failed: {e}"}
+
+    candidates.sort(key=lambda c: -c["score"])
+    candidates = candidates[:k]
+
+    # one_line: claim facet when present (mongo best-effort), else content head.
+    claims = {}
+    try:
+        from shared_memory.facets import get_facets_for_ids
+        claims = {
+            doc_id: f.get("claim")
+            for doc_id, f in get_facets_for_ids(
+                mongo, [c["id"] for c in candidates]).items()
+        }
+    except Exception:
+        pass
+
+    snippets = []
+    for c in candidates:
+        content = c.pop("_content")
+        c.pop("_source")
+        c["one_line"] = _recall_one_line(claims.get(c["id"]), content)
+        snippets.append(c)
+
+    return 200, {
+        "project": project,
+        "count": len(snippets),
+        "floor": floor,
+        "took_ms": int((_time.monotonic() - t0) * 1000),
+        "embed_ms": embed_ms if embed_ms is not None else 0,
+        "snippets": snippets,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Shared Memory MCP Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
@@ -406,6 +623,33 @@ def main():
             return JSONResponse({"error": "invalid or missing JSON body"}, status_code=400)
 
         status_code, payload = await _export_skills_payload(
+            body, get_header_api_key(), get_via_tunnel())
+        return JSONResponse(payload, status_code=status_code)
+
+    # Plain HTTP alongside /health and /export-skills — NO MCP handshake.
+    # Ambient associative recall: launcher UserPromptSubmit hooks POST the
+    # rolling conversation window each turn; response is threshold-gated
+    # HEADERS ONLY (never bodies) — the agent pulls the 0-1 that bite via
+    # memory_get_by_id. Contract: interface:recall-v0 v1.1.2 (FROZEN shape).
+    @mcp.custom_route("/recall", methods=["POST"])
+    async def recall_rest(request):
+        """Body (JSON): {project REQUIRED, query REQUIRED, agent?, k? (1-15,
+        default 5), threshold? ([0,1]; omit → recall_floor config, default
+        0.6), scope? (learnings|specs|functions|all)}.
+        Returns 200 {project, count, floor, took_ms, embed_ms, snippets:[
+        {id, type, title, one_line, score, updated, authored_by}]}.
+        Errors: 400 bad params · 401/403 per soft-auth · 503/500 backend
+        outage (fail loud — count:0 is NEVER returned on an outage)."""
+        from starlette.responses import JSONResponse
+
+        from shared_memory.auth import get_header_api_key, get_via_tunnel
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid or missing JSON body"}, status_code=400)
+
+        status_code, payload = await _recall_payload(
             body, get_header_api_key(), get_via_tunnel())
         return JSONResponse(payload, status_code=status_code)
 
