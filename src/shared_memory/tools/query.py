@@ -68,6 +68,16 @@ async def memory_query(
     - Are there known patterns or gotchas?
     - What decisions were made about this area?
 
+    FRESHNESS DISCIPLINE (relocated from session guidelines): results rank by
+    text relevance, NOT recency — check the age field on every result; prefer
+    newer when several cover one topic; verify anything older than ~30 days
+    against reality before acting on it (results carry staleness warnings).
+    Handoffs older than 14 days are noise — flag them for archival. If a
+    result is wrong or outdated and it's yours (or a simple factual fix),
+    memory_change_status(new_status="superseded") + record the correction; if
+    it's another agent's spec/decision, message their project coordinator
+    rather than leaving it for the next reader.
+
     Args:
         session_id: Your session ID
         query: Natural language query

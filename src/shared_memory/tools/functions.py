@@ -68,6 +68,11 @@ async def memory_register_function(
     """
     Register a function for AI-optimized reference.
 
+    Call this AFTER creating or significantly modifying any function: name,
+    file:LINE, purpose, gotchas (include `code` when behavior is non-obvious).
+    Unregistered functions force the next agent to re-read entire files —
+    touching 3+ functions without registering them is technical debt.
+
     MINIMAL INPUT - just register what you know, librarian enriches the rest.
 
     For simple functions:
@@ -259,6 +264,10 @@ async def memory_find_function(
 ) -> str:
     """
     Find functions by purpose, name, or description.
+
+    Call this BEFORE implementing ANY function — 200+ are registered and most
+    of what you'd write probably exists. Skipping this check produces
+    duplicates the next agent has to reconcile.
 
     Use this BEFORE implementing something to check:
     - Does a function for this already exist?

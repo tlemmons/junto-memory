@@ -47,6 +47,35 @@ def get_guidelines_for_session(project: str = None) -> list:
     return guidelines
 
 
+def get_guidelines_version(db=None) -> int:
+    """Monotonic corpus version (design:guideline-trim-v0 instrumentation).
+
+    Bumped by any script/tool that mutates the guidelines corpus; stamped into
+    every session record at start so compliance data is attributable to the
+    exact block the agent held (trickle adoption becomes a natural experiment,
+    not a confound). 0 = pre-versioning corpus."""
+    if db is None:
+        db = get_mongo()
+    if db is None:
+        return 0
+    try:
+        doc = db.guidelines_meta.find_one({"_id": "version"})
+        return int(doc["value"]) if doc else 0
+    except Exception:
+        return 0
+
+
+def bump_guidelines_version(db, actor: str) -> int:
+    """Increment the corpus version. Call from any corpus mutation path."""
+    from shared_memory.helpers import utc_now
+    doc = db.guidelines_meta.find_one_and_update(
+        {"_id": "version"},
+        {"$inc": {"value": 1}, "$set": {"updated": utc_now(), "updated_by": actor}},
+        upsert=True, return_document=True,
+    )
+    return int(doc["value"]) if doc else 1
+
+
 @mcp.tool()
 async def memory_guidelines(
     action: str,

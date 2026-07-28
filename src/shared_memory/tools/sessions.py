@@ -652,13 +652,38 @@ async def memory_start_session(
     # Server-managed guidelines (STABLE per-project — biggest stable block)
     _guidelines_block = None
     try:
-        from shared_memory.tools.guidelines import get_guidelines_for_session
+        from shared_memory.tools.guidelines import (
+            get_guidelines_for_session,
+            get_guidelines_version,
+        )
         guidelines = get_guidelines_for_session(project)
         if guidelines:
+            _gv = get_guidelines_version()
             _guidelines_block = {
                 "instructions": "MANDATORY: Follow these rules for the entire session. They are authoritative.",
+                "version": _gv,
                 "rules": [g["rule"] for g in guidelines],
             }
+            # Stamp the corpus version the agent actually received. Sessions
+            # are otherwise in-process only, so this is a small append-only
+            # mongo log (TTL 30d) — the join surface for compliance canaries:
+            # (project, instance, ts) → which guideline block was held
+            # (design:guideline-trim-v0).
+            try:
+                active_sessions[session_id]["guidelines_version"] = _gv
+                _db = get_mongo()
+                if _db is not None:
+                    _db.session_starts.create_index(
+                        "ts", expireAfterSeconds=30 * 24 * 3600)
+                    _db.session_starts.insert_one({
+                        "session_id": session_id,
+                        "project": project,
+                        "instance": claude_instance,
+                        "ts": utc_now(),
+                        "guidelines_version": _gv,
+                    })
+            except Exception:
+                pass
     except Exception as e:
         print(f"[MCP] Guidelines fetch failed (non-fatal): {e}")
 

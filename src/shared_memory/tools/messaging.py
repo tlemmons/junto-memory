@@ -672,18 +672,39 @@ async def memory_send_message(
     next session start. Supports full lifecycle tracking: pending, delivered,
     received, completed, failed.
 
+    CATEGORY IS LOAD-BEARING — it sets the OBLIGATION (what you owe / are
+    owed), not visibility: since push-all-info-v0 EVERY message pushes (action
+    categories push full/header and PERSIST until cleared; info pushes a
+    header, carries NO obligation, ages out ~48h). Rules (relocated here from
+    the session guidelines, design:guideline-trim-v0):
+    (1) DON'T INFLATE — filing an FYI as task/question buys no visibility and
+        pollutes the action lane with an obligation that never clears.
+    (2) DON'T UNDER-CALL — if you need something BACK (answer, decision,
+        work), use an action category so it persists until cleared.
+    (3) REPLY, DON'T LET IT ROT — replying with in_response_to=<parent>
+        auto-clears question/review/contract; task/blocker stay OPEN until
+        explicitly marked done (memory_update_message_status).
+    (4) BROADCASTS (to='*') are info-lane only and project-scoped; an
+        action-category broadcast never clears — address named recipients for
+        group actions.
+    (5) SEND-BAR — every push costs the recipient a context line: don't
+        message what you can memory_query yourself; no empty acks or status
+        pings (silence is fine).
+    (6) Set human_interacted=True ONLY when a human-typed prompt is driving
+        this send; False on autopilot replies.
+
     Args:
         session_id: Your session ID
         to_instance: Target agent name (e.g., 'frontend', 'backend', or '*' for all)
         message: The note content
         priority: Note priority (urgent, normal, low)
-        category: Note category - determines how the recipient should handle it:
-            contract - exact format/spec that must be followed, no deviation
-            task - work assignment
-            question - needs a response
-            info - FYI, no action needed (default)
-            review - look at this and confirm or flag issues
-            blocker - STOP work until discussed with coordinator or user
+        category: Note category - determines the obligation it creates:
+            contract - request to change cross-team behavior/interface; needs ratify/amend/block
+            task - work assignment; stays open until explicitly marked done
+            question - needs an answer back; cleared by your reply
+            info - FYI, no action needed (default); header push, ages out ~48h
+            review - look at this and confirm or flag issues; cleared by your reply
+            blocker - sender is STOPPED until resolved (highest urgency)
         to_project: Target project (defaults to your project; use for cross-project notes)
         reply_to: Note ID this is replying to (for threading conversations)
         in_response_to: Message ID this is a programmatic auto-response to.

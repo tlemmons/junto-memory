@@ -111,7 +111,12 @@ def _resolve(skills_col, session_id: str, name_or_id: str, project: str):
     if name_or_id.startswith("skill_"):
         return skills_col.find_one({"_id": name_or_id})
     proj = normalize_project(project) if project else active_sessions[session_id].get("project")
-    return skills_col.find_one({"project": proj or "", "name": name_or_id})
+    doc = skills_col.find_one({"project": proj or "", "name": name_or_id})
+    if doc is None and proj:
+        # Shared fallback (design:guideline-trim-v0): fleet-wide skills like
+        # "parking" register once with project="" and resolve from any project.
+        doc = skills_col.find_one({"project": "", "name": name_or_id})
+    return doc
 
 
 @mcp.tool()

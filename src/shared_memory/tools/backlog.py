@@ -161,6 +161,10 @@ async def memory_list_backlog(
     """
     List backlog items with optional filters.
 
+    ALWAYS pass project and/or assigned_to — an unfiltered call returns many
+    items and floods your context (typical: project=YOUR_PROJECT,
+    assigned_to=YOUR_NAME).
+
     Args:
         session_id: Your session ID
         project: Filter by project (omit for all projects + shared)

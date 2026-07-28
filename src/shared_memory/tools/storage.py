@@ -333,6 +333,11 @@ async def memory_record_learning(
     - A non-obvious behavior
     - A gotcha or pitfall
     - A useful technique
+
+    When recording on a topic that already has an entry, UPDATE/SUPERSEDE the
+    existing one (memory_change_status) rather than creating a near-duplicate
+    — the write-time gate surfaces similar priors in this tool's response;
+    disposition them, don't ignore them.
     - Why something was done a certain way
 
     These help other Claudes avoid repeating your discovery process.
