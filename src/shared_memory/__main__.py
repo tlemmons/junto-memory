@@ -121,6 +121,25 @@ def _recall_where(scope_types):
     return conds[0] if len(conds) == 1 else {"$and": conds}
 
 
+# Handoffs older than this never surface in /recall. The hygiene guideline
+# already declares >14d handoffs noise; the first junto dogfood day confirmed
+# it empirically (5 stale-handoff injections on a routine coordination turn,
+# 0 pulled — backlog_4c670062534c). Fresh handoffs still surface: "what was
+# the last session doing" is a legitimate recall hit.
+RECALL_HANDOFF_MAX_AGE_DAYS = 14
+
+
+def _recall_stale_handoff(meta):
+    if meta.get("type") != "handoff":
+        return False
+    from shared_memory.helpers import parse_timestamp, utc_now
+    ts = parse_timestamp(meta.get("updated") or meta.get("created"))
+    if ts is None:
+        return True  # undateable handoff — treat as stale
+    from datetime import timedelta
+    return (utc_now() - ts) > timedelta(days=RECALL_HANDOFF_MAX_AGE_DAYS)
+
+
 def _recall_one_line(claim, content):
     """Header summary for a /recall snippet: claim facet when the doc has one
     (the better assertion surface), else the content head. <= ~120 chars,
@@ -257,6 +276,8 @@ async def _recall_payload(body, api_key, via_tunnel=False):
         for i, (doc, meta, dist) in enumerate(zip(
                 got["documents"][0], got["metadatas"][0], got["distances"][0])):
             if is_expired(meta):
+                continue
+            if _recall_stale_handoff(meta):
                 continue
             score = calculate_relevance(dist)
             if score < floor:

@@ -206,3 +206,24 @@ def test_expired_docs_skipped(stub, monkeypatch):
     monkeypatch.setattr(helpers, "is_expired", lambda meta: True)
     status, payload = _run(m._recall_payload({"project": "junto", "query": "x"}, None))
     assert status == 200 and payload["count"] == 0
+
+
+# --- stale-handoff age-gate ---------------------------------------------------
+def test_stale_handoffs_filtered_fresh_kept(stub, monkeypatch):
+    from datetime import timedelta
+    import shared_memory.helpers as h
+    now = h.utc_now()
+    fresh = (now - timedelta(days=3)).isoformat()
+    stale = (now - timedelta(days=45)).isoformat()
+    stub["proj"].rows = [
+        ("handoff_fresh", _meta(type="handoff", title="fresh handoff", updated=fresh), 0.4, "f"),
+        ("handoff_stale", _meta(type="handoff", title="stale handoff", updated=stale), 0.4, "s"),
+        ("handoff_undated", _meta(type="handoff", title="undated", updated="", created=""), 0.4, "u"),
+        ("learning_old_fine", _meta(title="old learning ok", updated=stale), 0.4, "l"),
+    ]
+    _, payload = _run(m._recall_payload({"project": "junto", "query": "x"}, None))
+    got = [s["id"] for s in payload["snippets"]]
+    assert "handoff_fresh" in got
+    assert "handoff_stale" not in got
+    assert "handoff_undated" not in got
+    assert "learning_old_fine" in got  # age-gate is handoff-only
