@@ -1,0 +1,1 @@
+9 docs, 9 rows committed (mongo upsert + JSONL), 0 enum-misses, 0 pair verdicts (empty pairs list).

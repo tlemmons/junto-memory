@@ -1,0 +1,1 @@
+50 docs, 50 rows committed to mongo (50 upserted, 0 skipped), 50 rows appended to bulk_032.rows.jsonl, 0 enum-misses, 0 pair verdicts (empty pairs list).

@@ -1,0 +1,1 @@
+50 docs, 50 rows (Mongo upserted 50, 0 previously-reviewed skips, JSONL 50), 0 enum-misses, 1 pair verdict (duplicate — canonical learning_ee2d5bdcb3e4e75b).

@@ -1,0 +1,1 @@
+1 doc, 1 row (committed to mongo + JSONL), 0 enum-misses, 0 pair verdicts.

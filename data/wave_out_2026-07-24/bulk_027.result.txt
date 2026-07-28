@@ -1,0 +1,1 @@
+50 docs, 50 rows committed to Mongo (50 upserted, 0 skipped-reviewed), 0 enum-misses, 1 pair verdict (supersede-chain).

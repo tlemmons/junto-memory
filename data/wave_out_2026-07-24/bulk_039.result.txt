@@ -1,0 +1,1 @@
+50 docs, 50 rows (50 mongo upserts, 0 reviewed-row conflicts), 0 enum-misses, 1 pair verdict (supersede-chain).

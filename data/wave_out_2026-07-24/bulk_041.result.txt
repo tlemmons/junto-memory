@@ -1,0 +1,1 @@
+7 docs, 7 rows (7 mongo upserts, 0 skipped), 0 enum-misses, 0 pair verdicts.

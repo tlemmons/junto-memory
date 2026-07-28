@@ -1,0 +1,1 @@
+50 docs, 50 rows committed (mongo 50 upserted / 0 reviewed-skips, JSONL 50), 1 enum-miss (32c479698238bf1a — null session log, operation omitted), 0 pair verdicts (empty pairs list; empty verdicts file created).

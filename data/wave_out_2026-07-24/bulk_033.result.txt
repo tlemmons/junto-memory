@@ -1,0 +1,1 @@
+50 docs, 50 rows, 50 mongo upserts (0 pre-reviewed skips), 0 enum-misses, 0 pair verdicts (slice had no pairs).

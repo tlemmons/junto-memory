@@ -1,0 +1,1 @@
+50 docs, 50 rows (all 50 committed to mongo learning_facets, 0 skipped-reviewed), 0 enum-misses, 0 pair verdicts.

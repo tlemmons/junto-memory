@@ -1,18 +1,3 @@
-{"id": "learning_66ce35d381dd62f3", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the function `get_mongo()` prints a connection "}
-{"id": "d5d30d9451fe1b17", "defects": ["truncated"], "claim_head": "1. Claude Code hooks cannot inject a new prompt or restart an idle session; they"}
-{"id": "dcde1cb838516490", "defects": ["meta_opener"], "claim_head": "The engineering note claims that when a team attributes a decision to an individ"}
-{"id": "learning_e6ee83da874c576d", "defects": ["truncated"], "claim_head": "The system consists of multiple distinct components with specific roles and conf"}
-{"id": "learning_68a67880613c8ff0", "defects": ["truncated"], "claim_head": "1. There are two MongoDB volumes on disk, with only one being the current active"}
-{"id": "learning_d380a93f6fb42909", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the ET schema migration was incomplete, resulti"}
-{"id": "learning_99895fa30823eb5b", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the ET MongoDB will be rebuilt from scratch usi"}
-{"id": "learning_8838110e269d6461", "defects": ["meta_opener"], "claim_head": "The note claims that specific MongoDB collections and a Docker volume must be ba"}
-{"id": "learning_454f290aeed7d8ec", "defects": ["truncated"], "claim_head": "1. The system recommends using Qwen3-14B in non-thinking/instruct mode for fast "}
-{"id": "learning_abf4db7b0c25054f", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the ET multi-agent team adopts Nimbus's steward"}
-{"id": "learning_76816d97b92fa968", "defects": ["truncated"], "claim_head": "1. The user_behavior_profiles collection does not exist in any database and is r"}
-{"id": "a39d32a69a155d1e", "defects": ["meta_opener"], "claim_head": "The engineering note claims that a locking mechanism for specifications involves"}
-{"id": "learning_c8ca3c0c0f934bcb", "defects": ["meta_opener"], "claim_head": "The engineering note claims that reindexing in Meili to drop hidden artwork requ"}
-{"id": "learning_26020563c9e656f0", "defects": ["meta_opener"], "claim_head": "The engineering note claims that a new Cloudflare DNS-01 token for nimbusdigital"}
-{"id": "learning_3128ef382d51127b", "defects": ["meta_opener"], "claim_head": "The engineering note claims that for version 26 frames, field repairs via the BL"}
 {"id": "learning_459d00dc2fb58a59", "defects": ["meta_opener"], "claim_head": "The engineering note claims that Loki error-log recency lags behind current proc"}
 {"id": "learning_4c5926e8e9a58c36", "defects": ["meta_opener"], "claim_head": "The engineering note claims that cutover-test.nimbusframe.net shares the same II"}
 {"id": "learning_5964a0b0ee85d6ae", "defects": ["meta_opener"], "claim_head": "The note claims that using `git merge-base --is-ancestor <sha> master` to check "}
@@ -56,3 +41,7 @@
 {"id": "learning_5dbe7f001e651c71", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the visible \"adopting user override\" warning on"}
 {"id": "learning_6394cdeb6dd9365a", "defects": ["meta_opener"], "claim_head": "The note claims that two paths for remote BLE WiFi provisioning of a v26 frame f"}
 {"id": "learning_1df4bb3a83f0ca2b", "defects": ["meta_opener"], "claim_head": "The note claims that content-ID is ineffective for identifying episodes on Blu-r"}
+{"id": "7cae8a97367da84c", "defects": ["meta_opener", "truncated"], "claim_head": "The note claims that: ... 7. Using memory_list (librarian 07-28)"}
+{"id": "learning_81daac471f9491e1", "defects": ["truncated"], "claim_head": "...registry is wiped during (librarian 07-28)"}
+{"id": "12006950ff76b181", "defects": ["meta_opener"], "claim_head": "The engineering note claims that... (librarian 07-28)"}
+{"id": "2daf05a6e25289c0", "defects": ["claim_misreads_source"], "claim_head": "says restart-wipe 'addressed by jobs team ensuring no duplicates' - source says no duplicate LEARNING was recorded (librarian 07-28)"}

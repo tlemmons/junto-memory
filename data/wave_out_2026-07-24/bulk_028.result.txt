@@ -1,0 +1,1 @@
+50 docs, 50 rows (50 Mongo upserts, 0 already-reviewed skips), 0 enum-misses, 0 pair verdicts (slice had an empty pairs list; verdicts file created empty).

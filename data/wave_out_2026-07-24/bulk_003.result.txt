@@ -1,0 +1,1 @@
+45 docs, 45 rows (45 mongo upserts, 0 skipped), 0 enum-misses, 6 pair verdicts (2 supersede-chain, 1 duplicate, 3 distinct).

@@ -1,0 +1,7 @@
+Done. Slice `bulk_037` committed successfully.
+
+**50 docs, 50 rows, 0 enum-misses, 50 mongo-upserts (learning_facets), 2 pair verdicts.**
+
+All 52 docs (50 slice + 2 pair-only) were fetched from Chroma. Each of the 50 slice docs got a facet row with exact COMMIT-mode schema (`_id, claim, operation, trigger, shelf_life, recipe_version, model, reviewed_by, reviewed_at, extracted_at`) upserted to Mongo `mcp_orchestrator.learning_facets`, mirrored as JSONL (with `doc_id`) to `bulk_037.rows.jsonl`. Every doc mapped cleanly to the 8-class enum, so no enum misses. None of the 50 already carried `reviewed_by`, so all 50 were upserted (none skipped).
+
+Both pairs judged **duplicate** with canonical `learning_cd38f56b13d2141e` — all three docs (`6991f0b1`, `6e8c1af6`, `cd38f56b`) state the same durable gotcha that the picFrameWeb.sln Release build fails on a pre-existing MSB4096 in the dead Azure Nimbus.ccproj and shouldn't be read as a broken master; the 2026-07-11 `cd38f56b` is the newest/richest (adds the PIPESTATUS masked-exit trap), so it's canonical. No doc statuses were changed.

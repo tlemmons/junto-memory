@@ -1,0 +1,844 @@
+[
+ {
+  "id": "learning_34d2c0c8a3fcf9a8",
+  "title": "OVH page slowness was missing MySQL indexes (resolved)",
+  "meta_keys": [
+   "claude_instance",
+   "created",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# OVH page slowness was missing MySQL indexes (resolved)\n\nTom reported OVH pages much slower than Azure. Root cause: MySQL tables lacked indexes that Azure SQL auto-tuning had created automatically. Indexes added, performance is mainly fixed. Azure SQL has auto-tuning indexes; MySQL does not \u2014 after any future table creation or migration, manually verify indexes exist."
+ },
+ {
+  "id": "learning_d86b8cb4c9faed87",
+  "title": "OVH cutover strategy: single IIS site, Azure as rollback, split later",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# OVH cutover strategy: single IIS site, Azure as rollback, split later\n\nTom decided (2026-04-12): Use single IIS site on abydos for cutover. No staging/prod split on OVH during transition. Azure remains available as rollback (DNS flip back in 60s with TTL at 60). Staging/prod separation on OVH comes later once stable and Azure is decommissioned. Rationale: dual-system complexity was the #1 source of wasted agent sessions \u2014 agents getting confused about which system to fix, building shims for both backends. 130 paying customers but Azure rollback covers the risk. Do NOT create a second IIS site on abydos before cutover."
+ },
+ {
+  "id": "learning_6653a159edec702b",
+  "title": "NimbusSync cutover: use 'full' not 'sync' \u2014 the null timestamp bug silently fails 112/127 tables on incremental runs",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# NimbusSync cutover: use 'full' not 'sync' \u2014 the null timestamp bug silently fails 112/127 tables on incremental runs\n\nThe cutover procedure spec calls for \"NimbusSync sync\" as first step of final cutover. This will silently fail on ~112 tables. The null timestamp bug (SchemaDiscovery.cs:77 defaults to \"ModifiedDate\" when column doesn't exist) means incremental sync queries WHERE [ModifiedDate] > @LastSync on tables without that column, throwing SqlException. The 'full' command always resets state first and works correctly. For the final cutover, use 'full' not 'sync'. The daily cron already uses 'full' so ongoing sync is fine. PlayListMedia orphan rows (users removed images from playlists) will persist after full sync \u2014 need manual reconciliation SQL: SELECT all PKs from Azure, DELETE from MySQL where not in Azure. ~44K orphan rows possible."
+ },
+ {
+  "id": "learning_b12068bc8151bebe",
+  "title": "OVH abydos deployed state verified 2026-04-13 \u2014 config is correct, app running",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# OVH abydos deployed state verified 2026-04-13 \u2014 config is correct, app running\n\nSSH verification of live abydos state on 2026-04-13:\n- MqttBrokerPassword = mqttServer (real password, not FROM_KEYVAULT)\n- ServerIdentifier = abydos-staging\n- LocalMediaBasePath = D:\\Media\n- Connection strings \u2192 MySQL 10.100.0.1:3306 (stargate via WireGuard)\n- Redis \u2192 10.100.0.1:6379\n- NimbusStorageConnectionString = empty in Web.config (blob eliminated for web tier)\n- NimbusService.exe.config still has Azure Storage key (for legacy media reads?)\n- ConfigGroups: 10 rows populated, MqttRouting: 8 rows all pointing to abydos-staging\n- IIS: NimbusStaging site running (nimbus-staging dir), NimbusProd site exists but empty dir\n- NimbusService: Running, Automatic start\n- w3wp.exe running (1 process)\n\nIMPORTANT: setup-ovh-webconfig.sh does NOT patch MqttBrokerPassword \u2014 the live config was manually patched outside the script. If the script is ever re-run from scratch, it will leave FROM_KEYVAULT and break the app. The script should be fixed to match reality, but it's not a cutover blocker since the deployed config is already correct.\n\nFor production cutover: MqttRouting ActiveServer values need updating from \"abydos-staging\" to match production ServerIdentifier. ConfigGroups Server column has \"frames\" for most groups and \"staging\" for bridge_Alpha \u2014 may need updating for production."
+ },
+ {
+  "id": "learning_4439d78d4f36e280",
+  "title": "nimbus.CrashReports: querying crash data from Azure SQL via gateway",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# nimbus.CrashReports: querying crash data from Azure SQL via gateway\n\nTable is nimbus.CrashReports (nimbus schema, not picFrame). Query via SSH to Azure gateway (ubuntu@10.7.0.1) using pymssql. Credentials in /opt/nimbusjobs/appsettings.json ConnectionStrings.NimbusDb. Password contains special chars ($!@) \u2014 must read from file inside Python, not pass through shell. The CrashReport endpoint (MobileController2.cs:1229) requires AuthFilter \u2014 UserId is set server-side from the auth token, not from the client payload."
+ },
+ {
+  "id": "learning_009ca55e5aec2d74",
+  "title": "NimbusSync skips tables without primary keys \u2014 GroupMedia, ProcessTokens, SystemConfig, Controls affected",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# NimbusSync skips tables without primary keys \u2014 GroupMedia, ProcessTokens, SystemConfig, Controls affected\n\nNimbusSync --dry-run reveals it skips any Azure SQL table without a primary key. Non-backup tables affected:\n\n- picFrame.GroupMedia \u2014 514 rows, used by frame groups. MANUALLY SYNCED 2026-04-13 via pymssql export from Azure gateway \u2192 MySQL import. Has AUTO_INCREMENT PK on MySQL (we created the table), but Azure SQL has NO PK, so NimbusSync will never sync it.\n- picFrame.ProcessTokens \u2014 deprecated, HybridLock is Redis-only. No impact.\n- picFrame.SystemConfig \u2014 3 rows manually created. Has unique index on `key` but no PK on Azure. NimbusSync skips it.\n- picFrame.Controls \u2014 12 rows on Azure, 5 imported (7 failed on duplicate unique names or null dates). Has PK on MySQL but not Azure.\n- inventory.Products \u2014 likely unused in web app.\n\nFor cutover: these tables need a one-time manual export/import since NimbusSync will never handle them. GroupMedia is the critical one \u2014 it controls what art frame groups see. The pymssql export script is at /tmp/export_groupmedia.py on the Azure gateway (10.7.0.1)."
+ },
+ {
+  "id": "learning_a5323e382289a6a7",
+  "title": "Loki + Grafana installed on stargate, Serilog logs flowing from abydos",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Loki + Grafana installed on stargate, Serilog logs flowing from abydos\n\nInstalled 2026-04-13:\n- Loki 3.4.2 at /usr/local/bin/loki, config at /etc/loki/config.yaml, data at /var/lib/loki, systemd service `loki`, port 3100\n- Grafana OSS at /usr/share/grafana, systemd service `grafana-server`, port 3000\n- Grafana default login: admin/admin (change on first login)\n- Loki added as default Grafana datasource\n\nConfig note: Loki 3.4 requires `delete_request_store: filesystem` when `retention_enabled: true` (config validation error without it).\n\nSerilog integration:\n- SerilogConfig.cs reads LokiUrl from env var NIMBUS_LOKI_URL \u2192 appSetting LokiUrl \u2192 fallback \"http://10.7.0.1:3100\"\n- OVH Web.config patched with `LokiUrl = http://10.100.0.1:3100` (stargate via WireGuard)\n- patch-ovh-config.ps1 updated to include LokiUrl for future deploys\n- Verified: logs flowing from abydos web-server to stargate Loki, queryable via API\n\nAccess:\n- Grafana: http://10.100.0.1:3000 (via WireGuard)\n- Loki API: http://10.100.0.1:3100 (via WireGuard)\n- Query errors: `curl \"http://10.100.0.1:3100/loki/api/v1/query_range?query={app=\\\"nimbus\\\",level=\\\"error\\\"}&start=START&end=END\"`\n\nFor Claude monitoring agent: query Loki API for level=error entries periodically. No SSH to abydos needed."
+ },
+ {
+  "id": "learning_c9585cd73728d87f",
+  "title": "Grafana admin password changed from default on stargate",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Grafana admin password changed from default on stargate\n\nGrafana on stargate (http://10.100.0.1:3000) \u2014 admin password changed from default \"admin\" to user-set password on 2026-04-13. Do not reset or change without user approval."
+ },
+ {
+  "id": "learning_9579ff8fbb4c58b5",
+  "title": "Branch consolidation 2026-04-13: master is now OVH code, azure branch preserves old master",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Branch consolidation 2026-04-13: master is now OVH code, azure branch preserves old master\n\nOn 2026-04-13, merged feature/mysql-migration into master (fast-forward, 50 commits, 171 files). Master is now the OVH/MySQL codebase. Created `azure` branch at commit 29287243 to preserve the old Azure-only master as a snapshot.\n\nImplications for all agents:\n- server-team works on master in nimbus-server/ (no more separate server-team-ovh)\n- The ovh/ worktree at C:\\code\\Nimbus\\ovh\\nimbus-server still exists on feature/mysql-migration \u2014 let current sessions finish, then remove\n- feature/mysql-migration branch can be kept or deleted \u2014 it's identical to master now\n- The `azure` branch is read-only archive. Do not develop on it.\n- deploy.sh on master now has OVH targets (ovh-staging, ovh-production)\n- All NimbusCommon locks should reference master, not feature/mysql-migration\n- CLAUDE.md branch discipline rules for server-team-ovh are now obsolete"
+ },
+ {
+  "id": "learning_3c458b3b91184c9c",
+  "title": "Android keystore password is T0mkatNB (no exclamation mark)",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Android keystore password is T0mkatNB (no exclamation mark)\n\nThe GoogleNimbus.keystore at C:\\Users\\tom\\OneDrive\\Citritech\\keys\\GoogleNimbus.keystore uses password T0mkatNB for both store and key (alias: nimbus). NOT T0mkatNB! \u2014 the exclamation mark causes jarsigner to fail with \"Keystore was tampered with, or password was incorrect\". The password also contains special chars that can get mangled by shell escaping \u2014 pass via -p:AndroidSigningStorePass=T0mkatNB (no quotes needed if no special chars)."
+ },
+ {
+  "id": "learning_50fc064ccd7387f9",
+  "title": "DateTime.Now\u2192UtcNow: 109 instances fixed across 46 files, remaining DateTime.Now is intentionally local",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# DateTime.Now\u2192UtcNow: 109 instances fixed across 46 files, remaining DateTime.Now is intentionally local\n\nCommit 55022131 (2026-04-13) replaced all DB/Redis-persisted DateTime.Now with DateTime.UtcNow. Remaining DateTime.Now instances in the codebase are intentionally local-time: in-memory cache TTLs, cookie expiry, ping measurements, display formatting, billing condition checks (comparisons, not writes), PayPal invoice_date (DateTime.Today \u2014 sends to external API, left as-is).\n\nKey areas fixed: MqttStatusHandler (LastConnection, CommTime), MqttOnlineStatusHandler (LastConnection + staleness comparison), Frame.AddOnlineFrame (CommTime), PicFrame.cs (commTime, LastGroupEventTime, LastConnection), all IPN handlers (5 files), UserAccount (LastLogin, purchases, subscriptions), SearchGenerator (22 instances of Built timestamps), all UserEmail.AddedDate sites, HitLog, History, Server timestamps.\n\nThe Nimbus.cs billing timer at line 373 has a mixed comparison (DateTime.UtcNow.Date vs DateTime.Now.Hour == 10) that was NOT changed \u2014 it's a cron-like guard that intentionally fires at 10 AM local time. Changing it would shift billing runs."
+ },
+ {
+  "id": "72114040ff42b839",
+  "title": "Grafana admin credentials on stargate",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "content_hash",
+   "created",
+   "expires_at",
+   "files_related",
+   "last_accessed",
+   "project",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Grafana admin credentials on stargate\n\n- URL: http://10.100.0.1:3000 (via WireGuard)\n- Username: admin\n- Password: T0mkatNT!\n- Changed from default by Tom on 2026-04-13"
+ },
+ {
+  "id": "learning_bbfeb8204a46e1dc",
+  "title": "Zoho email: support@ is the SMTP sender, dev@ is recipient only \u2014 dev@ password changed 2026-04-13",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Zoho email: support@ is the SMTP sender, dev@ is recipient only \u2014 dev@ password changed 2026-04-13\n\nThe server sends email via smtp.zoho.com using support@nimbusframe.net credentials (stored in picFrame.SystemConfig key=\"supportEmailSender\"). dev@nimbusframe.net is only used as a recipient address for alerts/errors across ~35 call sites. Password for dev@nimbusframe.net was changed by Tom on 2026-04-13. This does NOT affect email sending \u2014 no code or config change needed. If support@nimbusframe.net password ever changes, update picFrame.SystemConfig row id=3."
+ },
+ {
+  "id": "learning_48e9a477ce80517a",
+  "title": "subprocess.BELOW_NORMAL_PRIORITY_CLASS crashes ffmpeg under SYSTEM account on Windows Server 2025",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# subprocess.BELOW_NORMAL_PRIORITY_CLASS crashes ffmpeg under SYSTEM account on Windows Server 2025\n\nPython subprocess.Popen with creationflags=subprocess.BELOW_NORMAL_PRIORITY_CLASS causes ffmpeg.exe to crash instantly with exit code 0xFFFFFFFE (-2) when run under the SYSTEM account (e.g., via NSSM Windows service). No stderr output produced \u2014 process dies before main(). Works fine when run interactively as the admin user with the same flag. Root cause unknown \u2014 possibly a SYSTEM account restriction on process priority manipulation. Workaround: don't set creationflags, use ffmpeg's built-in `-threads N` flag to limit CPU usage instead. For abydos video worker, `-threads 3` on a 4c/8t Xeon-D provides adequate IIS protection."
+ },
+ {
+  "id": "learning_66655801a843eb85",
+  "title": "abydos SSH: user is \"admin\" not \"tlemmons\", shell is PowerShell not cmd",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# abydos SSH: user is \"admin\" not \"tlemmons\", shell is PowerShell not cmd\n\nSSH to abydos (147.135.54.149:2222) uses user \"admin\" with the id_ed25519 key. The shell is PowerShell, NOT cmd.exe. PowerShell escaping rules apply: use semicolons not ampersands, single-quote strings, escape dollar signs. For inline Python, SCP a .py file rather than trying to pass code via SSH command line \u2014 PowerShell quote escaping makes inline Python nearly impossible. deploy.sh confirms the SSH config: SERVER_SSH_USER[\"ovh-staging\"]=\"admin\", SERVER_SSH_PORT[\"ovh-staging\"]=\"2222\"."
+ },
+ {
+  "id": "learning_52f67c098e24cbae",
+  "title": "Video worker work_dir is D:\\Media\\motion\\v2 (not D:\\Media\\motion) \u2014 matches Azure /mnt/nimbusmotion/v2",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Video worker work_dir is D:\\Media\\motion\\v2 (not D:\\Media\\motion) \u2014 matches Azure /mnt/nimbusmotion/v2\n\nThe video_worker.py work_dir must be D:\\Media\\motion\\v2, NOT D:\\Media\\motion. The Azure File Share was mounted at /mnt/nimbusmotion, and the v2 subdir inside it is where source files and outputs live. On abydos, the azcopy sync mirrors this structure to D:\\Media\\motion\\v2\\. The directory has ~49,400 files (source jpgs + output mp4s). Job payloads use relative sourceFile paths (e.g., \"Art_1000_4221f9d5.jpg\") joined with work_dir."
+ },
+ {
+  "id": "learning_6ff8188baf49dd44",
+  "title": "SSH to Azure gateway (ubuntu@10.7.0.1) requires agent forwarding from dev machine through stargate",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# SSH to Azure gateway (ubuntu@10.7.0.1) requires agent forwarding from dev machine through stargate\n\nThe Azure gateway (ubuntu@10.7.0.1) does NOT have the ed25519 key in its authorized_keys from stargate's own key. You must use SSH agent forwarding: (1) eval $(ssh-agent -s), (2) ssh-add /c/code/Nimbus/keys/id_ed25519, (3) ssh -A ubuntu@51.81.243.11 \"ssh ubuntu@10.7.0.1 '...'\". Without -A and the agent loaded, the hop fails with \"Permission denied (publickey,password)\". Stargate has no private key in ~/.ssh/ for the Azure hop."
+ },
+ {
+  "id": "learning_30947a51bad9fbae",
+  "title": "MySQL Dapper type mismatches: BIT\u2192ulong, TINYINT\u2192sbyte, literal 0\u2192long \u2014 records must match",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# MySQL Dapper type mismatches: BIT\u2192ulong, TINYINT\u2192sbyte, literal 0\u2192long \u2014 records must match\n\nWhen migrating from SQL Server to MySQL with Dapper, constructor-based record materialization requires exact CLR type matches. MySQL via MySqlConnector returns: BIT(1) \u2192 System.UInt64 (ulong), TINYINT \u2192 System.SByte (sbyte), INT \u2192 System.Int32 (int), literal integer (e.g. 0 AS X) \u2192 System.Int64 (long). SQL Server via SqlClient returns: BIT \u2192 bool, TINYINT \u2192 byte, INT \u2192 int. Fix: update C# record constructors to match MySQL's CLR types, or CAST in SQL. Known affected records in NimbusJobs: ControlSetting (fixed: Enable byte\u2192ulong, DryRun bool\u2192long), PendingVideoProduction (needs fix: CurrentFileValid expected byte, MySQL sends sbyte). Systematic audit needed \u2014 search for all record types in DatabaseService.cs and BillingDatabaseService.cs that map to MySQL queries."
+ },
+ {
+  "id": "learning_e9ed606770f26c22",
+  "title": "picFrame.Controls table on OVH MySQL has no DryRun column \u2014 was Azure-only addition",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# picFrame.Controls table on OVH MySQL has no DryRun column \u2014 was Azure-only addition\n\nThe Controls table on OVH MySQL (synced via NimbusSync) does not have a DryRun column. This column was added to Azure SQL after the last schema sync. NimbusJobs queries referencing DryRun column must use literal 0 instead. Columns present: ID, Name, LastChange, ParamID, Param2, Enable (BIT), Targets (TEXT). The C# ControlSetting record still has DryRun field but it's populated by SQL literal 0, not from the table."
+ },
+ {
+  "id": "learning_4ce5cb00ac613cc3",
+  "title": "Grafana SMTP on stargate: Zoho requires SSL port 465 with startTLS_policy=NoStartTLS",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Grafana SMTP on stargate: Zoho requires SSL port 465 with startTLS_policy=NoStartTLS\n\nGrafana SMTP config on stargate uses smtp.zoho.com:465 with startTLS_policy=NoStartTLS (implicit SSL, not STARTTLS). Sending address: dev@nimbusframe.net. Config at /etc/grafana/grafana.ini [smtp] section. Backup at grafana.ini.bak.20260413. Password has a trailing ! that was initially missed \u2014 test SMTP creds independently before trusting Grafana's silent startup."
+ },
+ {
+  "id": "learning_a6b1a84203da6b82",
+  "title": "Grafana alert provisioning: datasourceUid must match DB, not the type name",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Grafana alert provisioning: datasourceUid must match DB, not the type name\n\nWhen writing Grafana provisioned alert rules in /etc/grafana/provisioning/alerting/*.yaml, the datasourceUid field must match the actual UID from Grafana's SQLite DB (e.g., ffiyv6uwwds74d), NOT the datasource type name (e.g., \"loki\"). Find the real UID with: sqlite3 /var/lib/grafana/grafana.db \"SELECT uid, name, type FROM data_source;\" Grafana does NOT error on startup with a wrong UID \u2014 the rules just silently fail to evaluate."
+ },
+ {
+  "id": "learning_76c0900207b770bc",
+  "title": "Stargate MQTT :8883 \u2014 Mosquitto terminates TLS directly, NOT nginx proxied",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Stargate MQTT :8883 \u2014 Mosquitto terminates TLS directly, NOT nginx proxied\n\nOn stargate, MQTT TLS on port 8883 is handled directly by Mosquitto (not proxied through nginx). The nginx streams/*.conf has an explicit comment confirming this design choice. Mosquitto uses the LE wildcard cert CN=*.nimbusframe.net from /etc/letsencrypt/live/nimbusframe.net-0001/. Verified via openssl s_client 2026-04-13: chain valid, all 3 depths return verify=1. Architecture: :8883\u2192Mosquitto(TLS), :36004/:36005\u2192nginx stream\u2192abydos:36004(TLS by NimbusService), :443\u2192nginx HTTP\u2192abydos:80(TLS by nginx)."
+ },
+ {
+  "id": "learning_cdea8f9bfb436931",
+  "title": "NimbusSync exclusions in source but NOT deployed to stargate \u2014 rebuild needed before final sync",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# NimbusSync exclusions in source but NOT deployed to stargate \u2014 rebuild needed before final sync\n\npicFrame.MqttRouting and picFrame.ConfigGroups were added to ExcludeTables in NimbusSync/NimbusSync/appsettings.json (source, lines 20-21) but the published/deployed binaries on stargate still have the old 4-table exclude list. The linux-x64 publish at bin/Release/net8.0/linux-x64/appsettings.json is stale. Must rebuild (dotnet publish) and redeploy to stargate before the final cutover sync run. Timer is currently disabled so no urgency, but it's a cutover-day task."
+ },
+ {
+  "id": "learning_f4e0ca108c379bf7",
+  "title": "picFrame 27.05 does NOT parse Flags or Rotate from MQTT config \u2014 orient lock broken on all 27.05 bridges",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# picFrame 27.05 does NOT parse Flags or Rotate from MQTT config \u2014 orient lock broken on all 27.05 bridges\n\nFrame 589 (Ron's bridge, miro-17) was showing landscape images despite orient lock being enabled (Flags=24, bit 3). Root cause: the `applyMqttConfig` method in 27.05 processes brightness, playlist, timezone, awake times, payment, accessKey \u2014 but NOT Flags or Rotate. These fields were added to applyMqttConfig after the 27.05 commit (7fc14ee). So flagByte stays at default 0, getOrientLock() returns false, and no orient filtering happens.\n\nAdditionally, 27.05's `probeMeuralOrientation` correctly detects portrait, but the saved configData.xml had Rotate=0, causing `alignDimensionsToRotation` to swap back to landscape dimensions. The MQTT Rotate=270 would fix this, but setRotate() wasn't being called from applyMqttConfig in 27.05.\n\nDiagnosed via CallHome reverse tunnel to Ron's bridge (port 36060). Key evidence: MQTT config logs showed \"Config: Set accessKey\", \"Config: Setting brightness\" etc but NO \"Config: Flags updated\" or \"Config: Rotation changed\" lines. Confirmed the 27.05 jar has the Flags string constants (via `strings` on the class file) but the applyMqttConfig code path wasn't wired up until later.\n\nFix: OTA to 27.07 which has full Flags + Rotate parsing. Also added defense-in-depth: force `alignDimensionsToRotation()` on every MQTT config receipt in headless mode, not just when Rotate changes."
+ },
+ {
+  "id": "learning_3774b28336a23190",
+  "title": "Frame BLE has THREE protocol generations, not two \u2014 pre-UART characteristic-only exists",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Frame BLE has THREE protocol generations, not two \u2014 pre-UART characteristic-only exists\n\nMobile-team diagnosis during troubleshoot page work revealed three distinct frame BLE protocol generations:\n\n1. **Pre-UART (fw \u226426.18)**: Service 00000000 only, no UART chars. WiFi via direct characteristic writes: 0x0040 (SSID), 0x0041 (PSK count), 0x0042-0x0045 (PSK segments), 0x0046 (commit \"1\"). Status via reads: 0x0010 (AP), 0x0011 (IP), 0x0012 (internet true/false), 0x0014 (serial). AP list: write 0x0047 to scan, read count from 0x0013, read SSIDs from 0x0020-0x0029. NO JSON commands available.\n\n2. **Legacy UART (fw 26.21\u201327.01)**: Both services. bleServer is transparent bridge \u2014 forwards raw bytes between BLE UART and Java TCP port 36010. Java expects plain JSON + \\n. NO <<<framing>>>. UART service UUID 00000001.\n\n3. **nimbus-agent (fw 27.02+)**: Service 00000000 with TX (00000001 notify) + RX (00000002 write). Uses <<<length+JSON>>>\\n framing. nimbus-agent parses framing, strips it before forwarding to Java via local MQTT.\n\nTransition dates: UART service added commit 24f00a19 (May 19, 2021, v26.21). nimbus-agent mandatory from commit 7045cdd (March 12, 2026, v27.02).\n\nDetection in mobile code:\n- Service 00000000 + has RX char 00000002 = nimbus-agent (use framing)\n- Service 00000000 + no RX char = pre-UART (use characteristic protocol)\n- Service 00000001 = legacy UART (use plain JSON + \\n)\n\nFrame 388 (SW 26.19, offline since April 2021) is pre-UART. \"26.19\" is the Java picFrameClient version, not the bleServer version \u2014 those use independent version numbers."
+ },
+ {
+  "id": "learning_3a54d6afde2dd93d",
+  "title": "FrameMedia.getRatio() falls back to ConfigBase.getRatio() for unknown dimensions \u2014 silently bypasses orient lock",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# FrameMedia.getRatio() falls back to ConfigBase.getRatio() for unknown dimensions \u2014 silently bypasses orient lock\n\nWhen FrameMedia width=0/height=0 (VP pipeline MP4 files, or items without server-provided dimensions), getRatio() returned ConfigBase.getRatio() \u2014 the frame's own ratio. This means imageRatio == frameRatio, abs diff = 0, orient lock always passes. Every VP pipeline MP4 silently bypassed orient lock.\n\nFixed: getRatio() now returns 0 for unknown dimensions. checkMediaValid() skips orient lock when imageRatio=0 (unknown) rather than rejecting blindly, since the server's VP pipeline already produces correctly oriented content. Items with known dimensions (from ArtAccess via .mdf) get properly filtered.\n\nNote: this fix is in current HEAD (uncommitted) and will ship with the next build. The 27.07 OTA deployed today does NOT include this fix \u2014 it was built before this was discovered. It will be in the next point release."
+ },
+ {
+  "id": "learning_16c372a6f9a42d12",
+  "title": "OTA ConfigGroups must be bumped on BOTH Azure SQL and OVH MySQL",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# OTA ConfigGroups must be bumped on BOTH Azure SQL and OVH MySQL\n\nrelease-ota.sh uploads the jar to both Azure gateway and OVH stargate, but the ConfigGroups Version bump must be done separately on both databases. Azure SQL: via pymssql on gateway (10.7.0.1). OVH MySQL: via mysql client on stargate (51.81.243.11), user nimbus_app, password GWRX4d8LcocsYNMpwn8DOKXB, database picframe. Forgetting one leaves half the fleet on the old version."
+ },
+ {
+  "id": "learning_b604b7c0e92e1044",
+  "title": "Legacy bleServer forwards raw UART bytes to Java TCP \u2014 NO <<< framing at Java layer",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Legacy bleServer forwards raw UART bytes to Java TCP \u2014 NO <<< framing at Java layer\n\nThe legacy Go bleServer (BLE_server.go, 26.21-27.01) is a transparent bridge:\n- BLE UART RX char \u2192 writeString() \u2192 raw bytes to Java TCP port 36010\n- Java responses \u2192 bufio.ReadBytes('\\n') \u2192 raw bytes to BLE UART TX char\n\nNo framing is added or removed. Java's ControlConnector expects plain JSON delimited by \\n. This was confirmed by inspecting the bleServer's own auth code which sends plain {\"cmd\":\"authRequest\",\"KeyValues\":{\"name\":\"bleLink\",\"auth\":\"bleLink\"}} + \\n to Java without framing.\n\nThe <<<length+JSON>>>\\n framing was introduced by nimbus-agent (v27+) for its internal parsing. It does NOT work against legacy bleServer because:\n1. Java's line-based reader can't handle binary length bytes (which may contain 0x0A)\n2. Java doesn't know how to parse <<< markers\n\nCONSEQUENCE: MAUI app's default framing would fail silently against any pre-27.02 frame. Fixed in commit 14387d8 by adding _isLegacyBle mode that sends plain JSON + \\n and reads newline-delimited plain JSON responses."
+ },
+ {
+  "id": "learning_20e869870a184791",
+  "title": "SSH-based frame repair path \u2014 same credentials as Xamarin FrameDiagDetails",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# SSH-based frame repair path \u2014 same credentials as Xamarin FrameDiagDetails\n\nFrameRepairService uses SSH.NET (Renci.SshNet) to fix frames that are on WiFi but can't reach server (cert/DNS issue). Same approach as legacy Xamarin FrameDiagDetails.runFixes():\n\n- SSH to frame IP, port 22, pi / n1bus$Fram3! (hardcoded)\n- Check /usr/local/bin/NimbusFrame.jks date, if < 2022-03-19 download fresh from server via api/Mobile/getNimbusFile?fileName=NimbusFrame.jks\n- SFTP upload, sudo cp to /usr/local/bin and all picFrame.X.Y dirs\n- Resolve staging.nimbusframe.net and frames.nimbusframe.net via Dns.GetHostAddresses (phone has internet)\n- sudo sed -i /etc/hosts to update entries\n- sudo reboot\n\nSECURITY CONCERN: hardcoded SSH creds in distributed binary. Same as Xamarin app had. Blast radius limited (attacker must be on same WiFi as target frame, and frame is their own). For wide store release, should gate behind admin flag or replace with server-issued one-time tokens.\n\nThe api/Mobile/getNimbusFile endpoint existence on current prod/OVH servers is UNVERIFIED. Added NimbusApiClient.GetNimbusFileAsync that returns null on 404 \u2014 repair will fail gracefully."
+ },
+ {
+  "id": "5d03a0abbbf21421",
+  "title": "Learning from mobile-team",
+  "meta_keys": [
+   "access_count",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "See learning_377 (three BLE protocol generations), learning_b60 (bleServer is transparent bridge, Java expects plain JSON), learning_02c (SAS detection for dual-mode upload), learning_20e (SSH repair path)."
+ },
+ {
+  "id": "learning_0a08f61d422889f8",
+  "title": "ArtImage/AccntImage/AccntVideo getCachedFilePath was unimplemented \u2014 returned null, forced getRawContent fallback",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# ArtImage/AccntImage/AccntVideo getCachedFilePath was unimplemented \u2014 returned null, forced getRawContent fallback\n\nThree MediaFile subclasses had `getCachedFilePath() { return null; }` unimplemented. This meant requestArtAccess ALWAYS returned token=null for art images, account images, and account videos. Frames fell back to getRawContent which loads entire file into byte[] (problematic for videos).\n\nFixed 2026-04-13 commit 3a20da3f \u2014 all three now return getFilePath() which constructs the proper blob path (ArtData/{userId}/{id}/full-0-0.jpg or similar).\n\nCombined with the downloadMedia streaming endpoint (commit 3faa1741), this gives frames direct HTTP downloads with no memory buffering.\n\nFiles: NimbusCommon/MediaContent/ArtImage.cs:109, AccntImage.cs:63, AccntVideo.cs:40"
+ },
+ {
+  "id": "learning_e5831b619f565d78",
+  "title": "IIS /media/ virtual directory returns 406 to Java frame clients \u2014 use streaming API endpoint instead",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# IIS /media/ virtual directory returns 406 to Java frame clients \u2014 use streaming API endpoint instead\n\nFrame's Java 17 HttpURLConnection gets HTTP 406 when downloading from the `/media/` IIS virtual directory (D:\\Media on abydos). Could NOT reproduce with curl \u2014 tested with Java User-Agent, empty Accept, nginx proxy headers, everything returns 200. Something specific about Java's actual request headers triggers 406, possibly content negotiation collision with ASP.NET pipeline.\n\nWorkaround: commit 3faa1741 added `/api/Frame/downloadMedia` streaming endpoint that opens FileStream on D:\\Media and wraps in StreamContent. GetMediaDownloadUrl now returns this API URL instead of the /media/ path.\n\nKey detail: downloadMedia has NO AuthFilter (commit 35562251) \u2014 Java client doesn't pass auth cookies on token URL downloads. Path traversal protection (reject .., :, \\\\) is the safety gate.\n\nIf anyone ever figures out the 406 root cause, the /media/ path could be restored for browser-facing use. But for frame downloads, the API endpoint is working and streams properly for large videos."
+ },
+ {
+  "id": "learning_c2ef6544c825dc90",
+  "title": "Playback History array stopped being populated \u2014 \"no longer needed\" comment was wrong",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Playback History array stopped being populated \u2014 \"no longer needed\" comment was wrong\n\nFrameDetailsWrapper.History (PlayoutItem[10]) stopped being written when setCurrentMedia was refactored to only set CurrentMedia. Comment at PicFrame.cs:1861 said \"History array mutation is no longer needed\" \u2014 but the admin frame page PopulateHistory still reads it.\n\nFixed 2026-04-13 commit c6efc6de: setCurrentMedia shifts the History array and inserts new PlayoutItem at [0]. MqttStatusHandler does the same when currentMedia changes. Admin page shows last 10 played images again.\n\nLesson: when removing code, grep for its consumers first. The History array was still being read by admin UI."
+ },
+ {
+  "id": "learning_5e56cc590dc601a5",
+  "title": "Pre-cutover checklist from infra-team (2026-04-13)",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Pre-cutover checklist from infra-team (2026-04-13)\n\nInfra-team reported these items need action before OVH cutover:\n\n1. **NimbusSync rebuild/redeploy** \u2014 source has MqttRouting + ConfigGroups exclusions but deployed binary on stargate doesn't. Need to rebuild and deploy before the final sync run.\n\n2. **ConfigGroups + MqttRouting seeding** \u2014 these tables are excluded from sync but empty on MySQL. Need manual INSERT of 7 ConfigGroups + 8 MqttRouting rows. CRITICAL: without this, all frame MQTT messages silently dropped post-cutover.\n\n3. **create-indexes.sql re-apply** \u2014 NimbusSync full wipes indexes; need to re-run after final sync. Coordinator to script into cutover-steps.sh.\n\n4. **PK-less table exports** \u2014 GroupMedia/Controls/Products need special handling. Scripts exist at Azure gateway /tmp/.\n\n5. **Cloudflare grey-cloud** \u2014 Tom action: frames.nimbusframe.net must be DNS-only (no proxy) for ports 8883 and 36004.\n\n6. **Lockdown removal** \u2014 infra-team waiting on Tom's signal to remove testing lockdown on stargate."
+ },
+ {
+  "id": "5a1e1008334c26e5",
+  "title": "Learning from server-team",
+  "meta_keys": [
+   "access_count",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "See learnings recorded this session: getCachedFilePath null bug (learning_0a0), IIS /media 406 mystery (learning_e58), History array regression (learning_c2e), plus UTC timestamp mass-fix pattern (learning_50f), email sender vs recipient (learning_bbf)."
+ },
+ {
+  "id": "learning_eb044a9c819047fe",
+  "title": "FileValid columns are TINYINT in MySQL \u2192 records need sbyte (4 records in NimbusJobs DatabaseService)",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# FileValid columns are TINYINT in MySQL \u2192 records need sbyte (4 records in NimbusJobs DatabaseService)\n\n`fileValid` column is `tinyint` in MySQL across `Artwork.Artwork`, `artwork.mediaprocessingview`, `b2b.qsearchview`. MySqlConnector returns sbyte for tinyint, so any Dapper record materializing this column must declare `sbyte`, not `byte`. Fixed 2026-04-14 in NimbusJobs/Services/DatabaseService.cs:\n- PendingMediaItem.FileValid (line 2019)\n- GalleryMediaInfo.FileValid (line 2050)\n- ArtworkSourceInfo.FileValid (line 2059)\n- PendingVideoProduction.CurrentFileValid (line 2094)\n\nBitwise ops `(FileValid & 1) != 0` work fine with sbyte (implicit promotion to int). Method parameters that PASS bytes to SQL (e.g. `byte requiredFlags = 23`) can stay as `byte` because parameter coercion is more lenient than result materialization.\n\nDatabaseBackupJob calls `picFrame.sp_DailyFrameSettingsBackup` which does NOT exist on stargate MySQL \u2014 separate migration gap, will fail at runtime until ported from Azure SQL."
+ },
+ {
+  "id": "learning_fdb858e4e4d0a36b",
+  "title": "Video worker image_to_video duration must be \u226560s \u2014 Meural falls back to gallery on short clips",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Video worker image_to_video duration must be \u226560s \u2014 Meural falls back to gallery on short clips\n\nCoordinator found 2026-04-14 that nimbus-video-worker has been emitting 5-second MP4s (`-t 5 -r 5`), and Meural firmware falls back to its internal gallery when the file ends. This is the root cause of weeks of Meural reliability issues frames-team has been chasing (postcard-expiry races, standby failures).\n\nServer-team is sending `duration: 5` in the job payload. Worker now floors duration at MIN_IMAGE_LOOP_SECONDS=60s in video_worker.py:140 regardless of payload, AND default bumped from 15\u219260. Logs when flooring kicks in.\n\nCaveats:\n- 60s floor is conservative; frames-team needs to confirm the real target duration. Likely much longer (5-30 min) since per-item display intervals can exceed Meural's tolerance window.\n- `-stream_loop -1` is NOT the right flag here \u2014 that's for video inputs, not images already being looped via `-loop 1 -i image.jpg`.\n- Bug #1 (output path mismatch \u2014 worker writes motion/v2/, C# reads ArtData/) needs server-team's job-contract spec; messaged them.\n\nWorker change uncommitted/undeployed pending coordination for a single deploy with server-team's enqueue + path fixes."
+ },
+ {
+  "id": "learning_749b7fc243f835dd",
+  "title": "requestArtAccess silently bypassed VP pipeline for Meural+JPG until 2026-04-14",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# requestArtAccess silently bypassed VP pipeline for Meural+JPG until 2026-04-14\n\nFrom Feb 12 2026 (commit 71825bd4) until 2026-04-14 (commit d39526fe), the Meural-bridge JPG\u2192MP4 video pipeline was wired only into `getRawContent` via `Media.isContentAvailable`. The modern bridge fetch path is `requestArtAccess` (token-based), which ONLY called `media.getCachedFilePath(myFrame)` \u2014 and for JPG art that resolves to `ArtImage.getCachedFilePath:109-112` which just returns the raw JPG path with no Meural branch.\n\nNet result for ~2 months: every JPG art request from a Meural bridge silently bypassed the VP pipeline. Bridge got a JPG token, downloaded JPG, pushed JPG to Meural via MeuralDisplay.postContent (which sets Content-Type: video/mp4 unconditionally \u2014 but the BYTES are JPG). Meural treated the postcard as an image, expired it at ~60s, reverted to its own cloud gallery. User-visible symptom: frame \"wedged\" showing Meural's gallery 9 minutes out of every 10. Worker on abydos sat at 1 test job processed in 12h because nothing ever enqueued.\n\nThree bugs masked each other:\n1. requestArtAccess unreachable from VP pipeline (server-team, fixed in d39526fe \u2014 adds MeuralBridge+JPG branch calling isContentAvailable, returns MP4 path as token on cache hit, falls through to JPG on cold cache).\n2. Worker output path mismatch: server reads from `ArtData/{userId}/{mediaId}/crop-{frameId}.mp4`, worker was writing to `motion/v2/{name}_{jobId}.mp4`. Fixed by spec interface:video-job-payload (Option A: server constructs absolute path in operation.output; worker stays dumb).\n3. image_to_video duration was 15s/5fps. Meural firmware threshold for \"loop indefinitely\" is ~10s; clips <=10s expire at end-of-media. 15s was on the edge, jobs-team worker defaults are 20s/15fps. Fixed in d39526fe (server emits 20/15 at both ImageFile.cs:506 and :761).\n\nLesson: when adding a new request handler that supersedes an old one (requestArtAccess vs getRawContent), audit downstream gatekeepers (isContentAvailable et al.) to ensure they're still reachable. The VP pipeline was correctly built but architecturally orphaned for two months without anyone noticing because Meural still showed JPG content briefly each cycle.\n\nVerification path post-fix:\n- Loki: log line `ImageFile.submitVideoJob: enqueueing video:jobs job for media=... frame=... statusId=...` should appear.\n- abydos: `ls D:\\Media\\ArtData\\<uid>\\<mid>\\crop-584-*.mp4` should show recent timestamps.\n- Worker log `D:\\nimbus\\video-worker\\logs\\worker.log` should show real (non-test) job IDs.\n- Frames-team confirms Meural holds image past 60s."
+ },
+ {
+  "id": "learning_cb640c5a7bce597e",
+  "title": "Meural postcard loops H.264 MP4 indefinitely when duration >10s \u2014 empirically verified 7min+",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Meural postcard loops H.264 MP4 indefinitely when duration >10s \u2014 empirically verified 7min+\n\nVerified 2026-04-14 on renoir-33 (firmware 2.0.9) via direct postcard push from bridge .47. Pushed `430712.mp4` (H.264 High/4.0, 1080\u00d71920, 25.08s duration, yuv420p, 25 fps, bitrate 3.6 Mbps, no audio) via `POST /remote/postcard/` with multipart part `Content-Type: video/mp4`. User visually confirmed Meural held the postcard image (fruit tree) for 7+ minutes \u2014 approximately 17 continuous loops of the 25-second video. No revert to Meural's own gallery during the window.\n\nThis confirms the documented design-of-record (picFrameClient CLAUDE.md: \"Videos >10s loop indefinitely on Meural (images revert after 60s). This is THE key technique.\") and refutes a server-team hypothesis that Meural would expire the postcard at end-of-media for a 15-second clip.\n\n**Implications for the Meural MP4 pipeline:**\n- No container-level loop directive is needed. MP4/H.264 has no standard loop flag. Meural's loop behavior is firmware-side and duration-heuristic only.\n- `-stream_loop -1` (ffmpeg input directive) is NOT required on the worker output. It would just produce a longer file for no benefit.\n- Baking 20 seconds (jobs-team's current default) is sufficient. Longer is wasteful disk + encode time for zero additional reliability.\n- The \"Meural expires at 15s\" claim was wrong. Jobs-team backlog for loop-muxing is NOT needed.\n\n**Firmware threshold:** documented as \">10s\" but not bisected to the exact boundary in this test. 15s is the safe floor; 20s gives a comfortable margin. Anyone who wants the exact threshold can bisect with 11s/12s/13s clips, but operationally unnecessary.\n\n**Content-Type quirk (reminder, separate from loop behavior):** the multipart part's MIME MUST be explicitly `video/mp4`. Missing or `application/octet-stream` produces HTTP 200 with `{\"status\":\"fail\",\"response\":\"Unsupported file format uploaded\"}`. Bridge code already sets this correctly via MeuralDisplay.postContent; worker code doesn't touch this (produces file only).\n\n**Status endpoint caveat:** `/remote/get_gallery_status_json/` reports the *underlying* gallery and its current item \u2014 it does NOT reveal whether a postcard overlay is currently being displayed. Not useful for automated postcard-liveness checks. Visual verification is the authoritative method."
+ },
+ {
+  "id": "learning_bb280cf746c39ce7",
+  "title": "deploy.sh --skip-build ships stale published DLLs even after standalone MSBuild",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# deploy.sh --skip-build ships stale published DLLs even after standalone MSBuild\n\n`--skip-build` skips MSBuild's publish/package target, NOT just compilation. deploy.sh SCPs from `obj/Release/Package/PackageTmp/` (the publish staging dir), not from `bin/Release/`. So even if you manually run `MSBuild.exe picFrameWeb.sln -p:Configuration=Release` to refresh `bin/Release/` after a code change, then `deploy.sh ... --skip-build` will ship whatever was last in the publish staging dir (probably from your previous full deploy). Symptom: deploy reports success, but the server runs old code; coordinator catches stale DLL timestamps in `C:\\inetpub\\nimbus-staging\\bin\\`.\n\nBuild for picFrameWeb.sln is ~11s end-to-end. `--skip-build` saves ~48s on a 67s deploy. Not worth shipping stale code. Only legitimate use of `--skip-build`: \"I just deployed exact same publish artifact to staging and validated it; now push the same artifact to prod.\" For any code change since the last deploy, always use full `deploy.sh ovh-staging` (or whichever target).\n\nVerification ritual after any non-trivial deploy: SSH the target and check `Get-Item C:\\inetpub\\nimbus-staging\\bin\\picFrameWeb.dll | Select LastWriteTime` matches today's date. Coordinator does this automatically \u2014 make it a habit before claiming \"deployed.\""
+ },
+ {
+  "id": "learning_d3da5e109379c4e9",
+  "title": "OVH pair flow does not provision per-Meural MqttAuth or push credentials to bridge \u2014 second-and-subsequent Meurals on a bridge silently respawn-loop forever",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# OVH pair flow does not provision per-Meural MqttAuth or push credentials to bridge \u2014 second-and-subsequent Meurals on a bridge silently respawn-loop forever\n\nDiscovered 2026-04-14 on bridge .47 (HwId=587) when Tom paired warhol-757 (Meural at 192.168.15.44, serial MEU1118020009052) as a second Meural alongside the already-working renoir-33.\n\nThe pair appeared to succeed in the OVH staging UI: MySQL `Frames` row created (id 596, uuid f15416e6-0081-422b-adbd-944388856cbc, user 12, HWId=584), Redis `frame:f15416e6\u2026:data` skeleton key written with OnlineStatus=\"offline\", and bridge per-Meural directory `/usr/local/bin/meurals/f15416e6\u2026/` created with the expected file set (HWconfig.xml, meural.json, frame_config.json, etc.).\n\nBut the pair flow did NOT:\n1. Insert a `frame_f15416e6\u2026` row into `picframe.MqttAuth` on stargate (verified empty via `SELECT \u2026 WHERE Username LIKE 'frame_f15416e6%'`).\n2. Write `mqttBroker`/`mqttUsername`/`mqttPassword` to the bridge's `frame_config.json` for the new Meural. Compare warhol's file (only `serverUrl`+`unique`) vs renoir's file (full block including `ssl://staging.nimbusframe.net:8883` + `frame_2b0293f7\u2026` + password).\n\nResult: nimbus-agent spawns the warhol JVM, `MeuralBridgeMain` \u2192 `PicFrameClient.run()` \u2192 `initializeMqttBootstrap()` \u2192 `MqttConnector.connect()` \u2192 `new MqttAsyncClient(<null/empty URI>)` \u2192 `NetworkModuleService.validateURI` rejects \u2192 `ERROR Headless mode: Cannot fall back to SetupMode. Exiting.` \u2192 JVM exits \u2192 nimbus-agent respawns it \u2192 infinite loop. UI correctly shows \"offline\" because the frame really has never reported in.\n\n**Why first Meural works but second doesn't:** First Meural on a fresh bridge gets credentials provisioned via the bridge registration API path. Second-and-subsequent pairs go through whatever the OVH pair handler is, and that handler is missing the `frame_*` MqttAuth provisioning + config push. Likely a cutover-prep regression \u2014 Azure side has not been verified to have the same bug.\n\n**Owner:** server-team. The OVH pair endpoint (FrameController? PairController?) needs to (a) INSERT into MqttAuth on every Meural pair, (b) deliver the credentials to the bridge \u2014 likely via an MQTT command on the bridge's command topic, since the bridge has no other way to learn the new Meural's credentials.\n\n**Workaround if needed:** Manually INSERT MqttAuth row, write the three fields into the bridge's frame_config.json, kill the JVM (nimbus-agent respawns it with the new config). NOT executed today \u2014 Tom wanted the bug observable for server-team.\n\n**Reported via:** msg_36020537e8d4 to coordinator with full failure chain table and side-by-side evidence."
+ },
+ {
+  "id": "learning_156c8ed78e83696c",
+  "title": "Frame.Id collision between Azure SQL and OVH MySQL \u2014 same numeric Id refers to different frames on each side",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Frame.Id collision between Azure SQL and OVH MySQL \u2014 same numeric Id refers to different frames on each side\n\nDiscovered 2026-04-14 during warhol-757 pair investigation. Both databases use independent auto-increment on `picFrame.Frames.Id`. As of today, **Frame Id 596 exists on BOTH but is a different frame on each:**\n\n- Azure SQL: id=596, name=\"pissaro-993\", uuid c24694b1-5956-4117-b4bb-c764be1076fe, user Timojhen (uId 2584)\n- OVH MySQL: id=596, name=\"warhol-757\", uuid f15416e6-0081-422b-adbd-944388856cbc, user DeeAnn (uId 12)\n\nImplication: when an agent or user references \"frame 596\" without specifying which side, the answer depends on which DB you query. Cross-checking by Id alone is unsafe across the cutover boundary \u2014 must use UUID or (id + side) to disambiguate.\n\nThis will keep getting worse as both sides accept new pairs in parallel. Worth either: (a) reserving Id ranges to prevent overlap, (b) advancing the OVH AUTO_INCREMENT past Azure's current max, or (c) treating Id as side-local and relying on uuid for cross-side references. Option (b) is cheapest if cutover is near; option (c) is the right long-term answer.\n\nPattern hits agents who learned the schema pre-cutover and assume \"frame N\" is a global identifier. It isn't anymore."
+ },
+ {
+  "id": "learning_2a06715ce3f25b2e",
+  "title": "content-visibility:auto on lazy-loaded cells breaks JS-set background-image paint",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# content-visibility:auto on lazy-loaded cells breaks JS-set background-image paint\n\nMediaBlock.css had `content-visibility: auto` + `contain-intrinsic-size: 150px 180px` on `.imageCell` as a paint-performance hint (added in commit cb9c643c, Nov 2025 design-system pass). Incompatible with MediaGrid's IntersectionObserver-driven `fillCell()` which sets `background-image` as cells enter the scroll viewport.\n\nSymptom: framePage playlist grid (framePage.aspx?id=<frame>) showed 19 cells but only 1 thumbnail on first load. More appeared on each hard-refresh as `/getImage.ashx?Id=...&type=1` responses populated the browser cache. Browser DevTools showed all 19 image requests firing at HTTP 200; responses returned valid JPEGs. So the fetch was fine \u2014 the paint was racing.\n\nRoot cause: `content-visibility: auto` makes the browser skip paint for off-screen cells entirely and use `contain-intrinsic-size` as placeholder. When JS sets `background-image` on a \"skipped\" cell, the paint doesn't happen reliably once the cell becomes visible unless the resource is already in HTTP cache. On cold cache the paint never catches up.\n\nFix (commit 74a3b30d \u2014 actually earlier in session): removed both lines from `.imageCell`. Rely on IntersectionObserver's 400px pre-viewport margin for lazy-loading; skip the content-visibility optimization entirely. Verified on staging (frame 584).\n\nIf a future pass reintroduces `content-visibility: auto` for scroll perf on large grids, it MUST be coordinated with the lazy-load code: either (a) only apply content-visibility AFTER fillCell has set background-image on that specific cell, or (b) stop using IntersectionObserver and load all backgrounds eagerly (accepting the fetch cost)."
+ },
+ {
+  "id": "learning_95bad4d2822a880f",
+  "title": "VP worker (nimbus-video-worker) ignores operation.type and hardcodes transcode + .mp4 extension",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# VP worker (nimbus-video-worker) ignores operation.type and hardcodes transcode + .mp4 extension\n\nActive blocker as of 2026-04-14 morning. Server-team commit d39526fe wired Meural+JPG requestArtAccess into the VP pipeline; jobs 573110-573115 enqueued successfully for frame 584. All failed with ffmpeg exit code 4294967294 (no such input file).\n\nWorker behavior (from VideoProduction.LogFile on stargate MySQL):\n- Server emits `sourceFile=\"Art_320252_0d0d932f.jpg\"` + `operation.type=\"image_to_video\"` + `operation.output=<absolute>`.\n- Worker runs `ffmpeg -i D:\\Media\\motion\\v2\\Art_320252_0d0d932f.mp4 -vf crop=...scale=...pad=... -c:v libx264 -crf 20 -pix_fmt yuv420p -c:a aac -b:a 128k -threads 3 D:\\Media\\motion\\v2\\Art_320252_0d0d932f_573115.mp4`.\n\nTwo independent bugs:\n1. **Operation-type blindness.** No branch on `operation.type`. Every job is run as a transcode (no `-loop 1`, no `-t <duration>`, presence of `-c:a aac` audio codec which is nonsensical for JPG input).\n2. **Extension corruption.** Worker strips original extension off `sourceFile` and hardcodes `.mp4`. Same for output. Combined with implicit `work_dir=D:\\Media\\motion\\v2\\`, worker looks at wrong path AND wrong extension.\n\nServer writes source JPG to `C:\\temp\\video-processing\\Art_{id}_{hash}.jpg` (default for `VideoProcessingPath` AppSetting; no Web.config override on abydos). Confirmed on-disk.\n\nResolution path: filed to jobs-team (msg_584792cfe0cd on 2026-04-14) with specific required ffmpeg args. Spec bumped to v1.1.0 to document required worker semantics. Server-team follow-up is to emit absolute sourceFile path once jobs-team worker honors absolute paths \u2014 belt-and-suspenders.\n\nDo NOT mark the fix-A enqueue path as broken \u2014 the enqueue is correct per the documented spec. Failure is entirely worker-side."
+ },
+ {
+  "id": "learning_414f99a55cc42e7c",
+  "title": "Meural firmware: MP4 >10s loops indefinitely, \u226410s plays once and expires (renoir-33 fw 2.0.9)",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Meural firmware: MP4 >10s loops indefinitely, \u226410s plays once and expires (renoir-33 fw 2.0.9)\n\nFrames-team verified 2026-04-14 against renoir-33 firmware 2.0.9: the Meural postcard endpoint's \"loop indefinitely\" behavior is a **duration-based firmware heuristic**, not a container flag. Videos >10s loop; videos \u226410s play once and the postcard expires, causing fallback to Meural's internal gallery. This is the root cause of weeks of Meural reliability issues (postcard expiry, standby failures). Production MP4s at 19-25s have played without revert for weeks.\n\nSettled spec (`interface:video-job-payload` v1.0.0, server-team owner):\n- Duration: 20s default, 15s floor (>10s + 5s margin). Server now emits duration=20s at `ImageFile.cs:506, 761` after commit d39526fe.\n- fps: 15\n- Codec: libx264 -profile:v high -level 4.0\n- Container: -movflags +faststart (HTTP streaming)\n- pix_fmt: yuv420p\n- Audio: -an\n- MP4 multipart POST from bridge to Meural MUST have Content-Type: video/mp4 (else HTTP 200 with body `{\"status\":\"fail\",\"response\":\"Unsupported file format uploaded\"}`). Bridge already handles this in MeuralDisplay.postContent.\n\nWorker deployed to abydos 2026-04-14 with these defaults and a 15s floor as safety net. 24h soak test pending on renoir-33 once server's source-staging gap is fixed and real jobs flow through.\n\n`-stream_loop -1` is NOT the right flag \u2014 that's for video inputs, not images already looped via `-loop 1 -i image.jpg`."
+ },
+ {
+  "id": "learning_f9810fef028b868b",
+  "title": "NimbusJobs deploy to stargate: tar-pipe, exclude appsettings (server has prod config with real secrets)",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# NimbusJobs deploy to stargate: tar-pipe, exclude appsettings (server has prod config with real secrets)\n\n`rsync` is NOT installed in the Git Bash env on Windows dev machine. Use tar-pipe instead:\n\n```bash\ndotnet publish -c Release -r linux-x64 --self-contained false -o publish_out/stargate\ntar -cf - -C publish_out/stargate \\\n  --exclude='appsettings.json' \\\n  --exclude='appsettings.*.json' \\\n  --exclude='logs' \\\n  --exclude='video-worker' \\\n  --exclude='*.pdb' . \\\n  | ssh -i /c/code/Nimbus/keys/id_ed25519 ubuntu@51.81.243.11 'cd /opt/nimbusjobs && tar -xf -'\n```\n\nCRITICAL: appsettings.json on `/opt/nimbusjobs/appsettings.json` contains production connection strings, Stripe/Amazon/PayPal secrets, and MQTT/Redis creds. The dev appsettings.json in the repo has dev values. ALWAYS exclude appsettings.json from the deploy sync or production secrets get overwritten with dev placeholders.\n\nSmoke test after deploy: `dotnet NimbusJobs.dll --list` verifies the binary loads and job registration succeeds without starting any jobs. Service remains `disabled` in systemd until runtime type issues are resolved."
+ },
+ {
+  "id": "learning_306f700d3070552d",
+  "title": "Coordinator misdiagnosed ffmpeg exit -2 as downstream symptom \u2014 it's a real worker bug",
+  "meta_keys": [
+   "claude_instance",
+   "created",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# Coordinator misdiagnosed ffmpeg exit -2 as downstream symptom \u2014 it's a real worker bug\n\nOn 2026-04-14 morning, I (coordinator) instructed jobs-team to stand down on the worker's ffmpeg exit -2 (unsigned 4294967294) failures, assuming they were a downstream symptom of server-team's source-file staging gap. That assumption was wrong.\n\nAfter server-team shipped commit 422be3b1 (ObjectDisposedException fix) AND added VideoProcessingPath=D:\\Media\\motion\\v2 AppSetting to Web.config on abydos (source files now materialize correctly with matching timestamps), jobs 573132-573138 STILL fail with exit 4294967294 in ~93ms, empty ffmpeg stderr. Source file staging is verified fine. This is a real ffmpeg invocation / subprocess bug in the worker, independent of server-side staging.\n\nLesson for coordinator: when a downstream team reports an error whose root cause you're not certain of, do NOT tell them to stand down based on a guess about upstream cause. File it as \"investigate after upstream clears\" and re-escalate if it persists. Treating \"I think this is a symptom\" as \"this is a symptom\" suppressed a bug report that was always going to matter.\n\nTracking: server-team sent urgent blocker msg_92ae87f794b6 to jobs-team on 2026-04-14 with sample failing command. Jobs-team now spun up to work it."
+ },
+ {
+  "id": "learning_0fd593bb58f1cf3e",
+  "title": "ffmpeg exit 4294967294 on Windows = ENOENT (input file missing)",
+  "meta_keys": [
+   "claude_instance",
+   "created",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# ffmpeg exit 4294967294 on Windows = ENOENT (input file missing)\n\nWindows subprocess returncode 4294967294 (unsigned view of -2) from ffmpeg.exe = AVERROR(ENOENT) \u2014 the input file doesn't exist or is not readable by the subprocess user. 93ms invoke-to-exit is typical: ffmpeg starts, avformat_open_input fails, ffmpeg prints the banner+error to stderr and exits.\n\nIf you see this exit code and \"empty stderr\" in logs, the empty stderr is almost certainly a logging bug in the parent (readline drained stderr without saving it). The real stderr will contain \"Error opening input: No such file or directory\". Reproduce manually: Test-Path the input. On abydos worker 2026-04-14, all jobs for media 430652 failed this way because server-team's source staging wasn't actually writing files to D:\\Media\\motion\\v2 (despite their verification claim).\n\nDiagnostic pattern for future: (1) Test-Path input on the box, (2) temporarily log getsize of input before Popen, (3) ensure subprocess stderr is accumulated during readline loops \u2014 never rely on a post-exit .read() alone."
+ },
+ {
+  "id": "learning_fc341d5dc3d5f893",
+  "title": "readline() progress loops consume stderr \u2014 must accumulate for error path",
+  "meta_keys": [
+   "access_count",
+   "claude_instance",
+   "created",
+   "last_accessed",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# readline() progress loops consume stderr \u2014 must accumulate for error path\n\nClassic bug in subprocess progress-monitoring loops: reading stderr line-by-line via `p.stderr.readline()` inside a `while` loop CONSUMES each line. When the process exits, calling `p.stderr.read()` returns only unread bytes (usually empty). If you only log the post-exit `.read()` on failure, your error log will say \"empty stderr\" even when ffmpeg (or any subprocess) printed a perfectly good diagnostic.\n\nFix pattern (now in NimbusJobs/video-worker/video_worker.py run_ffmpeg):\n- Accumulate each readline line into a bounded buffer (cap at N lines to avoid memory blowup on runaway log output).\n- On non-zero exit: log the accumulated buffer, and attach it to CalledProcessError.stderr so callers can propagate the reason upstream (e.g. Redis result payload).\n- Also append any final `.read()` trailer in case process exited mid-line.\n- Use `encoding='utf-8', errors='replace'` on Popen so cp1252 default on Windows doesn't silently corrupt non-ASCII diagnostic text."
+ },
+ {
+  "id": "learning_94d9005004245ebd",
+  "title": "AzureFile.getStream: cache bytes, NEVER cache the MemoryStream",
+  "meta_keys": [
+   "claude_instance",
+   "created",
+   "session_id",
+   "status",
+   "tags",
+   "title",
+   "type",
+   "updated"
+  ],
+  "content": "# AzureFile.getStream: cache bytes, NEVER cache the MemoryStream\n\n`NimbusCommon/AzureFile.cs` \u2014 the prior version cached the MemoryStream itself in a field `_mStream`. Every caller wraps the return in `using (var src = ...getStream()) { ... }`, which disposes the stream at block exit. The cached field then points to a disposed object, and the next call returns it, causing `ObjectDisposedException: Cannot access a closed Stream` on .Position/.Read. Fix (commit 422be3b1): cache `byte[] _cachedBytes` instead, return fresh MemoryStream each call. Latent bug; d39526fe exercised the Motion-video path often enough to make it visible (44/hr in Loki). Invariant: caller gets a fresh MemoryStream, disposal is safe, no object identity shared across call sites. Loki verification: `count_over_time({app=\"nimbus\"} |~ \"V2 FFmpeg setSrcFile exception\" [15m])` must be 0."
+ }
+]
