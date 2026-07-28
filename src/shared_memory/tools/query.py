@@ -460,6 +460,17 @@ async def memory_get_by_id(
                     payload["facets"] = f
             except Exception:
                 pass
+        # Pull-through join (recall_metrics): if this doc was recall-injected
+        # to this project in the last 24h, this fetch IS the follow-through
+        # the A2(ii) metric wants. Best-effort, one indexed read.
+        try:
+            from shared_memory.recall_metrics import log_pull_if_injected
+            _sess = active_sessions.get(session_id, {})
+            log_pull_if_injected(get_mongo(), found_id,
+                                 _sess.get("claude_instance"),
+                                 _sess.get("project"))
+        except Exception:
+            pass
         return json.dumps(payload, indent=2)
 
     # Exact-ID lookup

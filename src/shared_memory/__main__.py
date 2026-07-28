@@ -140,6 +140,37 @@ def _recall_stale_handoff(meta):
     return (utc_now() - ts) > timedelta(days=RECALL_HANDOFF_MAX_AGE_DAYS)
 
 
+# Self-echo suppression window: a doc authored by the REQUESTING agent this
+# recently is context it already holds — injecting it back is waste by
+# construction (nimbus first-day case: an agent served its own 10-minute-old
+# learning at 0.71 as a "discovery"). Older own-docs still surface: agents
+# forget their own month-old gotchas, that's recall working.
+RECALL_SELF_ECHO_HOURS = 48
+
+
+def _recall_excluded(doc_id, meta, agent):
+    """Type-aware exclusions (nimbus first-day read, msg_53e467692779 —
+    score tracks lexical mass, TYPE tracks usefulness):
+    - agent state specs (spec_state_*): read at `go` by protocol; re-injection
+      is 100% redundant at ANY age — a fresh one is the worst case.
+      Interface/design/runbook specs are NOT excluded.
+    - stale handoffs (>14d, see above).
+    - self-echo: requester's own docs updated within 48h (only when the
+      request identifies the agent)."""
+    if str(doc_id).startswith("spec_state_"):
+        return True
+    if _recall_stale_handoff(meta):
+        return True
+    if agent and meta.get("claude_instance") == agent:
+        from datetime import timedelta
+
+        from shared_memory.helpers import parse_timestamp, utc_now
+        ts = parse_timestamp(meta.get("updated") or meta.get("created"))
+        if ts is not None and (utc_now() - ts) <= timedelta(hours=RECALL_SELF_ECHO_HOURS):
+            return True
+    return False
+
+
 def _recall_one_line(claim, content):
     """Header summary for a /recall snippet: claim facet when the doc has one
     (the better assertion surface), else the content head. <= ~120 chars,
@@ -202,6 +233,7 @@ async def _recall_payload(body, api_key, via_tunnel=False):
     scope = body.get("scope") or "all"
     if scope not in RECALL_SCOPE_TYPES:
         return 400, {"error": f"'scope' must be one of {sorted(RECALL_SCOPE_TYPES)}"}
+    agent = (body.get("agent") or "").strip() or None
 
     k_raw = body.get("k")
     try:
@@ -277,7 +309,7 @@ async def _recall_payload(body, api_key, via_tunnel=False):
                 got["documents"][0], got["metadatas"][0], got["distances"][0])):
             if is_expired(meta):
                 continue
-            if _recall_stale_handoff(meta):
+            if _recall_excluded(got["ids"][0][i], meta, agent):
                 continue
             score = calculate_relevance(dist)
             if score < floor:
@@ -326,6 +358,10 @@ async def _recall_payload(body, api_key, via_tunnel=False):
         c.pop("_source")
         c["one_line"] = _recall_one_line(claims.get(c["id"]), content)
         snippets.append(c)
+
+    if snippets:
+        from shared_memory.recall_metrics import log_recall_event
+        log_recall_event(mongo, project, agent, [s["id"] for s in snippets], floor)
 
     return 200, {
         "project": project,

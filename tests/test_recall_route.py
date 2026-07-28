@@ -227,3 +227,49 @@ def test_stale_handoffs_filtered_fresh_kept(stub, monkeypatch):
     assert "handoff_stale" not in got
     assert "handoff_undated" not in got
     assert "learning_old_fine" in got  # age-gate is handoff-only
+
+
+# --- type-aware exclusions (nimbus first-day read, msg_53e467692779) ----------
+def test_state_specs_always_excluded(stub):
+    stub["proj"].rows = [
+        ("spec_state_coordinator", _meta(type="spec", title="state spec"), 0.2, "s"),
+        ("spec_interface_ble", _meta(type="spec", title="live contract"), 0.4, "c"),
+    ]
+    _, payload = _run(m._recall_payload({"project": "junto", "query": "x"}, None))
+    got = [s["id"] for s in payload["snippets"]]
+    assert "spec_state_coordinator" not in got  # even at score 0.9
+    assert "spec_interface_ble" in got          # real specs stay
+
+
+def test_self_echo_suppressed_only_with_agent(stub):
+    from datetime import timedelta
+    import shared_memory.helpers as h
+    recent = (h.utc_now() - timedelta(hours=2)).isoformat()
+    old = (h.utc_now() - timedelta(days=10)).isoformat()
+    stub["proj"].rows = [
+        ("learning_own_fresh", _meta(claude_instance="coord", updated=recent), 0.4, "a"),
+        ("learning_own_old", _meta(claude_instance="coord", updated=old), 0.4, "b"),
+        ("learning_other_fresh", _meta(claude_instance="peer", updated=recent), 0.4, "c"),
+    ]
+    _, payload = _run(m._recall_payload(
+        {"project": "junto", "query": "x", "agent": "coord"}, None))
+    got = [s["id"] for s in payload["snippets"]]
+    assert "learning_own_fresh" not in got   # self-echo within 48h
+    assert "learning_own_old" in got         # old own-docs still surface
+    assert "learning_other_fresh" in got     # peers' fresh docs unaffected
+    # No agent supplied -> no self-echo gate
+    _, payload2 = _run(m._recall_payload({"project": "junto", "query": "x"}, None))
+    assert "learning_own_fresh" in [s["id"] for s in payload2["snippets"]]
+
+
+def test_recall_event_logged_on_hits_only(stub, monkeypatch):
+    import shared_memory.recall_metrics as rm
+    logged = []
+    monkeypatch.setattr(rm, "log_recall_event",
+                        lambda db, project, agent, ids, floor: logged.append((project, agent, ids)))
+    _run(m._recall_payload({"project": "junto", "query": "x", "agent": "coord"}, None))
+    assert logged and logged[0][1] == "coord" and logged[0][2] == ["learning_aaaaaaaaaaaaaaaa"]
+    logged.clear()
+    stub["proj"].rows = []
+    _run(m._recall_payload({"project": "junto", "query": "x"}, None))
+    assert not logged  # count=0 -> no event row
