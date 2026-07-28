@@ -14,6 +14,13 @@ so the join lives here:
                  count(recall_pulls) / sum(len(recall_events.ids)).
 
 Everything here is best-effort: metrics must never fail a serve or a fetch.
+
+KNOWN OVERCOUNT DIRECTION (sub's metering hit the same trap,
+learning_9e76ae6e9598e532): a fetch inside the join window scores as a pull
+even when the agent found the doc independently (query, message pointer) —
+the join proves correlation, not causation. The 24h window is deliberately
+generous for the first data; if pull counts matter for a go/no-go, tighten
+the window or compare against a no-injection baseline before trusting them.
 """
 
 import logging
