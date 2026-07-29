@@ -50,6 +50,35 @@ def main():
                     authSource="admin", directConnection=True)
     db = c[env.get("MONGO_DB", "mcp_orchestrator")]
 
+    if "--rollback" in sys.argv:
+        # One-command restore: reactivate the archived pre-trim block,
+        # deactivate trim_*, bump version. Agents revert at next attach.
+        trims = list(db.guidelines.find({"scope": "global", "active": True,
+                                         "name": {"$regex": "^trim_"}}))
+        olds = list(db.guidelines.find({"scope": "global", "active": False,
+                                        "deactivated_by": "guideline_trim_flip"}))
+        print(f"{'EXECUTE' if execute else 'DRY-RUN'} ROLLBACK: deactivate "
+              f"{len(trims)} trim_* rules, reactivate {len(olds)} archived rules.")
+        if not olds:
+            print("ABORT: nothing to restore.")
+            return 1
+        if not execute:
+            print("dry-run only — rerun with --rollback --execute")
+            return 0
+        from shared_memory.helpers import utc_now
+        from shared_memory.tools.guidelines import bump_guidelines_version
+        now = utc_now()
+        for g in trims:
+            db.guidelines.update_one({"_id": g["_id"]}, {"$set": {
+                "active": False, "deactivated_by": "guideline_trim_rollback",
+                "deactivated_at": now}})
+        for g in olds:
+            db.guidelines.update_one({"_id": g["_id"]}, {"$set": {"active": True},
+                "$unset": {"deactivated_by": "", "deactivated_at": "", "note": ""}})
+        v = bump_guidelines_version(db, "guideline_trim_rollback")
+        print(f"ROLLED BACK. guidelines_version -> {v}. Agents revert at next session start.")
+        return 0
+
     current = list(db.guidelines.find({"scope": "global", "active": True}))
     already = [g for g in current if g["name"].startswith("trim_")]
     if already:
