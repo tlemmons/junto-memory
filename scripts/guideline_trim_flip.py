@@ -38,6 +38,7 @@ NEW_RULES = [
     ("trim_10_check_freshness", 19, "CHECK FRESHNESS — check the age field on every memory result; verify anything >30 days before trusting; supersede outdated entries you own; route others' stale docs to their project coordinator. (Mechanics: memory_query's description.)"),
     ("trim_11_concise_output", 20, "CONCISE OUTPUT — lead with what you did or need; no process narration; a 3-line result beats a 30-line explanation."),
     ("trim_12_parking", 21, "PARKING — when you are instructed to park (the user types `park`, OR a directive/message tells you to park), step 0 is memory_get_skill(\"parking\") — the checklist and context-band guidance live there. Never end_session without a current state spec."),
+    ("trim_13_read_the_source", 22, "READ THE SOURCE — about to assert or ADOPT a fact you got from a derived view? Derived views include: summaries, state specs, handoffs, formatted tool output (git porcelain), figures you computed from one, and other agents' reports or corrections — including well-evidenced ones (check the claim you're ADOPTING, not just the claim being corrected). Verify against the source of record — never by reading a SECOND derived view; the failure shape is \"checked one derived view and stopped.\" One derived artifact is a pointer, not a proof. (Read-side companion of POINTERS, NOT SUMMARIES.)"),
 ]
 
 
