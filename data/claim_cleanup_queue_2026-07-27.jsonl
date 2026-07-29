@@ -1,18 +1,3 @@
-{"id": "learning_459d00dc2fb58a59", "defects": ["meta_opener"], "claim_head": "The engineering note claims that Loki error-log recency lags behind current proc"}
-{"id": "learning_4c5926e8e9a58c36", "defects": ["meta_opener"], "claim_head": "The engineering note claims that cutover-test.nimbusframe.net shares the same II"}
-{"id": "learning_5964a0b0ee85d6ae", "defects": ["meta_opener"], "claim_head": "The note claims that using `git merge-base --is-ancestor <sha> master` to check "}
-{"id": "learning_7c3e3dc1ede84456", "defects": ["meta_opener"], "claim_head": "The engineering note claims two distinct bugs affecting Meural frames: 1. A serv"}
-{"id": "learning_7ef51a6bbd54dd6b", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the repository structure for Frames/raspframe h"}
-{"id": "learning_86674a8441bb3ffd", "defects": ["meta_opener"], "claim_head": "The engineering note claims that when replacing WordPress with static files behi"}
-{"id": "learning_9c8342d2166808c5", "defects": ["meta_opener", "truncated"], "claim_head": "The engineering note claims that the online status of a system is determined by "}
-{"id": "learning_a00473ffb03f72ef", "defects": ["meta_opener"], "claim_head": "The engineering note claims that there is a potential issue where the web applic"}
-{"id": "learning_a03513d03589f496", "defects": ["meta_opener"], "claim_head": "The engineering note claims that while the server-side provisioning for standalo"}
-{"id": "learning_a28a800e98a52a54", "defects": ["meta_opener"], "claim_head": "The engineering note claims that all eight CRLF-armed frames are offline due to "}
-{"id": "learning_d0722601b1fbdc7b", "defects": ["meta_opener"], "claim_head": "The engineering note claims that when a wire payload collapses three distinct re"}
-{"id": "learning_d27ccc8266c7069c", "defects": ["meta_opener"], "claim_head": "The engineering note claims that a blanket update of the \"Normal\" cohort from ap"}
-{"id": "learning_d2abd3c54f6a957d", "defects": ["truncated"], "claim_head": "The system experiences a hang when attempting to restart Apache via the RTC on a"}
-{"id": "learning_dc4444c76cf0f22d", "defects": ["truncated"], "claim_head": "The system uses an HTTP endpoint to fetch playlists, requiring TCP or MQTT authe"}
-{"id": "learning_de6bf60bafbe13e8", "defects": ["meta_opener"], "claim_head": "The engineering note claims that there is no existing WooCommerce subscriber/car"}
 {"id": "learning_e52eb102bc44081e", "defects": ["meta_opener"], "claim_head": "The note claims that using the `spec_owner` field enforces a structural separati"}
 {"id": "learning_ec9442219251cc78", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the v26 self-expanding golden image can be adap"}
 {"id": "learning_f49af0f92fa34418", "defects": ["meta_opener"], "claim_head": "The engineering note claims that when comparing timestamps across different syst"}
@@ -45,3 +30,5 @@
 {"id": "learning_81daac471f9491e1", "defects": ["truncated"], "claim_head": "...registry is wiped during (librarian 07-28)"}
 {"id": "12006950ff76b181", "defects": ["meta_opener"], "claim_head": "The engineering note claims that... (librarian 07-28)"}
 {"id": "2daf05a6e25289c0", "defects": ["claim_misreads_source"], "claim_head": "says restart-wipe 'addressed by jobs team ensuring no duplicates' - source says no duplicate LEARNING was recorded (librarian 07-28)"}
+{"id": "37283357175b2412", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 07-29, fresh 0.4.0 row)"}
+{"id": "learning_e1ac6c8999d9d43b", "defects": ["markdown_heading_leakage"], "claim_head": "### Core Factual Claims: 1. ... (librarian 07-29, NEW defect shape)"}
