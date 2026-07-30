@@ -25,6 +25,7 @@ from shared_memory.helpers import (
     require_session,
     utc_now_iso,
 )
+from shared_memory.intent import get_current_context_tokens
 from shared_memory.op_log import emit_op_log_from_context, fetch_embedding_for_op_log
 from shared_memory.state import active_sessions
 
@@ -390,19 +391,28 @@ async def memory_record_learning(
     except Exception as e:  # noqa: BLE001 - advisory path, degrade to no-surfacing
         logger.warning("write-time gate similar-learning lookup failed: %s", e)
 
+    metadata = {
+        "title": title,
+        "type": "learning",
+        "status": "active",
+        "tags": json.dumps(tags),
+        "session_id": session_id,
+        "claude_instance": session_info["claude_instance"],
+        "created": now,
+        "updated": now
+    }
+    # Session-age axis for the correction-rate study: context depth at write
+    # time, injected client-side via the __context_tokens sideband kwarg
+    # (inbox plugin hook). Optional — absent for clients without the hook;
+    # session_id above is the coarse fallback (joins session_starts).
+    context_tokens = get_current_context_tokens()
+    if context_tokens is not None:
+        metadata["context_tokens"] = context_tokens
+
     await collection.add(
         ids=[doc_id],
         documents=[document_text],
-        metadatas=[{
-            "title": title,
-            "type": "learning",
-            "status": "active",
-            "tags": json.dumps(tags),
-            "session_id": session_id,
-            "claude_instance": session_info["claude_instance"],
-            "created": now,
-            "updated": now
-        }]
+        metadatas=[metadata]
     )
 
     # Phase 1 #2 canary: emit op-log entry per §4.3.a (best-effort).
@@ -425,6 +435,7 @@ async def memory_record_learning(
             "tags": tags,
             "created": now,
             "embedding": embedding,
+            **({"context_tokens": context_tokens} if context_tokens is not None else {}),
         },
     )
 
