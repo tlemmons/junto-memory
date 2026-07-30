@@ -1,18 +1,3 @@
-{"id": "learning_e52eb102bc44081e", "defects": ["meta_opener"], "claim_head": "The note claims that using the `spec_owner` field enforces a structural separati"}
-{"id": "learning_ec9442219251cc78", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the v26 self-expanding golden image can be adap"}
-{"id": "learning_f49af0f92fa34418", "defects": ["meta_opener"], "claim_head": "The engineering note claims that when comparing timestamps across different syst"}
-{"id": "learning_bba7cfe61edd0553", "defects": ["meta_opener"], "claim_head": "The engineering note claims that `learning_2c4930a2f7a2289e` incorrectly cites a"}
-{"id": "learning_225ebf9f1ec5a441", "defects": ["meta_opener"], "claim_head": "The engineering note claims that six failures occurred during a single session d"}
-{"id": "ed5251956e9a4ed2", "defects": ["meta_opener"], "claim_head": "The note claims that for long-term hobbyist projects managed by a technical owne"}
-{"id": "learning_671a2f384fa00140", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the handoff path for gtchurch's visual design i"}
-{"id": "learning_d86c3509fde33911", "defects": ["meta_opener"], "claim_head": "The engineering note claims that to download files from Google Drive onto a syst"}
-{"id": "learning_b9154b620c5394e0", "defects": ["meta_opener"], "claim_head": "The engineering note claims that images break under a fixed site URL when using "}
-{"id": "learning_af3ba263b4fb84b8", "defects": ["meta_opener"], "claim_head": "The engineering note claims that a redesign architecture using a PopularFX child"}
-{"id": "learning_9a3662945e591807", "defects": ["meta_opener"], "claim_head": "The engineering note claims that components.css should be built by porting styli"}
-{"id": "0260627400662751", "defects": ["meta_opener"], "claim_head": "The engineering note records several main learnings from a session, including DB"}
-{"id": "42ab525febd46f20", "defects": ["meta_opener"], "claim_head": "The engineering note claims that there are no new learnings in the current micro"}
-{"id": "learning_c676ca71bdc49168", "defects": ["meta_opener"], "claim_head": "The engineering note claims that Sichuan AI-Link Technology is commonly used as "}
-{"id": "learning_be76d1451905a2e6", "defects": ["meta_opener"], "claim_head": "The engineering note claims that when verifying gateway/router facts, it is esse"}
 {"id": "learning_ef377c4ef86c1788", "defects": ["meta_opener"], "claim_head": "The engineering note claims that auto-memory files can contain stale or inaccura"}
 {"id": "learning_56d47e2344ea4d87", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the `energy/save_prefs` websocket schema in HA "}
 {"id": "learning_e225e996840c4dc5", "defects": ["meta_opener"], "claim_head": "The engineering note claims that there is an ongoing issue with MQTT publish-tim"}
@@ -32,3 +17,9 @@
 {"id": "2daf05a6e25289c0", "defects": ["claim_misreads_source"], "claim_head": "says restart-wipe 'addressed by jobs team ensuring no duplicates' - source says no duplicate LEARNING was recorded (librarian 07-28)"}
 {"id": "37283357175b2412", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 07-29, fresh 0.4.0 row)"}
 {"id": "learning_e1ac6c8999d9d43b", "defects": ["markdown_heading_leakage"], "claim_head": "### Core Factual Claims: 1. ... (librarian 07-29, NEW defect shape)"}
+{"id": "58b5d117201dd671", "defects": ["truncated", "numbered_list_phrasing"], "claim_head": "...drifted between versions v43 and v (librarian 07-30)"}
+{"id": "19ca0fc84bff5c35", "defects": ["truncated", "numbered_list_phrasing"], "claim_head": "...zero coupons. 6 (librarian 07-30)"}
+{"id": "f5bd0d6ab3222d82", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 07-30)"}
+{"id": "84c8b3419f0980b0", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 07-30)"}
+{"id": "94eb9858e2d958a6", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 07-30)"}
+{"id": "ac5150204d5e9ebd", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 07-30)"}
