@@ -1,18 +1,3 @@
-{"id": "learning_ef377c4ef86c1788", "defects": ["meta_opener"], "claim_head": "The engineering note claims that auto-memory files can contain stale or inaccura"}
-{"id": "learning_56d47e2344ea4d87", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the `energy/save_prefs` websocket schema in HA "}
-{"id": "learning_e225e996840c4dc5", "defects": ["meta_opener"], "claim_head": "The engineering note claims that there is an ongoing issue with MQTT publish-tim"}
-{"id": "learning_70fa6c833ef7c041", "defects": ["meta_opener"], "claim_head": "The engineering note claims that sites with uId 2238 and 2423 successfully conta"}
-{"id": "learning_76bc9a6d2d0d20cb", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the server team designed a MeuralFix portrait s"}
-{"id": "learning_03496f563107c576", "defects": ["meta_opener"], "claim_head": "The engineering note claims that fresh builds of picFrameWeb require three manua"}
-{"id": "learning_da20f6cbae1fdea1", "defects": ["meta_opener"], "claim_head": "The engineering note describes the configuration and deployment of tiered alert "}
-{"id": "learning_665451748dd68213", "defects": ["meta_opener"], "claim_head": "The engineering note claims the following about the system: 1. The HA alert suit"}
-{"id": "learning_044ccd84834efd7b", "defects": ["truncated"], "claim_head": "1. Jessie's CA store does not include the ISRG Root X1 certificate, causing Let'"}
-{"id": "learning_b954b1ce52ffec32", "defects": ["meta_opener"], "claim_head": "The engineering note claims that Nimbus Frame #710acf54 is powered and within BL"}
-{"id": "learning_5dbe7f001e651c71", "defects": ["meta_opener"], "claim_head": "The engineering note claims that the visible \"adopting user override\" warning on"}
-{"id": "learning_6394cdeb6dd9365a", "defects": ["meta_opener"], "claim_head": "The note claims that two paths for remote BLE WiFi provisioning of a v26 frame f"}
-{"id": "learning_1df4bb3a83f0ca2b", "defects": ["meta_opener"], "claim_head": "The note claims that content-ID is ineffective for identifying episodes on Blu-r"}
-{"id": "7cae8a97367da84c", "defects": ["meta_opener", "truncated"], "claim_head": "The note claims that: ... 7. Using memory_list (librarian 07-28)"}
-{"id": "learning_81daac471f9491e1", "defects": ["truncated"], "claim_head": "...registry is wiped during (librarian 07-28)"}
 {"id": "12006950ff76b181", "defects": ["meta_opener"], "claim_head": "The engineering note claims that... (librarian 07-28)"}
 {"id": "2daf05a6e25289c0", "defects": ["claim_misreads_source"], "claim_head": "says restart-wipe 'addressed by jobs team ensuring no duplicates' - source says no duplicate LEARNING was recorded (librarian 07-28)"}
 {"id": "37283357175b2412", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 07-29, fresh 0.4.0 row)"}
@@ -23,3 +8,6 @@
 {"id": "84c8b3419f0980b0", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 07-30)"}
 {"id": "94eb9858e2d958a6", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 07-30)"}
 {"id": "ac5150204d5e9ebd", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 07-30)"}
+{"id": "312f98e63634034b", "defects": ["truncated", "xml_leak"], "claim_head": "claim stops mid-sentence at '...while customer'; body also carries tool-call XML leak (librarian 07-31)"}
+{"id": "34cb04985e349126", "defects": ["truncated"], "claim_head": "claim stops mid-sentence at '...and there exists a pre-sweep baseline' (librarian 07-31)"}
+{"id": "2822b9b603aad9bc", "defects": ["truncated"], "claim_head": "claim stops mid-sentence at '...causing drops to be interpreted' (librarian 07-31)"}
