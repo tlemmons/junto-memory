@@ -1,13 +1,4 @@
-{"id": "12006950ff76b181", "defects": ["meta_opener"], "claim_head": "The engineering note claims that... (librarian 07-28)"}
-{"id": "2daf05a6e25289c0", "defects": ["claim_misreads_source"], "claim_head": "says restart-wipe 'addressed by jobs team ensuring no duplicates' - source says no duplicate LEARNING was recorded (librarian 07-28)"}
-{"id": "37283357175b2412", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 07-29, fresh 0.4.0 row)"}
-{"id": "learning_e1ac6c8999d9d43b", "defects": ["markdown_heading_leakage"], "claim_head": "### Core Factual Claims: 1. ... (librarian 07-29, NEW defect shape)"}
-{"id": "58b5d117201dd671", "defects": ["truncated", "numbered_list_phrasing"], "claim_head": "...drifted between versions v43 and v (librarian 07-30)"}
-{"id": "19ca0fc84bff5c35", "defects": ["truncated", "numbered_list_phrasing"], "claim_head": "...zero coupons. 6 (librarian 07-30)"}
-{"id": "f5bd0d6ab3222d82", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 07-30)"}
-{"id": "84c8b3419f0980b0", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 07-30)"}
-{"id": "94eb9858e2d958a6", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 07-30)"}
-{"id": "ac5150204d5e9ebd", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 07-30)"}
-{"id": "312f98e63634034b", "defects": ["truncated", "xml_leak"], "claim_head": "claim stops mid-sentence at '...while customer'; body also carries tool-call XML leak (librarian 07-31)"}
-{"id": "34cb04985e349126", "defects": ["truncated"], "claim_head": "claim stops mid-sentence at '...and there exists a pre-sweep baseline' (librarian 07-31)"}
-{"id": "2822b9b603aad9bc", "defects": ["truncated"], "claim_head": "claim stops mid-sentence at '...causing drops to be interpreted' (librarian 07-31)"}
+{"id": "b70f7f3a3304d50d", "defects": ["claim_misreads_source"], "claim_head": "reads digest phrase 'the load-bearing ones' (= learnings) as 'load-bearing components', so claim asserts the system has failing components (librarian 08-01)"}
+{"id": "4c19a6dc955f23eb", "defects": ["truncated", "numbered_list_phrasing"], "claim_head": "claim stops mid-sentence at '...a position-based fix would result' (librarian 08-01)"}
+{"id": "3ad0ffe6154684d0", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 08-01)"}
+{"id": "1f4342aa1e686751", "defects": ["meta_opener"], "claim_head": "The engineering note claims that... (librarian 08-01)"}
