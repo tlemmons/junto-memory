@@ -1,4 +1,0 @@
-{"id": "b70f7f3a3304d50d", "defects": ["claim_misreads_source"], "claim_head": "reads digest phrase 'the load-bearing ones' (= learnings) as 'load-bearing components', so claim asserts the system has failing components (librarian 08-01)"}
-{"id": "4c19a6dc955f23eb", "defects": ["truncated", "numbered_list_phrasing"], "claim_head": "claim stops mid-sentence at '...a position-based fix would result' (librarian 08-01)"}
-{"id": "3ad0ffe6154684d0", "defects": ["meta_opener"], "claim_head": "The note claims that... (librarian 08-01)"}
-{"id": "1f4342aa1e686751", "defects": ["meta_opener"], "claim_head": "The engineering note claims that... (librarian 08-01)"}
