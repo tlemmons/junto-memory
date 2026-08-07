@@ -182,7 +182,14 @@ async def memory_define_spec(
                 "spec_name": name,
                 "owner": existing_owner,
                 "requester": owner,
-                "suggestion": "Only the owner can update this spec. Contact the owner to request changes."
+                "suggestion": (
+                    "Only the owner can update this spec. NOTE: the `owner` "
+                    "parameter here declares who YOU are writing as — it does "
+                    "NOT reassign ownership. To transfer ownership (e.g. from "
+                    "a retired agent), a project admin runs memory_project("
+                    "action='transfer_spec', name=<project>, spec_name=<spec>, "
+                    "owner=<new-owner>). Otherwise contact the owner."
+                )
             })
 
         # State spec overwrite protection: reject if new content is much shorter

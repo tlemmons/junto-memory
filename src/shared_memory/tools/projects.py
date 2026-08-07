@@ -155,6 +155,9 @@ async def memory_project(
     owner: str = None,
     sunset: str = None,
     purpose: str = None,
+    spec_name: str = None,
+    force: bool = False,
+    aliases: List[str] = None,
     ctx: Context = None
 ) -> str:
     """
@@ -201,7 +204,18 @@ async def memory_project(
         tier='named'.
         Required: name (project), agent (agent name)
 
+    action="transfer_spec" - Reassign a spec's owner (admin/coordinator only).
+        Required: name (project), spec_name, owner (the NEW owner).
+        Works on dead/retired owners; captures the outgoing owner's
+        role_description/last_task as provenance at transfer time; audit-logged.
+        This — not define_spec's owner param, which declares who YOU are —
+        is how ownership moves.
+
     action="update_agent" - Update agent details (admin/coordinator only)
+        Optional: aliases (list — same collision-checked persist path as
+        start_session's self-declared aliases; None=untouched, []=clear).
+        decommission also accepts force=True to proceed while the agent
+        still owns non-state specs (freezes the estate knowingly).
         Required: name (project), agent (agent name)
         Optional: role_description, tier, path_patterns
 
@@ -513,6 +527,12 @@ async def memory_project(
             update_fields["sunset"] = sunset
         if purpose is not None:
             update_fields["purpose"] = purpose
+        # Coordinator-side alias management (backlog_00c137c09daa): same
+        # persist path as start_session's self-declared aliases, same
+        # collision checks. None = untouched; [] = clear.
+        alias_result = None
+        if aliases is not None:
+            alias_result = persist_agent_aliases(db, project_name, agent, aliases)
 
         db.registered_agents.update_one(
             {"project": project_name, "name": agent},
@@ -531,11 +551,85 @@ async def memory_project(
                 {"$pull": {"admins": agent}, "$set": {"updated_at": now}}
             )
 
-        return json.dumps({
+        _resp = {
             "status": "updated",
             "project": project_name,
             "agent": agent,
             "updated_fields": list(update_fields.keys())
+        }
+        if alias_result is not None:
+            _resp["aliases"] = alias_result
+        return json.dumps(_resp)
+
+    # -- TRANSFER_SPEC (backlog_a7e75fc0dae7 + design:assistant-escheat-v0 §5) --
+    # Reassign a spec's owner. Project-admin gated; works on dead/retired
+    # owners (that's the point — decommissioned estates were frozen forever).
+    # Provenance captured AT TRANSFER TIME per escheat §7a: the source's
+    # role_description/last_task survive here even after the reaper deletes
+    # the directory row that held them.
+    elif action == "transfer_spec":
+        if not name or not spec_name or not owner:
+            return json.dumps({"error": "name (project), spec_name, and owner (new owner) required for transfer_spec"})
+
+        project_name = name.lower().replace("-", "_").replace(" ", "_")
+        if not _caller_is_admin(project_name):
+            return json.dumps({"error": f"Permission denied. Only project admins can transfer specs. You are '{caller}'."})
+
+        from shared_memory.clients import get_chroma as _gc
+        from shared_memory.helpers import get_project_collection as _gpc, get_shared_collection as _gsc
+        _chroma = await _gc()
+        _spec_doc_id = f"spec_{spec_name.replace(':', '_').replace('/', '_')}"
+
+        _coll = await _gpc(_chroma, project_name)
+        _got = await _coll.get(ids=[_spec_doc_id], include=["metadatas"])
+        if not _got.get("ids"):
+            _coll = await _gsc(_chroma, "patterns")
+            _got = await _coll.get(ids=[_spec_doc_id], include=["metadatas"])
+        if not _got.get("ids"):
+            return json.dumps({"error": f"Spec '{spec_name}' not found in project '{project_name}' or shared scope."})
+
+        _meta = (_got.get("metadatas") or [{}])[0] or {}
+        _old_owner = _meta.get("spec_owner", "")
+
+        # Provenance from the outgoing owner's directory row, captured NOW —
+        # the reaper deletes that row; this record is where the context lives.
+        _prov = {}
+        _dir_row = db.agent_directory.find_one(
+            {"project": project_name, "instance": _old_owner},
+            {"role_description": 1, "last_task": 1},
+        ) if _old_owner else None
+        if _dir_row:
+            _prov = {
+                "prior_owner_role": _dir_row.get("role_description", ""),
+                "prior_owner_last_task": _dir_row.get("last_task", ""),
+            }
+
+        _meta["spec_owner"] = owner
+        _meta["owner_transferred_from"] = _old_owner
+        _meta["owner_transferred_by"] = caller
+        _meta["owner_transferred_at"] = now
+        for _k, _v in _prov.items():
+            _meta[_k] = _v
+        await _coll.update(ids=[_spec_doc_id], metadatas=[_meta])
+
+        try:
+            from shared_memory.audit import log_audit
+            log_audit("spec.owner_transferred", _old_owner or "(unowned)", project_name, {
+                "spec_name": spec_name,
+                "new_owner": owner,
+                "by": caller,
+                **_prov,
+            }, session_id)
+        except Exception:
+            pass
+
+        return json.dumps({
+            "status": "transferred",
+            "spec_name": spec_name,
+            "old_owner": _old_owner,
+            "new_owner": owner,
+            "provenance": _prov or None,
+            "note": "Ownership reassigned; version history untouched. The new owner may now update via memory_define_spec.",
         })
 
     # -- DECOMMISSION (identity-lifecycle Mechanism C: any-tier → retired) --
@@ -563,6 +657,39 @@ async def memory_project(
                     f"Agent '{agent}' has a LIVE session. Park/end it first — "
                     "decommission of a working agent is refused."
                 )})
+
+        # Owned-specs guard (backlog_a7e75fc0dae7): decommission freezes every
+        # spec the agent owns — "preserved" is not writable, and the two get
+        # read as the same thing. Refuse while the agent owns non-agent_state
+        # specs (its state spec is archived by this very action, so it's
+        # exempt); transfer first via action='transfer_spec', or pass
+        # force=True to freeze the estate knowingly.
+        owned_specs = []
+        try:
+            from shared_memory.clients import get_chroma as _gc
+            from shared_memory.helpers import get_project_collection as _gpc
+            _chroma = await _gc()
+            _coll = await _gpc(_chroma, project_name)
+            _got = await _coll.get(
+                where={"spec_owner": agent}, include=["metadatas"]
+            )
+            for _sid, _m in zip(_got.get("ids") or [], _got.get("metadatas") or []):
+                if (_m or {}).get("spec_type") != "agent_state":
+                    owned_specs.append((_m or {}).get("spec_name") or _sid)
+        except Exception:
+            pass  # guard is best-effort; an enumeration failure must not
+            # convert decommission into an unconditional refusal
+        if owned_specs and not force:
+            return json.dumps({
+                "error": (
+                    f"Agent '{agent}' OWNS {len(owned_specs)} non-state spec(s). "
+                    "Decommission would freeze them un-writable forever. Transfer "
+                    "first: memory_project(action='transfer_spec', name=<project>, "
+                    "spec_name=<spec>, owner=<new-owner>) — or pass force=True to "
+                    "freeze the estate knowingly."
+                ),
+                "owned_specs": owned_specs,
+            })
 
         # (a) Revoke the agent's scoped keys. Keys carry no agent binding, so
         # match by naming convention: exact name or '<agent>-*' prefix. The
@@ -647,4 +774,4 @@ async def memory_project(
         })
 
     else:
-        return json.dumps({"error": f"Unknown action '{action}'. Must be one of: create, get, list, set_owner, delete, add_agent, remove_agent, update_agent, decommission"})
+        return json.dumps({"error": f"Unknown action '{action}'. Must be one of: create, get, list, set_owner, delete, add_agent, remove_agent, update_agent, decommission, transfer_spec"})
