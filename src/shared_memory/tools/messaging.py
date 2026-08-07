@@ -1789,6 +1789,18 @@ async def memory_list_agents(
 
     cursor = db.agent_directory.find(mongo_query).sort("last_seen", -1)
 
+    # Roster join (backlog_77a8e2f540ce): lifecycle fields live on
+    # registered_agents, not the directory — without them a roster review
+    # can't see tier/spawned_by, and directory-only rows are indistinguishable
+    # from registered ones (the 62-vs-23 confusion: two different collections).
+    roster = {}
+    _roster_q = {"project": project} if project else {}
+    for _r in db.registered_agents.find(
+        _roster_q, {"project": 1, "name": 1, "tier": 1, "spawned_by": 1,
+                    "sunset": 1, "purpose": 1, "aliases": 1}
+    ):
+        roster[(_r.get("project"), _r.get("name"))] = _r
+
     agents = []
     now = utc_now()
     for doc in cursor:
@@ -1806,6 +1818,7 @@ async def memory_list_agents(
         if last_seen:
             days_ago = round((now - last_seen).total_seconds() / 86400, 1)
 
+        _reg = roster.get((doc.get("project"), doc.get("instance")))
         agents.append({
             "project": doc.get("project"),
             "instance": doc.get("instance"),
@@ -1814,6 +1827,43 @@ async def memory_list_agents(
             "days_ago": days_ago,
             "session_count": doc.get("session_count", 0),
             "last_task": doc.get("last_task", ""),
+            # Lifecycle join (additive fields, backlog_77a8e2f540ce).
+            # registered=False → directory-only row: never formally rostered,
+            # invisible to standup, candidate for roster-hygiene review.
+            "registered": _reg is not None,
+            "tier": (_reg or {}).get("tier"),
+            "spawned_by": (_reg or {}).get("spawned_by"),
+            "sunset": (_reg or {}).get("sunset"),
+            "purpose": (_reg or {}).get("purpose"),
+        })
+
+    # Roster-only rows (registered_agents docs with no directory row — e.g.
+    # seed-registered agents that never opened a session): append so ONE call
+    # covers the full roster-review surface (backlog_77a8e2f540ce).
+    _seen = {(a["project"], a["instance"]) for a in agents}
+    for (_proj, _name), _r in roster.items():
+        if (_proj, _name) in _seen:
+            continue
+        if query:
+            q_lower = query.lower()
+            if not (q_lower in (_name or "").lower()
+                    or q_lower in (_r.get("role_description") or "").lower()
+                    or q_lower in (_proj or "").lower()):
+                continue
+        agents.append({
+            "project": _proj,
+            "instance": _name,
+            "role_description": _r.get("role_description", ""),
+            "last_seen": None,
+            "days_ago": None,
+            "session_count": 0,
+            "last_task": "",
+            "registered": True,
+            "roster_only": True,
+            "tier": _r.get("tier"),
+            "spawned_by": _r.get("spawned_by"),
+            "sunset": _r.get("sunset"),
+            "purpose": _r.get("purpose"),
         })
 
     return json.dumps({

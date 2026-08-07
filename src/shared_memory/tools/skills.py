@@ -190,7 +190,15 @@ async def memory_register_skill(
 
     session_info = active_sessions[session_id]
     now = utc_now_iso()
-    project = normalize_project(project) if project else session_info.get("project")
+    # Shared-scope fix (backlog_27c0fc6bcb4f): None = default to the session's
+    # project; explicit "" = SHARED skill (was silently coerced to the session
+    # project by the falsy check, making shared skills unregisterable).
+    if project is None:
+        project = session_info.get("project")
+    elif project == "":
+        pass  # explicit shared scope
+    else:
+        project = normalize_project(project)
     owner = session_info.get("claude_instance", "unknown")
 
     try:
