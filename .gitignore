@@ -60,3 +60,4 @@ temp/
 .agent-name
 .agent-name.bak
 .project-name
+.env.bak*

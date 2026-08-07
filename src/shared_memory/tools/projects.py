@@ -607,7 +607,10 @@ async def memory_project(
         _meta["spec_owner"] = owner
         _meta["owner_transferred_from"] = _old_owner
         _meta["owner_transferred_by"] = caller
-        _meta["owner_transferred_at"] = now
+        # Chroma metadata takes primitives only — utc_now() is a datetime
+        # (fine for the mongo writes elsewhere in this tool, fatal here).
+        # Caught live by coordinator on the first real transfer (msg_be544d511f81).
+        _meta["owner_transferred_at"] = now.isoformat() if hasattr(now, "isoformat") else str(now)
         for _k, _v in _prov.items():
             _meta[_k] = _v
         await _coll.update(ids=[_spec_doc_id], metadatas=[_meta])
