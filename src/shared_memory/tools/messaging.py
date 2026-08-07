@@ -1797,18 +1797,29 @@ async def memory_list_agents(
     _roster_q = {"project": project} if project else {}
     for _r in db.registered_agents.find(
         _roster_q, {"project": 1, "name": 1, "tier": 1, "spawned_by": 1,
-                    "sunset": 1, "purpose": 1, "aliases": 1}
+                    "sunset": 1, "purpose": 1, "aliases": 1,
+                    # authoritative role_description — see the roster-wins
+                    # note at the row build below
+                    "role_description": 1}
     ):
         roster[(_r.get("project"), _r.get("name"))] = _r
 
     agents = []
     now = utc_now()
     for doc in cursor:
+        _reg_pre = roster.get((doc.get("project"), doc.get("instance")))
+        # Search the AUTHORITATIVE role text, not the directory cache —
+        # otherwise a query matches (or misses) on words the caller can no
+        # longer see in the returned row.
+        _role_for_match = (
+            (_reg_pre or {}).get("role_description")
+            or doc.get("role_description", "")
+        )
         # If query provided, filter by instance name or role_description
         if query:
             q_lower = query.lower()
             instance_match = q_lower in doc.get("instance", "").lower()
-            role_match = q_lower in doc.get("role_description", "").lower()
+            role_match = q_lower in _role_for_match.lower()
             project_match = q_lower in doc.get("project", "").lower()
             if not (instance_match or role_match or project_match):
                 continue
@@ -1818,11 +1829,22 @@ async def memory_list_agents(
         if last_seen:
             days_ago = round((now - last_seen).total_seconds() / 86400, 1)
 
-        _reg = roster.get((doc.get("project"), doc.get("instance")))
+        _reg = _reg_pre
+        # ROSTER WINS on role_description (coordinator msg_af23da260f8e):
+        # registered_agents is authoritative, agent_directory is the cache.
+        # Reading roster-first heals pre-existing divergence with no backfill
+        # — the write-through in memory_project keeps them aligned going
+        # forward, this makes the DISCOVERY surface correct even for rows
+        # that diverged before the write-through shipped.
+        _role = _role_for_match
+        # Surface the divergence rather than hiding it: a silently-corrected
+        # read is how the two stores drifted unnoticed for weeks.
+        _dir_role = doc.get("role_description", "")
+        _stale_cache = bool(_reg and _dir_role and _dir_role != _role)
         agents.append({
             "project": doc.get("project"),
             "instance": doc.get("instance"),
-            "role_description": doc.get("role_description", ""),
+            "role_description": _role,
             "last_seen": last_seen.isoformat() if last_seen else None,
             "days_ago": days_ago,
             "session_count": doc.get("session_count", 0),
@@ -1835,6 +1857,7 @@ async def memory_list_agents(
             "spawned_by": (_reg or {}).get("spawned_by"),
             "sunset": (_reg or {}).get("sunset"),
             "purpose": (_reg or {}).get("purpose"),
+            **({"directory_cache_stale": True} if _stale_cache else {}),
         })
 
     # Roster-only rows (registered_agents docs with no directory row — e.g.

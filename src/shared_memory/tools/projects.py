@@ -539,6 +539,19 @@ async def memory_project(
             {"$set": update_fields}
         )
 
+        # DUAL-STORE WRITE-THROUGH (coordinator msg_af23da260f8e, 2026-08-07).
+        # role_description lives in BOTH registered_agents (roster, written
+        # here) and agent_directory (discovery, written at start_session).
+        # Updating only the roster left the DISCOVERY surface — the one
+        # strangers read to route work — serving the stale text, while the
+        # correct value sat where only an admin registry-get would see it.
+        # registered_agents is AUTHORITATIVE; the directory copy is a cache.
+        if "role_description" in update_fields:
+            db.agent_directory.update_one(
+                {"project": project_name, "instance": agent},
+                {"$set": {"role_description": update_fields["role_description"]}},
+            )
+
         # Sync admin list if tier changed
         if tier == "admin":
             db.projects.update_one(
