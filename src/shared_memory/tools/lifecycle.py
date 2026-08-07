@@ -234,9 +234,30 @@ async def memory_change_status(
         metadatas=[meta]
     )
 
+    # Facets lifecycle sync (backlog_8f304329c490): learning_facets/
+    # learning_claims carry no doc status and nothing re-checked them on
+    # supersede — a claim extracted seconds before its doc was superseded
+    # stayed servable as live knowledge forever (the 41f8f21f 5-minute-race
+    # specimen). Stamp source_status on both rows so facet-first consumers
+    # (sub's pipelines, librarian queries) can filter without a doc join.
+    # Single-writer server makes this safe; best-effort — the chroma status
+    # write above is the load-bearing op.
+    facets_synced = False
+    try:
+        from shared_memory.clients import get_mongo as _get_mongo
+        _db = _get_mongo()
+        if _db is not None:
+            _stamp = {"source_status": new_status, "source_status_updated_at": now}
+            r1 = _db.learning_facets.update_many({"_id": doc_id}, {"$set": _stamp})
+            r2 = _db.learning_claims.update_many({"_id": doc_id}, {"$set": _stamp})
+            facets_synced = bool(r1.modified_count or r2.modified_count)
+    except Exception:
+        pass
+
     return json.dumps({
         "status": "updated",
         "doc_id": doc_id,
+        "facets_synced": facets_synced,
         "old_status": old_status,
         "new_status": new_status,
         "superseded_by": superseded_by,
