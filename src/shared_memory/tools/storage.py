@@ -463,7 +463,7 @@ async def memory_record_learning(
     # references in the body, warn in THIS response — the artifact chokepoint.
     # Best-effort; never blocks or rejects the recorded learning.
     try:
-        from shared_memory.write_lint import find_unresolved_refs, advisory_payload
+        from shared_memory.write_lint import advisory_payload, find_unresolved_refs
         _unresolved = await find_unresolved_refs(
             f"{title}\n{details}", get_mongo(), chroma, project
         )

@@ -1086,8 +1086,8 @@ async def memory_send_message(
     # Best-effort, additive field, never blocks the send.
     _ref_advisory = {}
     try:
-        from shared_memory.write_lint import find_unresolved_refs, advisory_payload
         from shared_memory.clients import get_chroma as _get_chroma
+        from shared_memory.write_lint import advisory_payload, find_unresolved_refs
         _unresolved = await find_unresolved_refs(
             message, db, await _get_chroma(), from_project
         )

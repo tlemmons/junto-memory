@@ -576,7 +576,8 @@ async def memory_project(
             return json.dumps({"error": f"Permission denied. Only project admins can transfer specs. You are '{caller}'."})
 
         from shared_memory.clients import get_chroma as _gc
-        from shared_memory.helpers import get_project_collection as _gpc, get_shared_collection as _gsc
+        from shared_memory.helpers import get_project_collection as _gpc
+        from shared_memory.helpers import get_shared_collection as _gsc
         _chroma = await _gc()
         _spec_doc_id = f"spec_{spec_name.replace(':', '_').replace('/', '_')}"
 

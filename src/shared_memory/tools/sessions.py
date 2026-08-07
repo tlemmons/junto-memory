@@ -176,8 +176,8 @@ async def memory_start_session(
     # which clears the obligations the reap guard would otherwise block on.
     # Throttled internally; best-effort — never blocks a session start.
     try:
-        from shared_memory.identity_gc import maybe_escheat_assistants
         from shared_memory.clients import get_chroma as _esch_chroma
+        from shared_memory.identity_gc import maybe_escheat_assistants
         await maybe_escheat_assistants(get_mongo(), await _esch_chroma(), active_sessions)
     except Exception as _esch_err:  # noqa: BLE001
         print(f"[MCP] assistant escheat sweep failed (non-fatal): {_esch_err}")
