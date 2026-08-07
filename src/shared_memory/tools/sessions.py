@@ -833,6 +833,40 @@ async def memory_end_session(
     session_info = active_sessions[session_id]
     now = utc_now_iso()
 
+    # Write-lint (backlog_1115f9fe35f7): malformed client emissions serialize
+    # the call's own XML envelope into the learnings param, swallowing the
+    # handoff_notes that follow (8 confirmed docs, 3 callers). Strip the
+    # markup and RE-ROUTE the captured handoff to its proper field BEFORE
+    # either doc is written — never reject; every observed leak carried
+    # substantive content. Runs on both text params defensively.
+    lint_notes = []
+    try:
+        from shared_memory.write_lint import strip_envelope_leak
+        if learnings:
+            learnings, extracted, leaked = strip_envelope_leak(learnings, "learnings")
+            if leaked:
+                recovered_handoff = extracted.pop("handoff_notes", None)
+                if recovered_handoff:
+                    handoff_notes = (
+                        f"{handoff_notes}\n\n{recovered_handoff}"
+                        if handoff_notes else recovered_handoff
+                    )
+                for pname, ptext in extracted.items():
+                    lint_notes.append(f"recovered '{pname}' block ({len(ptext)} chars) appended to handoff")
+                    handoff_notes = (
+                        f"{handoff_notes}\n\n## [write-lint] recovered {pname}\n{ptext}"
+                        if handoff_notes else ptext
+                    )
+                lint_notes.insert(0, "envelope leak stripped from learnings; handoff re-routed")
+        if handoff_notes:
+            handoff_notes, h_extracted, h_leaked = strip_envelope_leak(handoff_notes, "handoff_notes")
+            if h_leaked:
+                lint_notes.append("envelope debris stripped from handoff_notes")
+                for pname, ptext in h_extracted.items():
+                    handoff_notes += f"\n\n## [write-lint] recovered {pname}\n{ptext}"
+    except Exception:
+        pass  # lint is best-effort; the park writes are the load-bearing ops
+
     # Store handoff note
     proj_collection = await get_project_collection(chroma, session_info["project"])
 
@@ -867,17 +901,26 @@ async def memory_end_session(
         }]
     )
 
-    # Store learning if provided
+    # Store learning if provided. Metadata defaulted from park context
+    # (backlog_1115f9fe35f7 adjacent win): generic "Learning from X" titles
+    # with no tags/instance made even CLEAN parks near-unfindable — the
+    # findability gap is part of why orphaned content stayed orphaned.
     if learnings:
         learning_id = generate_doc_id(learnings, "learning")
+        _task_hint = (session_info.get("task") or "").strip()[:60]
         await proj_collection.add(
             ids=[learning_id],
             documents=[learnings],
             metadatas=[{
-                "title": f"Learning from {session_info['claude_instance']}",
+                "title": (
+                    f"Learning from {session_info['claude_instance']}"
+                    + (f": {_task_hint}" if _task_hint else "")
+                ),
                 "type": "learning",
                 "status": "active",
+                "tags": json.dumps(["park-summary", session_info["claude_instance"]]),
                 "session_id": session_id,
+                "claude_instance": session_info["claude_instance"],
                 "created": now,
                 "updated": now
             }]
@@ -934,5 +977,7 @@ async def memory_end_session(
     result = {"status": "ended"}
     if released_locks:
         result["released_locks"] = released_locks
+    if lint_notes:
+        result["write_lint"] = lint_notes
 
     return json.dumps(result)

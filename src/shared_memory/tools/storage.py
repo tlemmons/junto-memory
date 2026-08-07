@@ -368,6 +368,22 @@ async def memory_record_learning(
     session_info = active_sessions[session_id]
     now = utc_now_iso()
 
+    # Write-lint (backlog_1115f9fe35f7): strip serialized tool-call envelope
+    # if a malformed emission leaked it into the body. Recovered sibling
+    # content is kept in-doc under a marked heading (record_learning has no
+    # handoff field to re-route to) and flagged in the response.
+    _lint_notes = []
+    try:
+        from shared_memory.write_lint import strip_envelope_leak
+        details, _extracted, _leaked = strip_envelope_leak(details, "details")
+        if _leaked:
+            _lint_notes.append("envelope leak stripped from details")
+            for _pname, _ptext in _extracted.items():
+                details += f"\n\n## [write-lint] recovered {_pname}\n{_ptext}"
+                _lint_notes.append(f"recovered '{_pname}' block kept in-doc")
+    except Exception:
+        pass
+
     if project:
         project = normalize_project(project)
         collection = await get_project_collection(chroma, project)
@@ -440,6 +456,22 @@ async def memory_record_learning(
     )
 
     result = {"status": "recorded", "id": doc_id}
+    if _lint_notes:
+        result["write_lint"] = _lint_notes
+
+    # Dangling-ref advisory (backlog_d03297e01f30): existence-check ID-shaped
+    # references in the body, warn in THIS response — the artifact chokepoint.
+    # Best-effort; never blocks or rejects the recorded learning.
+    try:
+        from shared_memory.write_lint import find_unresolved_refs, advisory_payload
+        _unresolved = await find_unresolved_refs(
+            f"{title}\n{details}", get_mongo(), chroma, project
+        )
+        if _unresolved:
+            result.update(advisory_payload(_unresolved))
+    except Exception:
+        pass
+
     if similar_prior:
         # Classifier stage (interface:claim-extraction-v0): annotate each
         # surfaced prior with CONTRADICTS/CONSISTENT/UNRELATED. Advisory and

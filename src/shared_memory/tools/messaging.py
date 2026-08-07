@@ -973,7 +973,15 @@ async def memory_send_message(
         # Obligation track (design:unified-messaging-v0 Stage 3 / lanes-B). ACTION
         # categories start "open"; info carries none. A reply from the owner
         # advances it via _advance_parent_obligation_on_reply.
-        "obligation": "open" if category in ACTION_CATEGORIES else None,
+        # BROADCASTS NEVER MINT OBLIGATIONS (backlog_ddfa1ae20a76, 2026-08-06):
+        # an announcement has no addressee who owes a reply — obligations
+        # require a named recipient. Before this, one action-category broadcast
+        # doc rendered as a permanently-open obligation in EVERY project
+        # member's action lane (23 measured phantoms). Enforcement half of
+        # send-rule #4, which documented exactly this hazard as guideline.
+        "obligation": (
+            "open" if (category in ACTION_CATEGORIES and to_instance != "*") else None
+        ),
         # Component (design:unified-messaging-v0 Stage 1 / ADDRESSING). Optional
         # sub-group under the project. Stage 1 = first-class metadata only;
         # component-routing/claiming land in Stages 2-3. null = route by
@@ -991,9 +999,13 @@ async def memory_send_message(
         # ages in 48h; an ACTION message starts with NO expiry (unacked actions
         # must never silently vanish) and gets expire_at=created+7d only when it
         # reaches a terminal state (ack/resolve) via _set_action_message_expiry.
+        # Broadcasts always get the info TTL regardless of category: with no
+        # obligation to clear them (rule above), a no-expiry action-category
+        # broadcast would be immortal-but-invisible. Announcements age out.
         "expire_at": (
-            None if category in ACTION_CATEGORIES
-            else now + timedelta(hours=MESSAGE_INFO_TTL_HOURS)
+            now + timedelta(hours=MESSAGE_INFO_TTL_HOURS)
+            if (to_instance == "*" or category not in ACTION_CATEGORIES)
+            else None
         ),
         "push_suppressed": suppress_push,
         "push_suppress_reason": push_suppress_reason,
@@ -1068,6 +1080,22 @@ async def memory_send_message(
     # final_depth. Kept in the response shape for backward compat.
     effective_chain_depth = final_depth
 
+    # Dangling-ref advisory (backlog_d03297e01f30): existence-check ID-shaped
+    # refs in the outgoing body, warn in THIS response — a warning that lands
+    # before the sender's next action is a gate; anything later is a feed.
+    # Best-effort, additive field, never blocks the send.
+    _ref_advisory = {}
+    try:
+        from shared_memory.write_lint import find_unresolved_refs, advisory_payload
+        from shared_memory.clients import get_chroma as _get_chroma
+        _unresolved = await find_unresolved_refs(
+            message, db, await _get_chroma(), from_project
+        )
+        if _unresolved:
+            _ref_advisory = advisory_payload(_unresolved)
+    except Exception:
+        pass
+
     response = {
         "status": "queued",
         "message_id": message_id,
@@ -1093,6 +1121,8 @@ async def memory_send_message(
         "recency_bypass": recency_bypass,
         "live_subscribers": 0 if suppress_push else live_subscribers,
     }
+    if _ref_advisory:
+        response.update(_ref_advisory)
 
     # Read-side idle-queue visibility (backlog_da56a6e0c46b). When the recipient
     # has NO live stream to receive this push, tell the sender what's already
