@@ -73,6 +73,21 @@ def strip_envelope_leak(body: str, field_name: str) -> Tuple[str, Dict[str, str]
     if not body:
         return body, {}, False
 
+    # TERMINAL-ENVELOPE REQUIREMENT (added 2026-08-07, first nightly post-ship):
+    # three weeks of remediation threads QUOTE the leak pattern in prose —
+    # handoffs and learnings legitimately contain the literal tags mid-body
+    # (a corpus sweep found 40+ such discussion docs vs 9 real leaks). The
+    # discriminator that separates all 9 real instances from every discussion:
+    # a real leak's envelope is TERMINAL — the body ENDS in envelope debris.
+    # Only fire when the (rstripped) body ends with a closing envelope token.
+    _tail = body.rstrip()
+    _terminal_tokens = tuple(
+        [f"</{f}>" for f in _ENVELOPE_FIELDS]
+        + ["</invoke>", "</invoke>", "</parameter>", "</function_calls>"]
+    )
+    if not _tail.endswith(_terminal_tokens):
+        return body, {}, False
+
     cut = -1
     candidates = [field_name] + [f for f in _ENVELOPE_FIELDS if f != field_name]
     for fname in candidates:
