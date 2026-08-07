@@ -171,6 +171,17 @@ async def memory_start_session(
     # Cleanup stale sessions on each new session start
     cleanup_stale_sessions()
 
+    # Assistant escheat sweep BEFORE the reaper (design:assistant-escheat-v0
+    # §5 ordering): idle assistants' specs transfer and open mail re-homes,
+    # which clears the obligations the reap guard would otherwise block on.
+    # Throttled internally; best-effort — never blocks a session start.
+    try:
+        from shared_memory.identity_gc import maybe_escheat_assistants
+        from shared_memory.clients import get_chroma as _esch_chroma
+        await maybe_escheat_assistants(get_mongo(), await _esch_chroma(), active_sessions)
+    except Exception as _esch_err:  # noqa: BLE001
+        print(f"[MCP] assistant escheat sweep failed (non-fatal): {_esch_err}")
+
     # Pending-agent GC scan (design:identity-lifecycle-v0 Mechanism B).
     # Throttled + pending-tier-scoped inside; default-disabled by env knob.
     # Best-effort: a GC failure must never block a session start.
@@ -389,15 +400,31 @@ async def memory_start_session(
                     else:
                         # Auto-register as "pending" tier — full tool access,
                         # coordinator gets notified to approve
+                        _reg_fields = {
+                            "project": normalized_project,
+                            "name": claude_instance,
+                            "tier": "pending",
+                            "last_seen": utc_now(),
+                            "auto_registered": True,
+                        }
+                        # Assistant-class classification at the front door
+                        # (design:assistant-escheat-v0 §2, RATIFIED 2026-08-07):
+                        # human-companion chats register by naming convention;
+                        # the class marks them for the escheat sweeps instead
+                        # of accumulating as permanently-unreapable ghosts.
+                        try:
+                            from shared_memory.identity_gc import classify_assistant
+                            _escheat_to = classify_assistant(
+                                db, normalized_project, claude_instance
+                            )
+                            if _escheat_to is not None:
+                                _reg_fields["agent_class"] = "assistant"
+                                _reg_fields["escheat_to"] = _escheat_to
+                        except Exception:
+                            pass
                         db.registered_agents.update_one(
                             {"project": normalized_project, "name": claude_instance},
-                            {"$set": {
-                                "project": normalized_project,
-                                "name": claude_instance,
-                                "tier": "pending",
-                                "last_seen": utc_now(),
-                                "auto_registered": True,
-                            }, "$inc": {"session_count": 1}},
+                            {"$set": _reg_fields, "$inc": {"session_count": 1}},
                             upsert=True
                         )
                         valid_agents = [a["name"] for a in db.registered_agents.find(
