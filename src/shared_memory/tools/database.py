@@ -361,6 +361,49 @@ async def memory_db(
         try:
             cursor = conn.cursor()
             cursor.execute(query)
+
+            # MUTATING STATEMENTS MUST BE COMMITTED (billing-team 2026-08-09).
+            # Both drivers default to autocommit=False and memory_db opens a
+            # NEW CONNECTION PER CALL, so an INSERT/UPDATE/DELETE executed
+            # fine, returned no error, and was rolled back when the connection
+            # closed. No call sequence could fix it client-side: semicolons are
+            # blocked so `INSERT; COMMIT` is unreachable, and a later standalone
+            # COMMIT lands on a different connection.
+            # ⚠️ The audit made this WORSE, not neutral: a db.write row was
+            # recorded for a write that never landed, so the trail corroborated
+            # the wrong conclusion. Hence the separate committed-effect event
+            # below — attempted and landed are now different records.
+            if _mutating:
+                affected = cursor.rowcount
+                conn.commit()
+                try:
+                    from shared_memory.audit import log_audit
+                    log_audit(
+                        "db.write_committed",
+                        session_info.get("claude_instance", "unknown"),
+                        session_info.get("project", ""),
+                        {
+                            "database": database, "verb": _verb,
+                            "affected_rows": affected, "sql": _sql_head,
+                            "severity": "WARNING",
+                        },
+                        session_id,
+                    )
+                except Exception:
+                    pass
+                return json.dumps({
+                    "database": database,
+                    "type": db_type,
+                    "affected_rows": affected,
+                    "committed": True,
+                    "note": (
+                        "Mutating statement COMMITTED. `affected_rows` is the "
+                        "real effect — 0 means the statement matched nothing, "
+                        "not that it failed. Read the data back on a separate "
+                        "call if the effect matters."
+                    ),
+                }, indent=2)
+
             rows = cursor.fetchmany(limit + 1)
             truncated = len(rows) > limit
             if truncated:
@@ -393,6 +436,26 @@ async def memory_db(
 
             return json.dumps(result, indent=2)
         except Exception as e:
+            # Roll back explicitly so a partially-applied multi-row DML cannot
+            # be left dangling on a connection that is about to close.
+            if _mutating:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                try:
+                    from shared_memory.audit import log_audit
+                    log_audit(
+                        "db.write_failed",
+                        session_info.get("claude_instance", "unknown"),
+                        session_info.get("project", ""),
+                        {"database": database, "verb": _verb,
+                         "error": str(e)[:500], "sql": _sql_head,
+                         "severity": "WARNING"},
+                        session_id,
+                    )
+                except Exception:
+                    pass
             return json.dumps({"error": f"Query failed: {str(e)}"})
         finally:
             conn.close()
