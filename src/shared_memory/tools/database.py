@@ -213,6 +213,12 @@ async def memory_db(
     if error:
         return error
 
+    # Identity for the audit trail below. Read once here rather than at each
+    # call site so a missing session can never silently degrade the actor to
+    # "unknown" on a write.
+    from shared_memory.state import active_sessions
+    session_info = active_sessions.get(session_id, {})
+
     # -- LIST --
     if action == "list":
         databases = []
@@ -290,9 +296,58 @@ async def memory_db(
         if not query:
             return json.dumps({"error": "query parameter required"})
 
+        # AUDIT (Tom-directed 2026-08-09). Every external-DB query is logged —
+        # verbatim SQL, actor, database, and whether the handle permits writes.
+        # RATIONALE, worth keeping because it is not the obvious one: the
+        # read-only flag and the SQL guard do NOT stop a determined agent —
+        # both are one env var / one direct mysql client away, and an agent
+        # that has convinced itself an action is necessary will find the path.
+        # What CANNOT be reasoned around is a record made after the fact.
+        # Detection is the control that survives motivated reasoning; the
+        # guards above only make the unsafe path require a decision.
+        # Writes are stamped WARNING severity so a write against a
+        # write-capable handle is greppable in one query.
+        _is_write_handle = not config.get("read_only", True)
+        _sql_head = (query or "").strip()[:2000]
+        _verb = _sql_head.split()[0].upper() if _sql_head.split() else "?"
+        _mutating = _verb not in ("SELECT", "WITH")
+        try:
+            from shared_memory.audit import log_audit
+            log_audit(
+                "db.query" if not (_is_write_handle and _mutating) else "db.write",
+                session_info.get("claude_instance", "unknown"),
+                session_info.get("project", ""),
+                {
+                    "database": database,
+                    "host": config.get("host", ""),
+                    "db_user": config.get("user", ""),
+                    "read_only_handle": not _is_write_handle,
+                    "verb": _verb,
+                    "mutating": _mutating,
+                    "sql": _sql_head,
+                    "truncated_sql": len(query or "") > 2000,
+                    "severity": "WARNING" if (_is_write_handle and _mutating) else "info",
+                },
+                session_id,
+            )
+        except Exception:
+            pass  # auditing must never block a query
+
         if config.get("read_only", True):
             validation_error = _validate_sql_readonly(query, db_type)
             if validation_error:
+                try:
+                    from shared_memory.audit import log_audit
+                    log_audit(
+                        "db.query_rejected",
+                        session_info.get("claude_instance", "unknown"),
+                        session_info.get("project", ""),
+                        {"database": database, "verb": _verb,
+                         "reason": validation_error, "sql": _sql_head},
+                        session_id,
+                    )
+                except Exception:
+                    pass
                 return json.dumps({"error": validation_error})
 
         max_rows = config.get("max_rows", 500)
