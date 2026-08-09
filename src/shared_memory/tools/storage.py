@@ -378,6 +378,32 @@ async def memory_record_learning(
         details, _extracted, _leaked = strip_envelope_leak(details, "details")
         if _leaked:
             _lint_notes.append("envelope leak stripped from details")
+            # ROUTING RECOVERY (legacy-team 2026-08-09). When the emission
+            # swallows a sibling param, the server never receives it — so a
+            # leaked `project` meant the doc was filed to shared_patterns with
+            # project:"" despite the caller passing project="nimbus", AND the
+            # dangling-ref advisory narrowed to shared-only and false-fired on
+            # every project-scoped id. One root cause, two silent symptoms, and
+            # the misfile then made project-scoped change_status fail with an
+            # error that reads exactly like a bad doc id.
+            # Recovering the param is strictly better than rejecting: no work
+            # is lost, the doc lands where the caller intended, and the note
+            # tells them their client is malforming the call.
+            _recovered_project = _extracted.pop("project", None)
+            if _recovered_project and not project:
+                project = _recovered_project.strip().split()[0] if _recovered_project.strip() else None
+                if project:
+                    _lint_notes.append(
+                        f"RECOVERED ROUTING: 'project' was swallowed by the leak; "
+                        f"filing under project='{project}' as intended (without this "
+                        f"it would have landed in shared with project=''). Fix your "
+                        f"client's tool-call emission."
+                    )
+            elif _recovered_project:
+                _lint_notes.append(
+                    f"leak contained project='{_recovered_project}' but an explicit "
+                    f"project='{project}' was also passed; the explicit one wins"
+                )
             for _pname, _ptext in _extracted.items():
                 details += f"\n\n## [write-lint] recovered {_pname}\n{_ptext}"
                 _lint_notes.append(f"recovered '{_pname}' block kept in-doc")

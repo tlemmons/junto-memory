@@ -207,6 +207,41 @@ async def memory_change_status(
             break
 
     if result is None:
+        # LOCATE-ON-MISS (legacy-team 2026-08-09). The server can see the doc
+        # in another collection, so say WHERE instead of leaving the caller to
+        # infer scope-vs-missing from a hint. Without this, a doc misfiled to
+        # shared reads as a bad ID — legacy-team nearly concluded their own
+        # doc id was wrong. Best-effort: a lookup failure degrades to the
+        # generic hint, never masks the not-found.
+        _found_in = None
+        try:
+            _searched_names = {c.name for _, c in candidates}
+            for _c in await chroma.list_collections():
+                _name = getattr(_c, "name", str(_c))
+                if _name in _searched_names:
+                    continue
+                _probe = await _c.get(ids=[doc_id], include=["metadatas"])
+                if _probe.get("ids"):
+                    _m = (_probe.get("metadatas") or [{}])[0] or {}
+                    _found_in = {"collection": _name, "project": _m.get("project", "")}
+                    break
+        except Exception:
+            pass
+        if _found_in:
+            _proj = _found_in["project"]
+            return json.dumps({
+                "error": f"Document not found in the scope you searched: {doc_id}",
+                "searched": searched,
+                "found_in": _found_in,
+                "hint": (
+                    f"The doc EXISTS in collection '{_found_in['collection']}' "
+                    f"(project={_proj!r}). Retry with "
+                    + (f"project={_proj!r}." if _proj else "project omitted.")
+                    + " A doc can land in shared with project='' when the "
+                      "project argument never reached the server (e.g. a "
+                      "malformed tool-call emission swallowed it)."
+                ),
+            }, indent=2)
         return json.dumps({
             "error": f"Document not found: {doc_id}",
             "searched": searched,

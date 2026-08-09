@@ -6,10 +6,13 @@ serialized the tool-call envelope into a text param, swallowing the sibling
 handoff_notes into the learning body.
 
 The pins that matter:
-  - TERMINAL-envelope requirement. The first cut keyed on the bare closing
-    tag and would have truncated the 40+ DISCUSSION docs that quote the leak
-    pattern in prose (the remediation threads themselves). Only a body that
-    ENDS in envelope debris is corrupt by construction.
+  - ENVELOPE-TAIL requirement. The first cut keyed on the bare closing tag and
+    would have truncated the 40+ DISCUSSION docs that quote the leak pattern in
+    prose (the remediation threads themselves). The 08-07 fix required the body
+    to END in a closing token, which then MISSED a truncated emission whose tail
+    is an unterminated parameter (08-08). Current rule: the field's own closing
+    tag must be followed immediately by more ENVELOPE — prose after it means
+    discussion, not corruption.
   - Strip-and-REROUTE, never reject: every observed leak carried substantive
     swallowed content, so rejecting the write destroys real data.
   - The ref advisory is advisory: unresolvable ids are reported, never fatal.
@@ -55,7 +58,7 @@ class TestStripEnvelopeLeak:
         """REGRESSION: the remediation threads quote the leak shape in prose.
 
         40+ such docs exist. Keying on the bare tag truncated them at the
-        quote; only a TERMINAL envelope is a real leak.
+        quote; a real leak has ENVELOPE immediately after the tag, prose does not.
         """
         body = (
             "The defect shape: the body ends with </learnings> then a "
@@ -178,3 +181,40 @@ class TestFindUnresolvedRefs:
 
         out = await find_unresolved_refs("msg_aaaaaaaaaaaa", _Boom(), None, "junto")
         assert out == []
+
+
+class TestRoutingRecovery:
+    """The swallowed-`project` chain (legacy-team, 2026-08-09).
+
+    A malformed emission put `project` INSIDE the details body, so the server
+    never received it: the doc was filed to shared_patterns with project:"",
+    and the dangling-ref advisory then narrowed to shared-only and false-fired
+    on every project-scoped id in the same write. One root cause, two silent
+    symptoms — and the misfile made a later project-scoped change_status fail
+    with an error that reads exactly like a bad doc id.
+    """
+
+    def test_swallowed_project_param_is_recoverable(self):
+        body = (
+            "A dead module in a live tree is indistinguishable from a live one."
+            '</details>\n<parameter name="project">nimbus'
+        )
+        clean, extracted, leaked = strip_envelope_leak(body, "details")
+        assert leaked is True
+        assert extracted.get("project") == "nimbus", (
+            "the routing param must be recoverable — it is what filed the doc "
+            "to the wrong collection"
+        )
+        assert "</details>" not in clean
+        assert clean.endswith("live one.")
+
+    def test_multiple_swallowed_params_all_recovered(self):
+        body = (
+            "Body text.</details>\n"
+            '<parameter name="project">nimbus\n'
+            '<parameter name="tags">["a","b"]'
+        )
+        _, extracted, leaked = strip_envelope_leak(body, "details")
+        assert leaked is True
+        assert extracted.get("project") == "nimbus"
+        assert extracted.get("tags") == '["a","b"]'
