@@ -481,9 +481,27 @@ async def memory_record_learning(
         },
     )
 
-    result = {"status": "recorded", "id": doc_id}
+    # STATUS CARRIES THE WARNING (legacy-team 2026-08-09, self-evidenced):
+    # "a loud note inside a SUCCESS response is the least-read surface you
+    # have" — they skimmed past unresolved_refs repeatedly in one session
+    # because `status: recorded` was the field they were actually reading.
+    # A malforming client that never notices never self-corrects, so the
+    # recovery signal rides `status`, not a trailing note.
+    # Compat: the value still PREFIXES "recorded" — a startswith() check is
+    # unaffected; an equality check deliberately trips, which is the correct
+    # outcome for a write that only succeeded because the server repaired it.
+    result = {
+        "status": "recorded_with_recovery" if _lint_notes else "recorded",
+        "id": doc_id,
+    }
     if _lint_notes:
         result["write_lint"] = _lint_notes
+        result["action_required"] = (
+            "Your tool-call emission is malformed — it serialized the call's own "
+            "XML envelope into `details`. The server repaired this write, but it "
+            "cannot repair the client. Fix the emission; see write_lint above for "
+            "what was recovered."
+        )
 
     # Dangling-ref advisory (backlog_d03297e01f30): existence-check ID-shaped
     # references in the body, warn in THIS response — the artifact chokepoint.
