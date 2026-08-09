@@ -73,28 +73,33 @@ def strip_envelope_leak(body: str, field_name: str) -> Tuple[str, Dict[str, str]
     if not body:
         return body, {}, False
 
-    # TERMINAL-ENVELOPE REQUIREMENT (added 2026-08-07, first nightly post-ship):
-    # three weeks of remediation threads QUOTE the leak pattern in prose —
-    # handoffs and learnings legitimately contain the literal tags mid-body
-    # (a corpus sweep found 40+ such discussion docs vs 9 real leaks). The
-    # discriminator that separates all 9 real instances from every discussion:
-    # a real leak's envelope is TERMINAL — the body ENDS in envelope debris.
-    # Only fire when the (rstripped) body ends with a closing envelope token.
-    _tail = body.rstrip()
-    _terminal_tokens = tuple(
-        [f"</{f}>" for f in _ENVELOPE_FIELDS]
-        + ["</invoke>", "</invoke>", "</parameter>", "</function_calls>"]
-    )
-    if not _tail.endswith(_terminal_tokens):
-        return body, {}, False
-
     cut = -1
+    cut_end = -1
     candidates = [field_name] + [f for f in _ENVELOPE_FIELDS if f != field_name]
     for fname in candidates:
         idx = body.find(f"</{fname}>")
         if idx != -1 and (cut == -1 or idx < cut):
             cut = idx
+            cut_end = idx + len(f"</{fname}>")
     if cut == -1:
+        return body, {}, False
+
+    # ENVELOPE-TAIL REQUIREMENT. Three weeks of remediation threads QUOTE the
+    # leak pattern in prose, so a bare closing tag is not evidence (a corpus
+    # sweep found 40+ discussion docs vs 10 real leaks). The discriminator:
+    # in a REAL leak the field's closing tag is immediately followed by more
+    # ENVELOPE — nothing else can legitimately sit there — whereas a
+    # discussion doc continues in prose ("...ends with </learnings> then a
+    # <parameter> block, which the lint strips").
+    #
+    # Supersedes the 2026-08-07 "body must END in a closing token" rule, which
+    # was correct about false positives but produced a FALSE NEGATIVE on a
+    # truncated emission whose tail is an UNTERMINATED parameter — observed
+    # live 2026-08-08 (learning_24b33b8aa7ff16f1, learning_f588ce30c5b5c9a4:
+    # `</details>\n<parameter name="project">nimbus`, ending in a bare value).
+    # Caught by the librarian acting as the corpus verification layer.
+    _tail = body[cut_end:].lstrip()
+    if _tail and not _tail.startswith(("<parameter", "</", "<", "<function_calls")):
         return body, {}, False
 
     clean = body[:cut].rstrip()

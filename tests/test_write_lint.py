@@ -67,6 +67,27 @@ class TestStripEnvelopeLeak:
         assert clean == body
         assert extracted == {}
 
+    def test_unterminated_parameter_tail_is_a_leak(self):
+        """REGRESSION (2026-08-08, learning_24b33b8aa7ff16f1 + f588ce30c5b5c9a4):
+        a truncated emission whose tail is an UNTERMINATED parameter ending in a
+        bare value. The 08-07 'body must END in a closing token' rule missed
+        this entirely — the body ends in `nimbus`, not a tag."""
+        body = (
+            "Real correction content about bridges.</details>\n"
+            '<parameter name="project">nimbus'
+        )
+        clean, extracted, leaked = strip_envelope_leak(body, "details")
+        assert leaked is True, "unterminated-parameter tail must be detected"
+        assert clean == "Real correction content about bridges."
+        assert extracted.get("project") == "nimbus"
+
+    def test_bare_closing_tag_at_end_is_a_leak(self):
+        """Field closing tag with nothing after it — still corrupt."""
+        body = "Some learning content.</learnings>"
+        clean, _, leaked = strip_envelope_leak(body, "learnings")
+        assert leaked is True
+        assert clean == "Some learning content."
+
     def test_clean_body_with_unrelated_markup_untouched(self):
         body = "Normal body with <code> and </div> tags in it."
         clean, extracted, leaked = strip_envelope_leak(body, "learnings")
