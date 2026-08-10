@@ -131,7 +131,49 @@ def _parse_one_word(raw: str, allowed) -> Optional[str]:
     return min(hits)[1]
 
 
-async def extract_operation(client, title: str, content: str) -> Optional[str]:
+def is_park_summary(tags) -> bool:
+    """True for a park-summary doc: end_session's auto-written session digest,
+    whose body is a list of pointers to the learnings recorded that session.
+
+    Such a doc has no operation OF ITS OWN — it indexes other docs — so
+    `reference` is correct by construction. phi4 gets it wrong reliably by
+    latching onto whichever pointer it read hardest: the librarian measured
+    8/8 overrides in one night's batch (diagnose x7, process x1), which is a
+    batch-level miss on one recognisable shape, not eight independent ones.
+
+    ⚠️ THE DISCRIMINATOR IS THE TAG, NOT THE BODY. I first wrote this as a
+    content heuristic (>=3 doc-id pointers + pointer-line density) and
+    measured it against the corpus: 5/8 recall with 2 FALSE POSITIVES on 6
+    ordinary analytical learnings — my own notes cite many ids and tripped it.
+    The tag is written by end_session (08-07 metadata defaulting) and is
+    exact: 8/8, no ambiguity, nothing to calibrate. Precision matters more
+    than recall here — a wrong `reference` on a real analytical doc is worse
+    than missing an untagged digest.
+    """
+    if not tags:
+        return False
+    if isinstance(tags, str):
+        try:
+            import json as _json
+            tags = _json.loads(tags)
+        except Exception:
+            return "park-summary" in tags
+    try:
+        return "park-summary" in tags
+    except TypeError:
+        return False
+
+
+async def extract_operation(client, title: str, content: str,
+                            tags=None) -> Optional[str]:
+    # SHAPE RULE, PRE-MODEL (librarian-proposed 07-31, adopted; sub released
+    # the hold 2026-08-10 — their bakeoff bar governs the SHARED Stage-1 claim
+    # recipe, not this facet). Deciding in CODE rather than by prompt edit is
+    # deliberate: it cannot move phi4's behaviour because phi4 is not asked,
+    # so it sidesteps the bakeoff constraint entirely — the same move that
+    # made the max_tokens fix safe.
+    if is_park_summary(tags):
+        return "reference"
     raw = await claim_gate._chat(
         client, OPERATION_SYSTEM,
         f"{title}\n\n{content[:claim_gate.CONTENT_HEAD_CHARS]}",
@@ -263,7 +305,15 @@ async def _extract_and_store(db, collection, doc_id: str, title: str,
                 logger.warning("facets: empty claim for %s — skipping", doc_id)
                 return
 
-            operation = await extract_operation(client, title, details)
+            # Tags drive the park-summary shape rule; read them from the
+            # doc's own metadata so no caller signature has to change.
+            _tags = None
+            try:
+                _got = await collection.get(ids=[doc_id], include=["metadatas"])
+                _tags = ((_got.get("metadatas") or [{}])[0] or {}).get("tags")
+            except Exception:
+                pass
+            operation = await extract_operation(client, title, details, _tags)
             shelf_life = await extract_shelf_life(client, title, details)
             trigger = await extract_trigger(client, title, details)
 
