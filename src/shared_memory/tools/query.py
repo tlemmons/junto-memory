@@ -309,6 +309,28 @@ async def memory_query(
     except Exception:
         pass
 
+    # ── Modality shape flag (Tom-approved 2026-08-10) ──
+    # A SHAPE flag, never a defect predictor: "the body declares a proposal or
+    # a deployment state — open it" is true for every row it fires on, so it
+    # cannot mis-fire. Derived from the content already on the row (same
+    # title + first-300 window the 75-doc measurement used), so it needs no
+    # stored field and covers the whole historical corpus. See facets.modality_shape.
+    try:
+        from shared_memory.facets import SHAPE_LABELS, modality_shape
+        for r in results:
+            if not str(r.get("id", "")).startswith("learning_"):
+                continue
+            shape = modality_shape(r.get("title", ""), r.get("content", ""))
+            if shape:
+                r["shape"] = shape
+                r["shape_note"] = (
+                    f"{SHAPE_LABELS[shape]}: this doc's body declares a proposal or an "
+                    f"undeployed state. The extracted claim may render it as fact — "
+                    f"open the body before acting."
+                )
+    except Exception:
+        pass
+
     # ── Preview-mode trim (backlog_6d5aa1a2849f) ──
     # After sort+limit, decide per-position whether to ship full content or
     # just a snippet. Top-N hits get content when `expand_top > 0`; rest get
@@ -467,10 +489,21 @@ async def memory_get_by_id(
         # documented pointer-chase for /recall). Best-effort, learnings only.
         if found_id.startswith("learning_"):
             try:
-                from shared_memory.facets import get_facets_for_ids
+                from shared_memory.facets import (
+                    SHAPE_LABELS,
+                    get_facets_for_ids,
+                    modality_shape,
+                )
                 f = get_facets_for_ids(get_mongo(), [found_id]).get(found_id)
                 if f:
                     payload["facets"] = f
+                _shape = modality_shape(meta.get("title", ""), doc)
+                if _shape:
+                    payload["shape"] = _shape
+                    payload["shape_note"] = (
+                        f"{SHAPE_LABELS[_shape]}: this doc's body declares a proposal "
+                        f"or an undeployed state — read the body, not the claim."
+                    )
             except Exception:
                 pass
         # Pull-through join (recall_metrics): if this doc was recall-injected

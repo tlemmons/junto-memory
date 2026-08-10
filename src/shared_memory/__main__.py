@@ -12,6 +12,7 @@ from shared_memory.app import create_app
 from shared_memory.auth import AUTH_ENABLED
 from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import CHROMA_HOST, CHROMA_PORT, PROJECT_PREFIX, SHARED_PREFIX
+from shared_memory.facets import SHAPE_LABELS, modality_shape
 from shared_memory.helpers import utc_now
 from shared_memory.state import active_sessions, active_signals, file_locks
 
@@ -171,13 +172,30 @@ def _recall_excluded(doc_id, meta, agent):
     return False
 
 
-def _recall_one_line(claim, content):
+def _recall_one_line(claim, content, shape=None):
     """Header summary for a /recall snippet: claim facet when the doc has one
     (the better assertion surface), else the content head. <= ~120 chars,
-    single line, never the body (contract: HEADERS ONLY)."""
+    single line, never the body (contract: HEADERS ONLY).
+
+    `shape` (facets.modality_shape) prefixes an OPEN-THE-BODY marker. It goes
+    INSIDE one_line rather than only into a sibling key on purpose: sub's T1
+    rater sees `"[{type}] {title} — {one_line}"` as its ONLY view of a
+    candidate (msg_2fc9301c8663), so a sibling key would require consumer code
+    changes to have any effect, while a prefix reaches every consumer that
+    exists today — including human readers — with none. The sibling key ships
+    too, for consumers that later want to branch on it.
+
+    The prefix eats into the 120-char budget rather than extending it: the
+    flag matters more than the last dozen characters of a claim, and growing
+    the cap would break the contract's header-size expectation.
+    """
     src = (claim or "").strip() or " ".join((content or "").split())
     src = " ".join(src.split())
-    return src[:117] + "..." if len(src) > 120 else src
+    prefix = f"⚠{SHAPE_LABELS[shape]} — open body · " if shape else ""
+    budget = 120 - len(prefix)
+    if len(src) > budget:
+        src = src[:max(0, budget - 3)] + "..."
+    return prefix + src
 
 
 async def _recall_payload(body, api_key, via_tunnel=False):
@@ -356,7 +374,13 @@ async def _recall_payload(body, api_key, via_tunnel=False):
     for c in candidates:
         content = c.pop("_content")
         c.pop("_source")
-        c["one_line"] = _recall_one_line(claims.get(c["id"]), content)
+        # Shape flag is derived from the BODY we already hold here — no extra
+        # fetch, no stored field, and it therefore covers the whole historical
+        # corpus without a backfill.
+        shape = modality_shape(c.get("title", ""), content)
+        c["one_line"] = _recall_one_line(claims.get(c["id"]), content, shape)
+        if shape:
+            c["shape"] = shape
         snippets.append(c)
 
     if snippets:

@@ -40,6 +40,7 @@ Config (env):
 import asyncio
 import logging
 import os
+import re
 from typing import Dict, List, Optional
 
 from shared_memory import claim_gate
@@ -106,6 +107,92 @@ TRIGGER_MAX_LINES = 3
 TRIGGER_MAX_CHARS = 200
 TRIGGER_MAX_TOKENS = 150
 ONE_WORD_MAX_TOKENS = 8
+
+# ── modality shape flag (coordinator@nimbus msg_b91f7992752a, Tom-approved) ──
+#
+# WHAT THIS IS AND IS NOT. It is a SHAPE flag: "this doc's body declares a
+# proposal or a deployment state — open it." It is NOT a defect predictor and
+# must never be worded as one. That distinction is the whole design:
+#   - "this claim may be wrong" is unpredictable — the best discriminator
+#     measured was 22% precision (phi4 judging its own output), so a warning
+#     worded that way is wrong ~4 times in 5 and burns its own credibility.
+#   - "the body declares a modality" is TRUE for every doc it fires on,
+#     regardless of whether extraction actually inverted. It cannot mis-fire,
+#     so it spends no false-clear budget.
+#
+# WHY IT EXISTS: `facets.claim` is what memory_query and /recall return, and
+# the extractor renders proposals as accomplished fact. Measured instances:
+# a PROPOSED, explicitly-unratified apex 301 extracted as "has been
+# permanently redirected"; a conditional charging path extracted as "enables
+# unauthorized charging". ⛔ The author cannot proofread the claim — it is
+# generated after they leave — so the read side is the only place to catch it.
+#
+# TWO MARKER CLASSES, and the second was a blind spot worth remembering:
+#   PROPOSAL   — proposed / unratified / withdrawn / rejected / not applied
+#   DEPLOYMENT — committed-but-not-live: "not yet on production", "behind the
+#                freeze", "built but not wired in"
+# The deployment class is DISTINCT from proposal and is the one BOTH confirmed
+# nimbus instances actually failed on. The original screen had no vocabulary
+# for it at all and silently missed them — a pattern list is a vocabulary, and
+# a vocabulary gap returns a CLEAN result (learning_da2f757e3f3dfa97).
+#
+# ⚠️ DEPLOY markers require the negation to attach to a DEPLOYMENT/LIVENESS
+# object. A loose `NOT (YET )?(ON|IN)` matched 104 docs and was visibly junk
+# ("not in upstream auth service"); the tightened form matches 29.
+#
+# Fires on 75 of 4,286 facet-bearing learnings = 1.75% per doc, 1.80% of the
+# rows a reader is actually served. Rendering is PER DOC-ROW deliberately: as
+# a response-level banner the rate would be 4.74% and it would become
+# furniture within a week (coordinator's objection, which holds).
+_SHAPE_PROPOSAL = re.compile(
+    r"(PROPOSAL|PROPOSED|UNRATIFIED|NOT APPLIED|NOT YET APPLIED|HYPOTHETICAL|"
+    r"REJECTED OPTION|WITHDRAWN|NEVER EXECUTED|"
+    r"NOT (?:BEEN )?(?:EXECUTED|INSTALLED|IMPLEMENTED|RATIFIED)|"
+    r"\bDRAFT\b|DO NOT EXECUTE|NOTHING HAS BEEN)",
+    re.I,
+)
+_SHAPE_DEPLOYMENT = re.compile(
+    r"(NOT (?:YET )?(?:ON|IN) (?:PRODUCTION|PROD|STARGATE|ABYDOS|LIVE)|"
+    r"NOT (?:YET )?(?:LIVE|DEPLOYED|SHIPPED|MERGED|RELEASED|ROLLED OUT|PUSHED)|"
+    r"AWAITING (?:DEPLOY|RELEASE|MERGE|PRODUCTION)|PENDING (?:DEPLOY|RELEASE|MERGE)|"
+    r"BEHIND THE (?:PRODUCTION )?FREEZE|UNDEPLOYED|"
+    r"HAS NOT (?:YET )?(?:SHIPPED|DEPLOYED|LANDED|GONE LIVE)|"
+    r"(?:STAGED|BUILT|WRITTEN|MERGED|COMMITTED|IMPLEMENTED) BUT NOT (?:YET )?"
+    r"(?:DEPLOYED|LIVE|SHIPPED|WIRED|RELEASED|ON))",
+    re.I,
+)
+# Title + body head. A DISJUNCTION over the concatenation, NOT title-weighted —
+# two reviewers independently mis-read it as title-weighted and concluded a
+# confident title could mask a hedged body. It cannot: including the title only
+# ever ADDS matches. 300 chars because that is where authors put the modality
+# when they put it anywhere; a doc that buries it deeper is not covered, and
+# that limitation is real and unfixed.
+SHAPE_WINDOW_CHARS = 300
+
+SHAPE_LABELS = {
+    "proposal": "PROPOSAL/NOT-APPLIED",
+    "deployment": "NOT-YET-DEPLOYED",
+}
+
+
+def modality_shape(title: str, body: str) -> Optional[str]:
+    """Return 'proposal' | 'deployment' | None for a learning's subject window.
+
+    Derived at READ time from the body rather than stored at write time, so it
+    covers the entire existing corpus with no backfill — the same reasoning
+    that made project_from_collection the right shape: a backfill can
+    half-apply, and then nobody knows which half they are reading.
+
+    Proposal wins ties: "unratified" is a stronger statement about the world
+    than "not yet deployed", and if a doc says both, the reader needs the
+    stronger one first.
+    """
+    window = f"{title or ''}\n{(body or '')[:SHAPE_WINDOW_CHARS]}"
+    if _SHAPE_PROPOSAL.search(window):
+        return "proposal"
+    if _SHAPE_DEPLOYMENT.search(window):
+        return "deployment"
+    return None
 
 # Strong references to in-flight extraction tasks — asyncio only keeps weak
 # refs, so without this a fire-and-forget task can be GC'd mid-run.
