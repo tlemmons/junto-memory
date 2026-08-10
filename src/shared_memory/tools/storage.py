@@ -440,6 +440,13 @@ async def memory_record_learning(
         "tags": json.dumps(tags),
         "session_id": session_id,
         "claude_instance": session_info["claude_instance"],
+        # THIS KEY WAS MISSING ENTIRELY until 2026-08-10 — memory_store wrote
+        # it, memory_record_learning never did, so 99.5% of the learning corpus
+        # reported project:"" on the read surfaces despite being filed to the
+        # right collection. Routing was never affected (it goes by collection);
+        # the derived view was. Read side falls back to project_from_collection
+        # so the historical docs read correctly without a backfill.
+        "project": project or "",
         "created": now,
         "updated": now
     }

@@ -90,6 +90,26 @@ async def get_shared_collection(client, collection_type: str):
     return await client.get_or_create_collection(name=f"{SHARED_PREFIX}{collection_type}")
 
 
+def project_from_collection(collection_name: str) -> str:
+    """Derive the owning project from a Chroma collection name.
+
+    THE COLLECTION IS THE AUTHORITY ON SCOPE, not the `project` metadata key.
+    Routing has always been by collection; the metadata field is a copy — and
+    for learnings it was a MISSING copy: `memory_record_learning` never wrote
+    the key at all, so 4374 of 4397 learnings (99.5%, every project, since day
+    one) reported `project: ""` on the get_by_id / query surfaces despite being
+    correctly filed. Reported by coordinator@nimbus 2026-08-10 (msg_b91f7992752a).
+
+    Read surfaces call this as a FALLBACK so every historical doc reads
+    correctly without a backfill migration — a migration can half-apply and
+    then nobody knows which half they are looking at. Shared collections have
+    no project by construction and return "".
+    """
+    if collection_name and collection_name.startswith(PROJECT_PREFIX):
+        return collection_name[len(PROJECT_PREFIX):]
+    return ""
+
+
 def generate_doc_id(content: str, doc_type: str) -> str:
     """Generate a stable document ID from content hash."""
     hash_input = f"{doc_type}:{content[:500]}:{utc_now_iso()}"

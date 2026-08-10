@@ -20,6 +20,7 @@ from shared_memory.helpers import (
     is_expired,
     normalize_project,
     parse_timestamp,
+    project_from_collection,
     require_session,
     update_access_stats,
     utc_now,
@@ -447,7 +448,9 @@ async def memory_get_by_id(
             "title": meta.get("title", "Untitled"),
             "type": meta.get("type", "unknown"),
             "status": meta.get("status", "active"),
-            "project": meta.get("project", ""),
+            # Collection wins when the metadata copy is absent — see
+            # project_from_collection(). Learnings have never carried the key.
+            "project": meta.get("project") or project_from_collection(col.name),
             "tags": json.loads(meta.get("tags", "[]")),
             "created": meta.get("created"),
             "updated": meta.get("updated"),
