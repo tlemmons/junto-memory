@@ -1,9 +1,9 @@
 """Write-time contradiction gate — classifier stage (backlog_6471d8348393).
 
-Implements interface:claim-extraction-v0 v1.0.2 VERBATIM on top of the
+Implements interface:claim-extraction-v0 v1.0.3 VERBATIM on top of the
 threshold stage in tools/storage.py. Pipeline per the contract:
 
-  EXTRACT (phi4:14b, temp 0, title + first ~3000 chars, max_tokens 120,
+  EXTRACT (phi4:14b, temp 0, title + first ~3000 chars, max_tokens 400,
   non-empty validate) → title-anchor claims ("{title}\\n{claim}") →
   CLASSIFY (CONTRADICTS / CONSISTENT / UNRELATED, one word, substring
   parse, no-match → CONSISTENT fail-quiet).
@@ -44,17 +44,19 @@ logger = logging.getLogger(__name__)
 
 # Bump ONLY with a contract version bump (requires a bakeoff2.py rerun
 # posted to both consumers — see interface:claim-extraction-v0 Versioning).
-RECIPE_VERSION = "1.0.2"
+RECIPE_VERSION = "1.0.3"
 
 CONTENT_HEAD_CHARS = 3000
-EXTRACT_MAX_TOKENS = 120
+EXTRACT_MAX_TOKENS = 400
 CLASSIFY_MAX_TOKENS = 8
 # Classify only the strongest priors — bounds worst-case gate latency to
 # 1 extract + MAX_CLASSIFY_PRIORS classify calls per record.
 MAX_CLASSIFY_PRIORS = 3
 CLAIMS_COLLECTION = "learning_claims"
 
-# ── contract prompts (interface:claim-extraction-v0 v1.0.2, VERBATIM) ──────
+# ── contract prompts (interface:claim-extraction-v0 v1.0.3, VERBATIM) ──────
+# Prompts are UNCHANGED from v1.0.2 — the v1.0.3 bump is the output BUDGET
+# only (max_tokens 120 → 400). Nothing the model is ASKED has changed.
 
 EXTRACT_SYSTEM = (
     "Extract the CORE FACTUAL CLAIM of this engineering note as 1-2 short "
@@ -162,7 +164,17 @@ def _cached_claim(db, doc_id: str) -> Optional[str]:
     if db is None:
         return None
     row = db[CLAIMS_COLLECTION].find_one({"_id": doc_id})
-    if row and row.get("recipe_version") == RECIPE_VERSION:
+    if not row:
+        return None
+    # HAND-REPAIRED CLAIMS ARE STICKY ACROSS RECIPE BUMPS (sub + memory,
+    # ratified with the v1.0.3 amendment). The librarian repairs defective
+    # claims by hand — meta-openers, truncations, factual inversions — and a
+    # lazy recipe-version invalidation would silently overwrite four nights of
+    # manual work with a fresh machine extraction. A human/agent correction
+    # outranks a re-run: the repair was made BECAUSE the extractor was wrong.
+    if row.get("claim_cleaned_by"):
+        return row.get("claim")
+    if row.get("recipe_version") == RECIPE_VERSION:
         return row.get("claim")
     return None  # miss, or stale recipe → lazy re-extract
 
