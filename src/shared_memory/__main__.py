@@ -13,7 +13,7 @@ from shared_memory.auth import AUTH_ENABLED
 from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import CHROMA_HOST, CHROMA_PORT, PROJECT_PREFIX, SHARED_PREFIX
 from shared_memory.facets import SHAPE_LABELS, modality_shape
-from shared_memory.helpers import utc_now
+from shared_memory.helpers import embed_query_once, query_kwargs, utc_now
 from shared_memory.state import active_sessions, active_signals, file_locks
 
 
@@ -312,14 +312,28 @@ async def _recall_payload(body, api_key, via_tunnel=False):
     candidates = []
     embed_ms = None
 
+    qvec = None
+
     async def _scan(collection, source, n):
-        nonlocal embed_ms
+        nonlocal embed_ms, qvec
+        # ONE embedding per request, computed off the event loop, reused by
+        # every later scan (backlog_c5dba6d13707). The previous comment here
+        # claimed "subsequent calls reuse chroma's per-call embed" — THAT WAS
+        # WRONG: each query_texts= call re-ran the client-side MiniLM model,
+        # so a 3-collection /recall paid ~300-400ms of duplicate CPU on the
+        # event loop and blocked every other agent. See embed_query_once().
+        if qvec is None:
+            t_e = _time.monotonic()
+            qvec = await embed_query_once(collection, qtext)
+            if qvec is not None:
+                embed_ms = int((_time.monotonic() - t_e) * 1000)
         t_q = _time.monotonic()
-        got = await collection.query(query_texts=[qtext], n_results=n, where=where)
+        got = await collection.query(
+            **query_kwargs(qtext, qvec), n_results=n, where=where
+        )
         if embed_ms is None:
-            # First query call carries the embedding of qtext (MiniLM path);
-            # subsequent calls reuse chroma's per-call embed. Reported as the
-            # embedding-layer latency signal the contract asks for.
+            # Fallback path only (embed_query_once failed → query_texts): the
+            # first query still carries the embedding, so time it as before.
             embed_ms = int((_time.monotonic() - t_q) * 1000)
         if not got["documents"] or not got["documents"][0]:
             return

@@ -2,11 +2,13 @@
 # Helper Functions - All async for use with AsyncHttpClient
 # =============================================================================
 
+import asyncio
 import fnmatch
 import hashlib
 import json
+import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from shared_memory.config import (
     DEFAULT_EXPIRY_DAYS,
@@ -19,6 +21,8 @@ from shared_memory.config import (
     STALE_LOCK_MINUTES,
 )
 from shared_memory.state import active_sessions, active_signals, file_locks
+
+logger = logging.getLogger(__name__)
 
 MIN_RELEVANCE_THRESHOLD = 0.3  # 30% minimum relevance
 
@@ -88,6 +92,60 @@ async def get_project_collection(client, project: str):
 async def get_shared_collection(client, collection_type: str):
     """Get a shared collection (patterns, context, work) (async)."""
     return await client.get_or_create_collection(name=f"{SHARED_PREFIX}{collection_type}")
+
+
+async def embed_query_once(collection, text: str) -> Optional[List[Any]]:
+    """Embed `text` ONCE, OFF the event loop, so the caller can reuse the vector
+    across every collection it scans.
+
+    ⚠️ THE EMBEDDING IS CLIENT-SIDE, IN THIS PROCESS. `AsyncHttpClient`
+    collections carry a `DefaultEmbeddingFunction` (ONNX MiniLM, 384-dim) and
+    `query_texts=[...]` runs it HERE, not in the chromadb container. Two
+    consequences that together were the whole performance story
+    (learning_faca6ab430b48cbc, measured 2026-08-11):
+
+    1. **It was run once PER COLLECTION.** memory_query scans project + shared
+       patterns + shared context, and `/recall` does the same — so one request
+       embedded the identical text THREE times at ~96-138 ms each, ~300-400 ms
+       of pure duplicate work.
+    2. **It ran ON the event loop.** ONNX inference is a blocking C call, so
+       while one agent embedded, every other agent's request queued behind it —
+       including 2 ms calls. Measured: `memory_query` 1-2 ms at rest vs 167 ms
+       median (331 ms max) under 6 concurrent `/recall` clients, recovering
+       instantly when load stopped. The server was never slow; it serialised.
+
+    `asyncio.to_thread` fixes (2) because ONNX releases the GIL during
+    inference; reusing the returned vector fixes (1).
+
+    SAFE TO SHARE ONE VECTOR ACROSS COLLECTIONS because every collection in
+    this server is created by `get_project_collection` / `get_shared_collection`,
+    neither of which passes an `embedding_function` — so all of them use the
+    same default. ⚠️ If a collection is ever created with a custom embedding
+    function, it MUST embed its own query text or its distances become garbage.
+
+    FAILS OPEN: returns None on any problem (private attribute missing, model
+    error). Callers must fall back to `query_texts=[...]`, which is exactly the
+    previous behaviour — a perf optimisation must never cost a result.
+    """
+    try:
+        ef = getattr(collection, "_embedding_function", None)
+        if ef is None:
+            return None
+        vectors = await asyncio.to_thread(ef, [text])
+        if vectors is None or len(vectors) == 0:
+            return None
+        vector = vectors[0]
+        return vector.tolist() if hasattr(vector, "tolist") else list(vector)
+    except Exception as e:  # noqa: BLE001 - optimisation path, degrade to query_texts
+        logger.warning("embed_query_once failed (%s) — falling back to query_texts", e)
+        return None
+
+
+def query_kwargs(text: str, vector: Optional[List[Any]]) -> Dict:
+    """Chroma query kwargs: the precomputed vector when we have one, else the
+    raw text (the pre-2026-08-11 path). Keeps the fallback in ONE place so a
+    caller cannot half-adopt it."""
+    return {"query_embeddings": [vector]} if vector else {"query_texts": [text]}
 
 
 def project_from_collection(collection_name: str) -> str:

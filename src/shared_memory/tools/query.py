@@ -12,6 +12,7 @@ from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import OVERLAP_WINDOW_HOURS, PROJECT_PREFIX, SHARED_PREFIX
 from shared_memory.helpers import (
     cleanup_stale_signals,
+    embed_query_once,
     format_age,
     format_staleness_warning,
     format_status_warning,
@@ -21,6 +22,7 @@ from shared_memory.helpers import (
     normalize_project,
     parse_timestamp,
     project_from_collection,
+    query_kwargs,
     require_session,
     update_access_stats,
     utc_now,
@@ -145,12 +147,21 @@ async def memory_query(
 
     where_clause = where_filter if where_filter else None
 
+    # ── ONE embedding for the whole request (backlog_c5dba6d13707) ──
+    # This used to embed `query` once PER COLLECTION — project + shared
+    # patterns + shared context — at ~96-138 ms each, on the event loop.
+    # See embed_query_once() for why that serialised the whole server.
+    # _qvec stays None until the first collection is in hand (the embedding
+    # function lives on the collection object); every later scan reuses it.
+    _qvec = None
+
     # Search project collection if specified
     if project:
         try:
             proj_collection = await get_project_collection(chroma, project)
+            _qvec = await embed_query_once(proj_collection, query)
             proj_results = await proj_collection.query(
-                query_texts=[query],
+                **query_kwargs(query, _qvec),
                 n_results=limit,
                 where=where_clause
             )
@@ -219,8 +230,12 @@ async def memory_query(
         for shared_name in ["patterns", "context"]:
             try:
                 shared = await get_shared_collection(chroma, shared_name)
+                if _qvec is None:
+                    # No project scan happened, so this is the first collection
+                    # we hold — embed here and the second shared scan reuses it.
+                    _qvec = await embed_query_once(shared, query)
                 shared_results = await shared.query(
-                    query_texts=[query],
+                    **query_kwargs(query, _qvec),
                     n_results=min(2, limit),  # Max 2 from each shared collection
                     where=where_clause
                 )
