@@ -45,13 +45,26 @@ clears on reboot, log formats drift), so it can't false-alarm Tom daily.
 ## Alert path
 
 On any failure the check exits non-zero → systemd `OnFailure=` fires
-`junto-backup-verify-alert.service` → emails **tom@lemmons.net** via `msmtp`
-(reads `/home/tlemmons/.msmtprc`). Fail-tested end-to-end 2026-08-21: forced
-failure → email delivered, SMTP 250.
+`junto-backup-verify-alert.service` → runs `junto-backup-verify-alert.sh`, which
+dispatches to **two channels**:
 
-**Email is the load-bearing channel.** A junto-blocker MCP message was in the
-original ask but v1 ships email-only — there's no solved shell→MCP send pattern
-from a systemd context yet. Adding it is tracked follow-up (see below).
+1. **PRIMARY — Home Assistant webhook.** POSTs
+   `{"title","message","level":"crit","tag":"junto-backup","icon":"mdi:database-alert"}`
+   to HAClaude's generic sage→HA alert bus (the same webhook `sage-diskwatch`
+   uses; URL read from `~/.config/sage-diskwatch/config`, `HA_WEBHOOK`). `crit` →
+   `notify_critical` (bypasses phone DND); the per-payload `tag` namespaces this
+   alert so a backup-fail and a disk alert coexist on the phone (no clobber).
+   LAN-only automation. **HA returns 200 regardless of match — 200 ≠ delivered.**
+   Contract: HAClaude `msg_b6d18d04831b`.
+2. **FALLBACK — email via msmtp** to tom@lemmons.net. **Transition-only:** this
+   reuses the nimbus Zoho sender the decouple is dropping. Remove once the HA
+   path is phone-verified (`backlog_d872ddc3afb2`).
+
+Full OnFailure chain fail-tested end-to-end 2026-08-22 (forced empty-dir
+failure → dispatcher → HA POST ok + email sent). Original email-only path was
+fail-tested 2026-08-21 (SMTP 250).
+
+Dispatcher log: `~/.local/state/junto-backup/alert.log`.
 
 ## Files
 
@@ -60,7 +73,8 @@ from a systemd context yet. Adding it is tracked follow-up (see below).
 | `junto-backup-verify.sh` | `/usr/local/sbin/` | the check, `0755 root` |
 | `junto-backup-verify.service` | `/etc/systemd/system/` | oneshot runner, `OnFailure=` alert |
 | `junto-backup-verify.timer` | `/etc/systemd/system/` | daily 05:00 local, `Persistent=true` |
-| `junto-backup-verify-alert.service` | `/etc/systemd/system/` | email-on-failure via msmtp |
+| `junto-backup-verify-alert.sh` | `/usr/local/sbin/` | alert dispatcher: HA webhook + email fallback, `0755 root` |
+| `junto-backup-verify-alert.service` | `/etc/systemd/system/` | oneshot that runs the dispatcher |
 | `msmtprc.example` | `~/.msmtprc` (by hand) | **template** — real file has the SMTP password, not in git |
 | `deploy.sh` | — | idempotent installer |
 
@@ -74,13 +88,17 @@ from a systemd context yet. Adding it is tracked follow-up (see below).
 
 ## Known debt / follow-ups (owned by memory@junto)
 
-1. **Own mail sender.** msmtp currently **reuses the Nimbus Zoho sender**
-   (`dev@nimbusframe.net`) — hardcoded in `msmtprc` and in the `From:` header of
-   the alert service. Tom wants junto to stand up its own sender for a clean
-   break (deferred — no time to provision it yet). Tracked in the junto backlog.
-2. **junto-blocker MCP channel** as a second alert channel alongside email.
-3. **Stale `Documentation=` paths.** The three installed units still point
-   `Documentation=` at the old nimbus Windows path
-   (`file:///c/code/Nimbus/infra/sage/junto-backup/README.md`). The committed
-   copies preserve that exactly so the repo mirrors what's live; fix on the next
-   deploy to point here.
+1. **Phone-verify the HA alert, then drop email.** The HA path is wired +
+   chain-tested (POST succeeds), but "HA 200 ≠ delivered" and no live phone-buzz
+   test has been confirmed by Tom yet. Once confirmed, remove the email-fallback
+   block from `junto-backup-verify-alert.sh` and the `~/.msmtprc` /
+   `dev@nimbusframe.net` dependency goes away entirely (clean decouple).
+   Tracked: `backlog_d872ddc3afb2`.
+2. **junto-blocker MCP channel** as a possible third alert channel — needs a
+   solved shell→MCP send pattern from a systemd context (none today). Low
+   priority now that HA covers the phone-push need.
+3. **Stale `Documentation=` paths.** `junto-backup-verify.service` and
+   `.timer` still point `Documentation=` at the old nimbus Windows path
+   (`file:///c/code/Nimbus/...`); the alert service now points here. The two
+   committed copies preserve the old path to mirror what's live — fix on their
+   next deploy.

@@ -1,22 +1,12 @@
 [Unit]
-Description=Email alert when junto-backup-verify.service fails
-Documentation=file:///c/code/Nimbus/infra/sage/junto-backup/README.md
+Description=Alert (HA webhook + email fallback) when junto-backup-verify.service fails
+Documentation=file:///home/tlemmons/sharedUtils/junto/junto-memory/infra/sage/junto-backup/README.md
 
 [Service]
 Type=oneshot
 User=tlemmons
 Group=tlemmons
-# Email is the LOAD-BEARING alert channel (proven fleet-shape, same as
-# stargate mysql-backup). msmtp reads /home/tlemmons/.msmtprc.
-ExecStart=/bin/bash -c '\
-    { \
-        printf "Subject: [sage] junto-backup-verify FAILED\nFrom: dev@nimbusframe.net\nTo: tom@lemmons.net\n\n"; \
-        printf "junto-backup-verify.service failed on sage at $(date -u +%%FT%%TZ).\n\n"; \
-        printf "This means one of: a daily junto backup (chroma/mongo) is MISSING, TRUNCATED (below floor or <50%% of trailing median), or the offsite (storm) copy is STALE (>26h) / unreachable, or a failed-run signature was found in the backup log.\n\n"; \
-        printf "Backups: chroma ~/chroma-backups (cron 03:00), mongo ~/mongo-backups (cron 03:15), sync-to-storm 04:00. junto Mongo+Chroma are the shared-memory MCP store.\n\n"; \
-        printf "Last 80 journal lines:\n"; \
-        journalctl -u junto-backup-verify.service -n 80 --no-pager; \
-        printf "\n\n--\nHost: $(hostname)\nRef: backlog_d59e8fc1b760, infra/sage/junto-backup/README.md\n"; \
-    } | msmtp -t'
+# Dispatcher: HA webhook primary (tag=junto-backup, crit=DND bypass), email fallback.
+ExecStart=/usr/local/sbin/junto-backup-verify-alert.sh
 StandardOutput=journal
 StandardError=journal

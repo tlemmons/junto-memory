@@ -14,8 +14,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SBIN=/usr/local/sbin
 UNITDIR=/etc/systemd/system
 
-echo "[deploy] installing check script -> ${SBIN}/junto-backup-verify.sh"
+echo "[deploy] installing check + alert scripts -> ${SBIN}/"
 sudo install -m 0755 -o root -g root "${HERE}/junto-backup-verify.sh" "${SBIN}/junto-backup-verify.sh"
+sudo install -m 0755 -o root -g root "${HERE}/junto-backup-verify-alert.sh" "${SBIN}/junto-backup-verify-alert.sh"
 
 echo "[deploy] installing systemd units -> ${UNITDIR}"
 for u in junto-backup-verify.service junto-backup-verify.timer junto-backup-verify-alert.service; do
@@ -26,11 +27,16 @@ echo "[deploy] reloading systemd + enabling timer"
 sudo systemctl daemon-reload
 sudo systemctl enable --now junto-backup-verify.timer
 
-echo "[deploy] msmtprc check"
-if [ ! -f /home/tlemmons/.msmtprc ]; then
-    echo "  !! /home/tlemmons/.msmtprc MISSING — install it from msmtprc.example (chmod 600). Alerts will NOT send until you do."
+echo "[deploy] alert-channel checks"
+if [ -f /home/tlemmons/.config/sage-diskwatch/config ] && grep -q '^HA_WEBHOOK=' /home/tlemmons/.config/sage-diskwatch/config; then
+    echo "  ok: HA_WEBHOOK present (primary alert channel — HA webhook, tag=junto-backup)"
 else
-    echo "  ok: /home/tlemmons/.msmtprc present"
+    echo "  !! HA_WEBHOOK missing in ~/.config/sage-diskwatch/config — HA alert will be skipped."
+fi
+if [ -f /home/tlemmons/.msmtprc ]; then
+    echo "  ok: /home/tlemmons/.msmtprc present (email fallback — transition-only, drop once HA phone-verified)"
+else
+    echo "  note: /home/tlemmons/.msmtprc absent — email fallback disabled (fine once HA is verified)."
 fi
 
 echo "[deploy] status:"
