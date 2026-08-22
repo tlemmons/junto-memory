@@ -46,23 +46,20 @@ clears on reboot, log formats drift), so it can't false-alarm Tom daily.
 
 On any failure the check exits non-zero → systemd `OnFailure=` fires
 `junto-backup-verify-alert.service` → runs `junto-backup-verify-alert.sh`, which
-dispatches to **two channels**:
+POSTs to **Home Assistant**:
 
-1. **PRIMARY — Home Assistant webhook.** POSTs
-   `{"title","message","level":"crit","tag":"junto-backup","icon":"mdi:database-alert"}`
-   to HAClaude's generic sage→HA alert bus (the same webhook `sage-diskwatch`
-   uses; URL read from `~/.config/sage-diskwatch/config`, `HA_WEBHOOK`). `crit` →
-   `notify_critical` (bypasses phone DND); the per-payload `tag` namespaces this
-   alert so a backup-fail and a disk alert coexist on the phone (no clobber).
-   LAN-only automation. **HA returns 200 regardless of match — 200 ≠ delivered.**
-   Contract: HAClaude `msg_b6d18d04831b`.
-2. **FALLBACK — email via msmtp** to tom@lemmons.net. **Transition-only:** this
-   reuses the nimbus Zoho sender the decouple is dropping. Remove once the HA
-   path is phone-verified (`backlog_d872ddc3afb2`).
+`{"title","message","level":"crit","tag":"junto-backup","icon":"mdi:database-alert"}`
+→ HAClaude's generic sage→HA alert bus (the same webhook `sage-diskwatch` uses;
+URL read from `~/.config/sage-diskwatch/config`, `HA_WEBHOOK`). `crit` →
+`notify_critical` (bypasses phone DND); the per-payload `tag` namespaces this
+alert so a backup-fail and a disk alert coexist on the phone (no clobber).
+LAN-only automation. **HA returns 200 regardless of match — 200 ≠ delivered.**
+Contract: HAClaude `msg_b6d18d04831b`.
 
-Full OnFailure chain fail-tested end-to-end 2026-08-22 (forced empty-dir
-failure → dispatcher → HA POST ok + email sent). Original email-only path was
-fail-tested 2026-08-21 (SMTP 250).
+Full OnFailure chain fail-tested end-to-end 2026-08-22 (forced empty-dir failure
+→ dispatcher → HA POST) and **phone-delivery confirmed by Tom**. An email-via-
+msmtp fallback (nimbus Zoho sender) rode alongside during the transition and was
+removed once HA was verified — completing the decouple from nimbus's mail cred.
 
 Dispatcher log: `~/.local/state/junto-backup/alert.log`.
 
@@ -73,10 +70,12 @@ Dispatcher log: `~/.local/state/junto-backup/alert.log`.
 | `junto-backup-verify.sh` | `/usr/local/sbin/` | the check, `0755 root` |
 | `junto-backup-verify.service` | `/etc/systemd/system/` | oneshot runner, `OnFailure=` alert |
 | `junto-backup-verify.timer` | `/etc/systemd/system/` | daily 05:00 local, `Persistent=true` |
-| `junto-backup-verify-alert.sh` | `/usr/local/sbin/` | alert dispatcher: HA webhook + email fallback, `0755 root` |
+| `junto-backup-verify-alert.sh` | `/usr/local/sbin/` | alert dispatcher: POSTs to the HA webhook, `0755 root` |
 | `junto-backup-verify-alert.service` | `/etc/systemd/system/` | oneshot that runs the dispatcher |
-| `msmtprc.example` | `~/.msmtprc` (by hand) | **template** — real file has the SMTP password, not in git |
 | `deploy.sh` | — | idempotent installer |
+
+Alerts need `HA_WEBHOOK=` in `~/.config/sage-diskwatch/config` (chmod 600,
+shared with sage-diskwatch). Not installed by `deploy.sh` — it's a secret.
 
 ## Deploy
 
@@ -88,15 +87,14 @@ Dispatcher log: `~/.local/state/junto-backup/alert.log`.
 
 ## Known debt / follow-ups (owned by memory@junto)
 
-1. **Phone-verify the HA alert, then drop email.** The HA path is wired +
-   chain-tested (POST succeeds), but "HA 200 ≠ delivered" and no live phone-buzz
-   test has been confirmed by Tom yet. Once confirmed, remove the email-fallback
-   block from `junto-backup-verify-alert.sh` and the `~/.msmtprc` /
-   `dev@nimbusframe.net` dependency goes away entirely (clean decouple).
-   Tracked: `backlog_d872ddc3afb2`.
-2. **junto-blocker MCP channel** as a possible third alert channel — needs a
-   solved shell→MCP send pattern from a systemd context (none today). Low
-   priority now that HA covers the phone-push need.
+1. **~~Own mail sender~~ — RESOLVED 2026-08-22.** Instead of standing up a junto
+   SMTP sender, alerts now go through HA (phone-verified). The nimbus Zoho mail
+   dependency is gone. `backlog_d872ddc3afb2` closed.
+2. **Second alert channel (optional).** HA is now the sole channel — if the HA
+   VM is down when a backup fails, no alert (same single-channel posture as
+   sage-diskwatch). A junto-blocker MCP message is the documented option for a
+   2nd channel; needs a shell→MCP send pattern from a systemd context (none
+   today). Low priority.
 3. **Stale `Documentation=` paths.** `junto-backup-verify.service` and
    `.timer` still point `Documentation=` at the old nimbus Windows path
    (`file:///c/code/Nimbus/...`); the alert service now points here. The two

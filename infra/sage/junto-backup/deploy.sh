@@ -4,8 +4,8 @@
 # Idempotent: copies artifacts into place, reloads systemd, enables the timer.
 # Run as a user with sudo on sage (the check + alert run as tlemmons).
 #
-# msmtprc is NOT installed by this script — it holds a secret. Install it by
-# hand from msmtprc.example (chmod 600, owned by tlemmons) the first time.
+# Alerts go to Home Assistant via the webhook in ~/.config/sage-diskwatch/config
+# (HA_WEBHOOK) — shared with sage-diskwatch, not installed by this script.
 #
 # Ref: infra/sage/junto-backup/README.md
 set -euo pipefail
@@ -27,20 +27,15 @@ echo "[deploy] reloading systemd + enabling timer"
 sudo systemctl daemon-reload
 sudo systemctl enable --now junto-backup-verify.timer
 
-echo "[deploy] alert-channel checks"
+echo "[deploy] alert-channel check"
 if [ -f /home/tlemmons/.config/sage-diskwatch/config ] && grep -q '^HA_WEBHOOK=' /home/tlemmons/.config/sage-diskwatch/config; then
-    echo "  ok: HA_WEBHOOK present (primary alert channel — HA webhook, tag=junto-backup)"
+    echo "  ok: HA_WEBHOOK present (alert channel — HA webhook, tag=junto-backup)"
 else
-    echo "  !! HA_WEBHOOK missing in ~/.config/sage-diskwatch/config — HA alert will be skipped."
-fi
-if [ -f /home/tlemmons/.msmtprc ]; then
-    echo "  ok: /home/tlemmons/.msmtprc present (email fallback — transition-only, drop once HA phone-verified)"
-else
-    echo "  note: /home/tlemmons/.msmtprc absent — email fallback disabled (fine once HA is verified)."
+    echo "  !! HA_WEBHOOK missing in ~/.config/sage-diskwatch/config — alerts will be SKIPPED. Fix before relying on this monitor."
 fi
 
 echo "[deploy] status:"
 systemctl status junto-backup-verify.timer --no-pager || true
 echo
 echo "[deploy] done. Dry-run the check now with:  sudo systemctl start junto-backup-verify.service && journalctl -u junto-backup-verify.service -n 40 --no-pager"
-echo "[deploy] fail-test the alert path with a forced failure (e.g. temporarily point CHROMA_DIR at an empty dir) and confirm email delivery."
+echo "[deploy] fail-test the alert path: add a drop-in with Environment=CHROMA_DIR=/tmp/empty, 'systemctl start junto-backup-verify.service' (fails), confirm the HA notification lands on the phone, then remove the drop-in + 'systemctl reset-failed'."

@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 # Alert dispatcher for junto-backup-verify.service failures (systemd OnFailure=).
 #
-# PRIMARY: Home Assistant webhook — HAClaude's generic sage->HA alert bus
+# CHANNEL: Home Assistant webhook — HAClaude's generic sage->HA alert bus
 #   (the same webhook sage-diskwatch uses). Per-payload tag namespaces this
 #   alert so a backup-fail and a disk alert coexist on Tom's phone (no clobber).
 #   level=crit -> notify_critical (bypasses phone DND). HA returns 200 regardless
-#   of automation match, so a 200 is NOT proof of delivery — the real test is a
-#   forced failure that lands on the phone. Contract: HAClaude msg_b6d18d04831b.
+#   of automation match, so a 200 is NOT proof of delivery. Contract: HAClaude
+#   msg_b6d18d04831b. Phone-delivery confirmed by Tom 2026-08-22.
 #
-# FALLBACK: email via msmtp. TRANSITION-ONLY — this reuses the nimbus Zoho
-#   sender (dev@nimbusframe.net) that the sage/junto decouple is trying to drop.
-#   Remove this block once the HA path is phone-verified end-to-end
-#   (junto/backlog_d872ddc3afb2).
+# History: an email-via-msmtp fallback (reusing the nimbus Zoho sender) rode
+# alongside HA during the transition; removed 2026-08-22 once the HA path was
+# phone-verified, completing the decouple from nimbus's mail credential. To add
+# a second channel later, a junto-blocker MCP message is the documented option
+# (needs a shell->MCP send pattern from systemd; junto/backlog_d872ddc3afb2).
 #
 # Runs as user tlemmons via junto-backup-verify-alert.service. Explicit paths
 # (not $HOME) so it behaves identically under systemd.
 set -uo pipefail
 
 HA_CONFIG=/home/tlemmons/.config/sage-diskwatch/config   # provides HA_WEBHOOK (chmod 600, shared)
-MSMTPRC=/home/tlemmons/.msmtprc
 LOG=/home/tlemmons/.local/state/junto-backup/alert.log
 mkdir -p "$(dirname "$LOG")"
 ts=$(date -u +%FT%TZ)
@@ -52,16 +52,6 @@ if [ -n "$HA_WEBHOOK" ]; then
     fi
 else
     echo "$ts NO HA_WEBHOOK in $HA_CONFIG — HA alert skipped" >> "$LOG"
-fi
-
-# ---- FALLBACK: email via msmtp (transition-only; drop when HA phone-verified) ----
-if command -v msmtp >/dev/null 2>&1 && [ -f "$MSMTPRC" ]; then
-    if { printf 'Subject: [sage] junto-backup-verify FAILED\nFrom: dev@nimbusframe.net\nTo: tom@lemmons.net\n\n'
-         printf '%s\n' "$msg"; } | msmtp --file="$MSMTPRC" -t 2>>"$LOG"; then
-        echo "$ts email fallback sent" >> "$LOG"
-    else
-        echo "$ts email fallback FAILED" >> "$LOG"
-    fi
 fi
 
 exit 0
