@@ -56,6 +56,13 @@ OFFSITE_CHROMA="${OFFSITE_CHROMA:-/data/chroma}"
 OFFSITE_MONGO="${OFFSITE_MONGO:-/data/mongo}"
 OFFSITE_SFTP_OPTS=(-i "$OFFSITE_KEY" -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new)
 
+# HA recovery-notify: a failure posts a sticky crit (via OnFailure alert.sh);
+# without a matching "recovered" post on the same tag, that crit re-alerts on the
+# phone until dismissed. On a PASS that follows a failure we post an info-level
+# same-tag notice to REPLACE the crit. State carried in a marker file.
+HA_CONFIG="${HA_CONFIG:-/home/tlemmons/.config/sage-diskwatch/config}"
+FAIL_MARKER="${FAIL_MARKER:-/home/tlemmons/.local/state/junto-backup/failed.marker}"
+
 # Backup logs (supplementary signature check). /tmp clears on reboot — bonus only.
 CHROMA_LOG=/tmp/chroma-backup.log
 MONGO_LOG=/tmp/mongo-backup.log
@@ -73,6 +80,24 @@ err() {
 
 FAILURES=0
 fail() { err "$*"; FAILURES=$(( FAILURES + 1 )); }
+
+# Post an info-level notice to HA on the junto-backup tag (used to CLEAR a sticky
+# crit once backups recover). No-op if no webhook configured. Args: <title> <msg>.
+ha_recovery_notify() {
+    local ha=""
+    [ -f "$HA_CONFIG" ] && ha=$(. "$HA_CONFIG" 2>/dev/null; printf '%s' "${HA_WEBHOOK:-}")
+    if [ -z "$ha" ]; then log "recovery: no HA_WEBHOOK ($HA_CONFIG) — notice skipped"; return 0; fi
+    local jt jm
+    jt=$(printf '%s' "$1" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')
+    jm=$(printf '%s' "$2" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')
+    if curl -fsS -m 10 -X POST -H "Content-Type: application/json" \
+        -d "{\"title\":$jt,\"message\":$jm,\"level\":\"info\",\"tag\":\"junto-backup\",\"icon\":\"mdi:database-check\"}" \
+        "$ha" >/dev/null 2>&1; then
+        log "recovery notice posted (cleared prior failure)"
+    else
+        err "recovery notice POST failed (HA unreachable?)"
+    fi
+}
 
 # Parse the embedded "YYYYMMDD-HHMMSS" stamp out of a backup filename and
 # return its age in seconds (echoes age, or empty on parse failure).
@@ -215,8 +240,17 @@ check_log_signature "chroma-log" "$CHROMA_LOG"
 check_log_signature "mongo-log"  "$MONGO_LOG"
 
 if [ "$FAILURES" -gt 0 ]; then
+    # Remember we're in a failed state so the next PASS can post a recovery.
+    mkdir -p "$(dirname "$FAIL_MARKER")" 2>/dev/null || true
+    : > "$FAIL_MARKER" 2>/dev/null || true
     err "=== VERIFICATION FAILED: ${FAILURES} fault(s) — see above ==="
     exit 1
+fi
+# PASS. If we were previously failing, clear the sticky crit with a recovery notice.
+if [ -f "$FAIL_MARKER" ]; then
+    ha_recovery_notify "sage junto-backup recovered" \
+        "Backups healthy again — local (chroma+mongo) fresh & sized, offsite (212) fresh. Earlier failure alert cleared."
+    rm -f "$FAIL_MARKER"
 fi
 log "=== VERIFICATION PASS: local (chroma+mongo) fresh & sized, offsite (212) fresh ==="
 exit 0
