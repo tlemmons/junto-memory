@@ -34,10 +34,16 @@ For chroma (`~/chroma-backups`) and mongo (`~/mongo-backups`):
 - **gzip integrity** — `gzip -t` on the newest (catches present-but-corrupt;
   directly covers the 2026-08-04 shape).
 
-Offsite (storm, Windows host `C:\SageBackup\{chroma,mongo}`, via
-`~/.ssh/storm-backup`):
-- **Freshness** — newest synced copy < 26h. **Storm unreachable = FAIL**, not a
-  clean pass (offsite state UNKNOWN is treated as bad).
+Offsite (**LXC 212 on madrox @ 192.168.15.98**, SFTP-only chroot, dirs
+`/data/chroma` + `/data/mongo`, via `~/.ssh/junto-offsite-212`; listed with
+sftp, not a remote shell):
+- **Freshness** — newest synced copy < 26h. **Receiver unreachable = FAIL**, not
+  a clean pass (offsite state UNKNOWN is treated as bad).
+
+> Offsite was repointed 2026-08-22 from the ex-storm Windows host (`.250`,
+> physical box decommissioned 08-14) to LXC 212. 212 owns retention (keep-14)
+> and the offsite/cloud push; `sync-to-storm.sh` just lands tarballs there.
+> `backlog_39b05cf07539`.
 
 Log-signature corroboration is **advisory only** — it never alerts (`/tmp`
 clears on reboot, log formats drift), so it can't false-alarm Tom daily.

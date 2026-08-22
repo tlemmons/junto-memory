@@ -12,7 +12,7 @@
 # Catches:
 #   - a daily local backup missing (cron didn't run / host rebooted through it)
 #   - a local backup produced but truncated (< floor, or < 50% trailing median)
-#   - offsite (storm) sync stale (>26h) or storm unreachable
+#   - offsite copy (LXC 212 @.98) stale (>26h) or receiver unreachable
 #   - a failed run signature in the backup log (bonus; /tmp clears on reboot)
 #   - the dir being empty (vacuous-pass guard: 0 files => ALERT, never a pass)
 #
@@ -47,12 +47,14 @@ MAX_AGE_SECONDS=$(( 26 * 3600 ))
 MEDIAN_WINDOW=7
 UNDERSIZE_FRACTION_PCT=50   # newest must be >= 50% of trailing median
 
-# Storm (offsite Windows host) — freshness of the synced copy.
-STORM_KEY="${STORM_KEY:-$HOME/.ssh/storm-backup}"
-STORM_USER="${STORM_USER:-Administrator}"
-STORM_HOST="${STORM_HOST:-192.168.15.250}"
-STORM_DIR_WIN='C:\SageBackup'
-STORM_SSH_OPTS="-i $STORM_KEY -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new"
+# Offsite receiver (LXC 212 on madrox @ .98; ex-storm .250 Windows box was
+# decommissioned 2026-08-14). SFTP-only chroot, jail dirs /data/chroma + /data/mongo.
+OFFSITE_KEY="${OFFSITE_KEY:-${STORM_KEY:-$HOME/.ssh/junto-offsite-212}}"
+OFFSITE_USER="${OFFSITE_USER:-${STORM_USER:-junto-backup}}"
+OFFSITE_HOST="${OFFSITE_HOST:-${STORM_HOST:-192.168.15.98}}"
+OFFSITE_CHROMA="${OFFSITE_CHROMA:-/data/chroma}"
+OFFSITE_MONGO="${OFFSITE_MONGO:-/data/mongo}"
+OFFSITE_SFTP_OPTS=(-i "$OFFSITE_KEY" -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new)
 
 # Backup logs (supplementary signature check). /tmp clears on reboot — bonus only.
 CHROMA_LOG=/tmp/chroma-backup.log
@@ -151,31 +153,34 @@ check_local() {
     log "${label}: checked ${n} of ${n} present; newest $(basename "$newest_path") ${newest_size}B age=$(( age/3600 ))h — $( [ "$FAILURES" -eq 0 ] && echo OK || echo 'see failures above')"
 }
 
-# ---- Storm freshness (offsite copy) ----
-# Args: <label> <win_subdir> <glob>
-check_storm() {
-    local label="$1" subdir="$2" glob="$3"
-    if [ ! -e "$STORM_KEY" ]; then
-        fail "storm/${label}: ssh key missing ${STORM_KEY} — cannot verify offsite copy"
+# ---- Offsite freshness (copy on LXC 212, via sftp) ----
+# Args: <label> <remote_dir> <glob>
+# Receiver is nologin+chrooted (no shell), so we list via sftp, not `ssh dir`.
+check_offsite() {
+    local label="$1" remote_dir="$2" glob="$3"
+    if [ ! -e "$OFFSITE_KEY" ]; then
+        fail "offsite/${label}: ssh key missing ${OFFSITE_KEY} — cannot verify offsite copy"
         return
     fi
-    local newest
-    newest=$(ssh $STORM_SSH_OPTS "${STORM_USER}@${STORM_HOST}" \
-        "dir /b /o-d \"${STORM_DIR_WIN}\\${subdir}\\${glob}\" 2>nul" 2>/dev/null | tr -d '\r' | head -1)
-    if [ -z "$newest" ]; then
-        fail "storm/${label}: no ${glob} in ${STORM_DIR_WIN}\\${subdir} (or storm unreachable) — offsite copy UNKNOWN, treated as FAIL"
+    local listing newest age
+    listing=$(printf 'ls -1 %s\n' "$remote_dir" \
+        | sftp "${OFFSITE_SFTP_OPTS[@]}" -b - "${OFFSITE_USER}@${OFFSITE_HOST}" 2>/dev/null \
+        | sed -n 's#.*/##p' | grep -E "^${glob//\*/.*}$" || true)
+    if [ -z "$listing" ]; then
+        fail "offsite/${label}: no ${glob} in ${OFFSITE_HOST}:${remote_dir} (or receiver unreachable) — offsite copy UNKNOWN, treated as FAIL"
         return
     fi
-    local age
+    # Embedded stamp YYYYMMDD-HHMMSS sorts lexically = chronologically; newest is last.
+    newest=$(printf '%s\n' "$listing" | sort | tail -1)
     age=$(embedded_age_seconds "$newest")
     if [ -z "$age" ]; then
-        fail "storm/${label}: could not parse date from newest offsite file '${newest}'"
+        fail "offsite/${label}: could not parse date from newest offsite file '${newest}'"
         return
     fi
     if [ "$age" -gt "$MAX_AGE_SECONDS" ]; then
-        fail "storm/${label}: offsite copy STALE: ${newest} age=$(( age/3600 ))h (max $(( MAX_AGE_SECONDS/3600 ))h)"
+        fail "offsite/${label}: offsite copy STALE: ${newest} age=$(( age/3600 ))h (max $(( MAX_AGE_SECONDS/3600 ))h)"
     else
-        log "storm/${label}: offsite OK: ${newest} age=$(( age/3600 ))h"
+        log "offsite/${label}: offsite OK: ${newest} age=$(( age/3600 ))h"
     fi
 }
 
@@ -204,8 +209,8 @@ log "=== sage junto-backup verification start ==="
 
 check_local  "chroma-local" "$CHROMA_DIR" "$CHROMA_GLOB" "$CHROMA_MIN_BYTES"
 check_local  "mongo-local"  "$MONGO_DIR"  "$MONGO_GLOB"  "$MONGO_MIN_BYTES"
-check_storm  "chroma"       "chroma"      "chroma-backup-*.tar.gz"
-check_storm  "mongo"        "mongo"       "mongo-backup-*.archive.gz"
+check_offsite "chroma"      "$OFFSITE_CHROMA" "chroma-backup-*.tar.gz"
+check_offsite "mongo"       "$OFFSITE_MONGO"  "mongo-backup-*.archive.gz"
 check_log_signature "chroma-log" "$CHROMA_LOG"
 check_log_signature "mongo-log"  "$MONGO_LOG"
 
@@ -213,5 +218,5 @@ if [ "$FAILURES" -gt 0 ]; then
     err "=== VERIFICATION FAILED: ${FAILURES} fault(s) — see above ==="
     exit 1
 fi
-log "=== VERIFICATION PASS: local (chroma+mongo) fresh & sized, offsite (storm) fresh ==="
+log "=== VERIFICATION PASS: local (chroma+mongo) fresh & sized, offsite (212) fresh ==="
 exit 0
