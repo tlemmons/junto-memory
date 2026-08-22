@@ -1,0 +1,25 @@
+# msmtp sender config for junto-backup-verify alerts.
+# Install to /home/tlemmons/.msmtprc  (chmod 600, owned by tlemmons).
+# The real file on sage is NOT in git — it holds an SMTP password.
+#
+# ⚠️ CREDENTIAL DEBT (2026-08-22, decouple from nimbus):
+# v1 REUSES the Nimbus/stargate Zoho sender (dev@nimbusframe.net). Tom wants
+# junto to stand up its OWN sender for a clean break — deferred, not yet done.
+# Tracked in the junto backlog ("stand up junto's own alert mail sender").
+# When that lands: swap `from`, `user`, and the `From:` header in
+# junto-backup-verify-alert.service to the new junto sender.
+
+defaults
+auth           on
+tls            on
+tls_starttls   on
+logfile        /home/tlemmons/.msmtp.log
+
+account        junto-alert
+host           smtp.zoho.com
+port           587
+from           dev@nimbusframe.net
+user           dev@nimbusframe.net
+password       CHANGEME__SMTP_APP_PASSWORD
+
+account default : junto-alert
