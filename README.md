@@ -50,7 +50,7 @@ There are 370+ MCP memory servers listed on PulseMCP. Most give a single agent p
 | External database access | No | Yes — Read-only SQL queries (MSSQL, MySQL) against your project databases |
 | Checklists | No | Yes — Shared launch readiness, deploy steps, etc. |
 
-40 tools across 14 categories. Not a toy — a coordination system.
+57 tools across 20 categories. Not a toy — a coordination system.
 
 ---
 
@@ -92,8 +92,8 @@ The server runs as a single Docker Compose stack. AI agents connect over MCP (st
 This server is designed for AI coding agents, so the install procedure is too. Clone the repo, then ask your agent to install it for you:
 
 ```bash
-git clone https://github.com/tlemmons/mcp-shared-memory.git
-cd mcp-shared-memory
+git clone https://github.com/tlemmons/junto-memory.git
+cd junto-memory
 # Now hand the prompt below to your AI agent in a fresh session.
 ```
 
@@ -215,7 +215,7 @@ No API keys or authentication tokens are required for local use (see [Security](
 
 ## Tool Reference
 
-48 tools organized into 14 categories. (For the canonical, current list with grouping and end-to-end flows, see the architecture spec inside the server: `memory_get_spec(name="architecture:shared-memory-v1", project="shared_memory")`.)
+57 tools organized into 20 categories. (For the canonical, current list with grouping and end-to-end flows, see the architecture spec inside the server: `memory_get_spec(name="architecture:shared-memory-v1", project="junto")`.)
 
 ### Session Management (2)
 
@@ -325,6 +325,71 @@ No API keys or authentication tokens are required for local use (see [Security](
 | `memory_change_status` | Change a document's status: active, deprecated, superseded, archived. Preserves history. |
 | `memory_archive_by_tag` | Bulk archive all documents matching a tag (e.g., end-of-version cleanup). |
 | `memory_restore_by_tag` | Bulk restore previously archived documents by tag. |
+
+### Coordination & Activity (2)
+
+| Tool | Description |
+|------|-------------|
+| `memory_get_active_work` | See what other agents are currently working on — tasks, files touched, timestamps. Avoid overlap. |
+| `memory_claim_message` | Claim a message so exactly one agent in a group handles it (multi-consumer coordination). |
+
+### Reminders & Scheduling (3)
+
+| Tool | Description |
+|------|-------------|
+| `memory_set_reminder` | Schedule a message to your future self (or a peer) at a specific time — deadlines, follow-ups, "ping me after X". |
+| `memory_cancel_reminder` | Cancel a previously scheduled reminder. |
+| `memory_list_reminders` | List your pending scheduled reminders. |
+
+### Skills (6)
+
+Reusable, task-invoked how-to procedures. Authored as `draft`, promoted to `active` through a trust gate, and materialized into `.claude/skills/` by a launcher so the client's native matcher fires them mid-task.
+
+| Tool | Description |
+|------|-------------|
+| `memory_register_skill` | Author a reusable skill (trigger + steps + gotchas + preconditions). Always creates a `draft`. |
+| `memory_confirm_skill` | Promote a draft skill to `active` — the trust gate. Owner/human only. |
+| `memory_get_skill` | Fetch one skill's full body by id or name. |
+| `memory_list_skills` | List skills (headers) scoped by project/role/directory/status. Pinned first, then active. |
+| `memory_pin_skill` | Pin/unpin a skill so it ranks first in surfacing. |
+| `memory_export_skills` | Export active, scope-matched skills as ready-to-write `SKILL.md` payloads for a launcher to materialize. |
+
+### Behavioral Directives (1)
+
+| Tool | Description |
+|------|-------------|
+| `memory_ack_directive` | Acknowledge a server-issued directive (e.g. a park or behavioral instruction) so it clears. |
+
+### Push-Control, Alerts & Telemetry (2)
+
+Operator visibility into the messaging rate-limit / push-control subsystem (chain-depth caps, per-agent hourly budgets, silent suppression).
+
+| Tool | Description |
+|------|-------------|
+| `memory_list_alerts` | List push-control alerts — budget warnings, budget breaches, hard-ceiling trips — for an operator dashboard or polling fallback. |
+| `memory_get_emission_stats` | Per-agent message-emission counters and budget usage. |
+
+### Team Status & Health (2)
+
+| Tool | Description |
+|------|-------------|
+| `memory_standup` | Auto-compiled team standup for a project — every agent's current task, blockers, stale state specs, and an aggregated decision queue. Read-only, needs no agent to produce it. |
+| `memory_health` | Server health — MongoDB + ChromaDB status and active session/lock/signal counts. No session required. |
+
+### Replication / Sync (2, server-to-server)
+
+Phase-2 local-first replication endpoints (`admin`/`owner` tier). A LAN-local junto-memory reconciles with a central instance by shipping op-log entries — peers never re-embed text.
+
+| Tool | Description |
+|------|-------------|
+| `memory_sync_pull` | Pull op-log entries newer than the caller's per-origin cursor. |
+| `memory_sync_push` | Apply a batch of op-log entries received from a peer (seq-monotonic, intent-deduped). |
+
+### Backlog — bulk (1)
+
+| Tool | Description |
+|------|-------------|
+| `memory_batch_backlog` | Create or update many backlog items in one call. |
 
 ---
 
@@ -562,7 +627,7 @@ Don't want to run your own server? A hosted version is available — you get a d
 
 - No server setup — connect your agents in minutes
 - Automatic backups
-- Same 40 tools, same features
+- Same 57 tools, same features
 - Multi-project isolation
 
 **Interested?** Open an issue or reach out for details.
