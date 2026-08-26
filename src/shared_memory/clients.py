@@ -3,6 +3,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from urllib.parse import quote_plus
 
 import chromadb
 from chromadb.config import Settings
@@ -220,8 +221,14 @@ def get_mongo():
         # comes up but every mongo-backed call (guidelines, agent_directory,
         # messages, audit_log, op_log) silently returns empty.
         # See PR #1 / Issue tlemmons-lvt for the install-time repro.
+        # URL-escape credentials: a password from a password manager routinely
+        # carries reserved URI chars (/ @ + % :) that a plain f-string would
+        # mangle into a malformed URI -> silent auth failure on fresh installs.
+        # junto-stack's README dodges this with an alnum-only generated password,
+        # but nothing enforces that, so escape here for the paste-your-own case.
         mongo_uri = (
-            f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}"
+            f"mongodb://{quote_plus(MONGO_USER)}:{quote_plus(MONGO_PASSWORD)}"
+            f"@{MONGO_HOST}:{MONGO_PORT}"
             f"/{MONGO_DB}?replicaSet=rs0&authSource=admin"
         )
         _mongo_client = MongoClient(
