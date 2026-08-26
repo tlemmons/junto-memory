@@ -24,6 +24,7 @@ from shared_memory.write_lint import (
     advisory_payload,
     extract_refs,
     find_unresolved_refs,
+    recover_envelope_leak,
     strip_envelope_leak,
 )
 
@@ -218,3 +219,51 @@ class TestRoutingRecovery:
         assert leaked is True
         assert extracted.get("project") == "nimbus"
         assert extracted.get("tags") == '["a","b"]'
+
+
+class TestRecoverEnvelopeLeak:
+    """The shared recovery posture every free-text writer routes through
+    (backlog_8d33a63e2626): strip + re-route + warn, uniform across store,
+    add_backlog_item, define_spec and record_learning."""
+
+    def test_clean_body_is_untouched_and_silent(self):
+        body = "A normal body.\n\nDetails here."
+        assert recover_envelope_leak(body, "content", "junto") == (body, "junto", [])
+
+    def test_none_and_empty_body_are_safe(self):
+        assert recover_envelope_leak("", "content", "junto") == ("", "junto", [])
+        assert recover_envelope_leak(None, "content", None) == (None, None, [])
+
+    def test_swallowed_project_recovered_when_caller_passed_none(self):
+        body = 'Real body.</content><parameter name="project">nimbus</parameter></invoke>'
+        clean, project, notes = recover_envelope_leak(body, "content", None)
+        assert project == "nimbus"
+        assert "</content>" not in clean and clean.startswith("Real body.")
+        assert any("RECOVERED ROUTING" in n for n in notes)
+
+    def test_explicit_project_wins_over_swallowed(self):
+        body = 'Real body.</content><parameter name="project">nimbus</parameter></invoke>'
+        clean, project, notes = recover_envelope_leak(body, "content", "junto")
+        assert project == "junto"
+        assert any("explicit one wins" in n for n in notes)
+
+    def test_non_project_param_kept_in_doc(self):
+        """A swallowed spec_type (define_spec's old reject case) is preserved
+        in-doc under a marked heading rather than silently defaulting."""
+        body = (
+            'Spec body.</content>'
+            '<parameter name="spec_type">agent_state</parameter></invoke>'
+        )
+        clean, _, notes = recover_envelope_leak(body, "content", "junto")
+        assert "## [write-lint] recovered spec_type" in clean
+        assert "agent_state" in clean
+        assert any("recovered 'spec_type' block kept in-doc" in n for n in notes)
+
+    def test_discussion_prose_is_not_a_leak(self):
+        body = "The lint strips a body ending in </content> then a param block."
+        assert recover_envelope_leak(body, "content", "junto") == (body, "junto", [])
+
+    def test_description_field_name_for_backlog(self):
+        body = 'Do the thing.</description><parameter name="project">sage</parameter></invoke>'
+        clean, project, notes = recover_envelope_leak(body, "description", None)
+        assert project == "sage" and clean.startswith("Do the thing.")

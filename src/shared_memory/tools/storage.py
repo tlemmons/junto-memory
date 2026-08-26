@@ -99,6 +99,11 @@ async def memory_store(
             "suggestion": "Break into smaller documents or summarize"
         })
 
+    # Write-lint parity (backlog_8d33a63e2626): strip a leaked tool-call envelope
+    # and re-route swallowed params before content is used for dedup/doc_id/op-log.
+    from shared_memory.write_lint import recover_envelope_leak
+    content, project, _lint_notes = recover_envelope_leak(content, "content", project)
+
     tags = tags or []
     files_related = files_related or []
     chroma = await get_chroma()
@@ -240,7 +245,18 @@ async def memory_store(
         },
     )
 
-    result = {"status": "stored", "id": doc_id}
+    # Status prefixes "stored" so a startswith() check is unaffected; an
+    # equality check deliberately trips when the write only succeeded because
+    # the server repaired a malformed emission (mirrors record_learning).
+    result = {"status": "stored_with_recovery" if _lint_notes else "stored", "id": doc_id}
+    if _lint_notes:
+        result["write_lint"] = _lint_notes
+        result["action_required"] = (
+            "Your tool-call emission is malformed — it serialized the call's own "
+            "XML envelope into `content`. The server repaired this write, but it "
+            "cannot repair the client. Fix the emission; see write_lint above for "
+            "what was recovered."
+        )
     if memory_type == "interface" and interface_name:
         result["interface_name"] = interface_name
         result["interface_version"] = interface_version
@@ -368,47 +384,16 @@ async def memory_record_learning(
     session_info = active_sessions[session_id]
     now = utc_now_iso()
 
-    # Write-lint (backlog_1115f9fe35f7): strip serialized tool-call envelope
-    # if a malformed emission leaked it into the body. Recovered sibling
-    # content is kept in-doc under a marked heading (record_learning has no
-    # handoff field to re-route to) and flagged in the response.
-    _lint_notes = []
-    try:
-        from shared_memory.write_lint import strip_envelope_leak
-        details, _extracted, _leaked = strip_envelope_leak(details, "details")
-        if _leaked:
-            _lint_notes.append("envelope leak stripped from details")
-            # ROUTING RECOVERY (legacy-team 2026-08-09). When the emission
-            # swallows a sibling param, the server never receives it — so a
-            # leaked `project` meant the doc was filed to shared_patterns with
-            # project:"" despite the caller passing project="nimbus", AND the
-            # dangling-ref advisory narrowed to shared-only and false-fired on
-            # every project-scoped id. One root cause, two silent symptoms, and
-            # the misfile then made project-scoped change_status fail with an
-            # error that reads exactly like a bad doc id.
-            # Recovering the param is strictly better than rejecting: no work
-            # is lost, the doc lands where the caller intended, and the note
-            # tells them their client is malforming the call.
-            _recovered_project = _extracted.pop("project", None)
-            if _recovered_project and not project:
-                project = _recovered_project.strip().split()[0] if _recovered_project.strip() else None
-                if project:
-                    _lint_notes.append(
-                        f"RECOVERED ROUTING: 'project' was swallowed by the leak; "
-                        f"filing under project='{project}' as intended (without this "
-                        f"it would have landed in shared with project=''). Fix your "
-                        f"client's tool-call emission."
-                    )
-            elif _recovered_project:
-                _lint_notes.append(
-                    f"leak contained project='{_recovered_project}' but an explicit "
-                    f"project='{project}' was also passed; the explicit one wins"
-                )
-            for _pname, _ptext in _extracted.items():
-                details += f"\n\n## [write-lint] recovered {_pname}\n{_ptext}"
-                _lint_notes.append(f"recovered '{_pname}' block kept in-doc")
-    except Exception:
-        pass
+    # Write-lint (backlog_1115f9fe35f7 / backlog_8d33a63e2626): strip a
+    # serialized tool-call envelope if a malformed emission leaked it into the
+    # body, and re-route any swallowed params (notably `project`, whose loss
+    # otherwise misfiles the doc to shared with project=""). Uses the shared
+    # recovery helper every free-text writer now routes through, so store,
+    # add_backlog_item, define_spec and record_learning behave identically.
+    # Recovered sibling content is kept in-doc under a marked heading and
+    # flagged in the response. The helper never raises.
+    from shared_memory.write_lint import recover_envelope_leak
+    details, project, _lint_notes = recover_envelope_leak(details, "details", project)
 
     if project:
         project = normalize_project(project)

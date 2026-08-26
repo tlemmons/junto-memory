@@ -62,6 +62,11 @@ async def memory_add_backlog_item(
     if priority not in BACKLOG_PRIORITIES:
         return json.dumps({"error": f"Invalid priority. Must be one of: {BACKLOG_PRIORITIES}"})
 
+    # Write-lint parity (backlog_8d33a63e2626): strip a leaked tool-call envelope
+    # and re-route swallowed params before description enters the doc / op-log.
+    from shared_memory.write_lint import recover_envelope_leak
+    description, project, _lint_notes = recover_envelope_leak(description, "description", project)
+
     tags = tags or []
     chroma = await get_chroma()
     session_info = active_sessions[session_id]
@@ -130,8 +135,8 @@ async def memory_add_backlog_item(
         },
     )
 
-    return json.dumps({
-        "status": "added",
+    result = {
+        "status": "added_with_recovery" if _lint_notes else "added",
         "id": backlog_id,
         "title": title,
         "priority": priority,
@@ -139,7 +144,16 @@ async def memory_add_backlog_item(
         "assigned_to": assigned_to,
         "target_version": target_version,
         "deferred_reason": deferred_reason
-    })
+    }
+    if _lint_notes:
+        result["write_lint"] = _lint_notes
+        result["action_required"] = (
+            "Your tool-call emission is malformed — it serialized the call's own "
+            "XML envelope into `description`. The server repaired this write, but "
+            "it cannot repair the client. Fix the emission; see write_lint above "
+            "for what was recovered."
+        )
+    return json.dumps(result)
 
 
 @mcp.tool()

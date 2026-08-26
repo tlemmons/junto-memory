@@ -31,7 +31,10 @@ from typing import Dict, List, Tuple
 # end_session(learnings=..., handoff_notes=...) is the observed emitter;
 # record_learning(details=...) is guarded with the same set because the
 # leaked envelopes observed so far always carry these param names.
-_ENVELOPE_FIELDS = ("learnings", "handoff_notes", "details", "summary")
+# `content` (store, define_spec) and `description` (add_backlog_item) join the
+# set so all free-text writers are mutually protective — a leak that swallows a
+# sibling's tag into any of them is caught wherever it lands (backlog_8d33a63e2626).
+_ENVELOPE_FIELDS = ("learnings", "handoff_notes", "details", "summary", "content", "description")
 
 # <parameter name="xyz">content</parameter-or-field-close-or-EOF>
 _PARAM_BLOCK_RE = re.compile(
@@ -115,6 +118,62 @@ def strip_envelope_leak(body: str, field_name: str) -> Tuple[str, Dict[str, str]
     # first envelope token in all observed instances) gets swept too.
     clean = _DEBRIS_RE.sub("", clean).rstrip()
     return clean, extracted, True
+
+
+def recover_envelope_leak(
+    body: str, field_name: str, project: str = None
+) -> Tuple[str, str, List[str]]:
+    """Apply the RECOVERY posture (strip + re-route + warn) to ``body`` — the
+    settled uniform behavior for every free-text writer (backlog_8d33a63e2626:
+    "a validator on one writer and not its siblings is worse than none").
+
+    Wraps strip_envelope_leak and reproduces the routing-recovery first shipped
+    inline in record_learning (941deff), centralized here so memory_store,
+    memory_add_backlog_item, memory_define_spec and memory_record_learning all
+    behave identically instead of drifting.
+
+    Returns (clean_body, project, lint_notes):
+      - clean_body: ``body`` with the envelope stripped; any swallowed sibling
+        param other than ``project`` appended under a ``## [write-lint] recovered``
+        heading so no substantive content is lost.
+      - project: the caller's ``project``, or a swallowed ``project`` value
+        recovered from the leak when the caller passed none (the
+        misfile-to-shared fix — a leaked ``project`` otherwise filed the doc to
+        shared with project="").
+      - lint_notes: human-readable notes for the tool response; empty list when
+        no leak fired.
+
+    Never raises: a lint failure must never block the write, so on any internal
+    error this returns the inputs unchanged with no notes.
+    """
+    notes: List[str] = []
+    try:
+        clean, extracted, leaked = strip_envelope_leak(body, field_name)
+        if not leaked:
+            return body, project, notes
+        notes.append(f"envelope leak stripped from {field_name}")
+        recovered_project = extracted.pop("project", None)
+        if recovered_project and not project:
+            cand = recovered_project.strip().split()[0] if recovered_project.strip() else None
+            if cand:
+                project = cand
+                notes.append(
+                    f"RECOVERED ROUTING: 'project' was swallowed by the leak; "
+                    f"filing under project='{project}' as intended (without this "
+                    f"it would have landed in shared with project=''). Fix your "
+                    f"client's tool-call emission."
+                )
+        elif recovered_project:
+            notes.append(
+                f"leak contained project='{recovered_project}' but an explicit "
+                f"project='{project}' was also passed; the explicit one wins"
+            )
+        for pname, ptext in extracted.items():
+            clean += f"\n\n## [write-lint] recovered {pname}\n{ptext}"
+            notes.append(f"recovered '{pname}' block kept in-doc")
+        return clean, project, notes
+    except Exception:
+        return body, project, notes
 
 
 def extract_refs(text: str) -> List[str]:
@@ -201,7 +260,11 @@ def advisory_payload(unresolved: List[str]) -> Dict:
             "server can check (your project + shared + messages). If you "
             "typed any from memory, verify with memory_get_by_id before "
             "relying on it — a dangling ID reads as tracked work and "
-            "suppresses the instinct to check. Cross-project references "
-            "may be false positives; this is advisory, the write succeeded."
+            "suppresses the instinct to check. If you cited an ID for "
+            "something you created in the SAME parallel batch, you invented "
+            "it — the creating write had not returned when you wrote the "
+            "citation, so use the ID from that call's result, not one typed "
+            "from memory. Cross-project references may be false positives; "
+            "this is advisory, the write succeeded."
         ),
     }

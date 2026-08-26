@@ -1,7 +1,6 @@
 """Spec management tools - versioned specifications with owner enforcement."""
 
 import json
-import re
 from typing import List
 
 from mcp.server.fastmcp import Context
@@ -87,24 +86,19 @@ async def memory_define_spec(
             "size": f"{len(content.encode('utf-8')) // 1024}KB"
         })
 
-    # Reject a malformed payload where a tool-call serialization leaked into the
-    # content body. Observed 2026-04-22: a write landed with content ending
+    # Write-lint parity (backlog_8d33a63e2626): a tool-call serialization that
+    # leaks into the content body — observed 2026-04-22: content ending
     # `</content><parameter name="spec_type">agent_state</parameter>...</invoke>`,
-    # which swallowed the real spec_type arg (defaulting it to "interface") and
-    # left a permanent ghost doc. Narrow signature so legitimate content that
-    # merely discusses XML isn't rejected.
-    if re.search(r"</content>\s*<\s*parameter\s+name\s*=", content) or \
-            content.rstrip().endswith("</invoke>"):
-        return json.dumps({
-            "error": "Malformed content: tool-call serialization leaked into the spec body",
-            "spec_name": name,
-            "suggestion": (
-                "Your content ends with tool-call XML (</content> / <parameter> / "
-                "</invoke>), which means the call was truncated or mis-serialized "
-                "before the real arguments were parsed. Re-send with the actual "
-                "spec content only."
-            ),
-        })
+    # which swallowed the real spec_type arg and left a ghost doc — used to be
+    # REJECTED here. Reconciled to the shared RECOVERY posture every other
+    # free-text writer uses: strip + re-route swallowed params + warn, so no
+    # work is lost and no retry is needed (legacy-team: a validator that alone
+    # rejects while its siblings recover trains agents to expect the catch).
+    # The helper never raises. A swallowed non-project param (e.g. spec_type)
+    # is preserved in-doc under a marked heading and flagged, rather than
+    # silently defaulting.
+    from shared_memory.write_lint import recover_envelope_leak
+    content, project, _spec_lint_notes = recover_envelope_leak(content, "content", project)
 
     chroma = await get_chroma()
     session_info = active_sessions[session_id]
@@ -333,14 +327,23 @@ async def memory_define_spec(
     except Exception:
         pass
 
-    return json.dumps({
-        "status": action,
+    result = {
+        "status": f"{action}_with_recovery" if _spec_lint_notes else action,
         "spec_name": name,
         "version": version,
         "owner": owner,
         "location": location,
         "note": "Owner-only updates enforced. Previous versions preserved in history."
-    }, indent=2)
+    }
+    if _spec_lint_notes:
+        result["write_lint"] = _spec_lint_notes
+        result["action_required"] = (
+            "Your tool-call emission is malformed — it serialized the call's own "
+            "XML envelope into `content`. The server repaired this write, but it "
+            "cannot repair the client. Fix the emission; see write_lint above for "
+            "what was recovered."
+        )
+    return json.dumps(result, indent=2)
 
 
 @mcp.tool()
