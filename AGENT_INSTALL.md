@@ -129,7 +129,7 @@ When you see `Uvicorn running on http://0.0.0.0:8080`, the server is up. Press `
 curl -s http://localhost:8080/health
 ```
 
-Expected: an HTTP 200 with a small JSON body. Any other response means something is wrong — see "If health check fails" below.
+Expected: `{"status":"healthy","chroma":"healthy","mongo":"healthy",...}`. `"status":"healthy"` means **both** stores are up AND Mongo has a writable primary — so on this standalone path it stays `"degraded"` (HTTP 503, with `"mongo":"no primary..."`) until you've run the `rs.initiate()` step in Step 3. Any non-`healthy` status means something is wrong — see "If health check fails" below.
 
 Also verify all three containers are running:
 
@@ -152,7 +152,7 @@ Add to `~/.claude.json` (Claude Code, global) **or** to `.mcp.json` in a specifi
 ```json
 {
   "mcpServers": {
-    "shared-memory": {
+    "junto": {
       "type": "http",
       "url": "http://localhost:8080/mcp"
     }
@@ -166,7 +166,7 @@ For non-localhost installs (other host on the LAN, Tailscale, etc.), replace `lo
 
 `[CONFIRM]` with the human which MCP client(s) they're using and whether the config should be global or per-project.
 
-After config, the human restarts their MCP client. They should now see the `shared-memory` server with 50+ tools available (`memory_*`).
+After config, the human restarts their MCP client. They should now see the `junto` server with 50+ tools available (`memory_*`).
 
 ---
 
@@ -242,9 +242,9 @@ After 24 hours, verify the backups are landing: `ls -la ~/{chroma,mongo}-backups
 You can declare the install successful when ALL of these are true:
 
 - [ ] `docker compose ps` shows three containers, all `Up` or `Up (healthy)`.
-- [ ] `curl -s http://localhost:8080/health` returns 200.
-- [ ] The human's MCP client lists `shared-memory` with 50+ tools.
-- [ ] `memory_start_session(project="test", ...)` returns a session_id.
+- [ ] `curl -s http://localhost:8080/health` returns `"status":"healthy"` (both `chroma` and `mongo` healthy — a 503/`degraded` means you skipped `rs.initiate()`).
+- [ ] The human's MCP client lists `junto` with 50+ tools.
+- [ ] **The real proof:** `memory_start_session(...)` then `memory_record_learning(...)` then read it back with `memory_query(...)` — a persisted write is the authoritative "it works", not the health check.
 - [ ] If auth was enabled: the owner key is stored somewhere durable, NOT in the conversation.
 - [ ] If non-localhost install: auth is enabled.
 
@@ -260,7 +260,7 @@ The server isn't up yet. `docker compose ps` — is `mcp-server` running? If `Re
 
 If logs show `pymongo.errors.ServerSelectionTimeoutError`: the server can't reach a Mongo **primary**. In order of likelihood: (1) you skipped the `rs.initiate()` step (Step 3) — run it; the replica set has no primary until you do. (2) The `mongodb` container isn't `Up` — a missing `secrets/mongo-keyfile` (Step 2.5) stops it; `docker compose ps` and `docker compose logs mongodb`. (3) `MONGO_USER`/`MONGO_PASSWORD` in `.env` don't match what compose sees: `docker compose config | grep MONGO`. (Auth errors surface distinctly as `Authentication failed`, not a selection timeout.)
 
-If logs show `chromadb.errors.ChromaError` or similar: Chroma volume mount is wrong. **This is the bug that caused the April 2026 data loss.** The `docker-compose.yml` mounts `chroma-persistent:/data`. Do not change to `/chroma/chroma`. If you're seeing this on a fresh install with the unchanged compose file, surface to the human — something else is wrong.
+If logs show `chromadb.errors.ChromaError` or similar: Chroma volume mount is wrong. **This is the bug that caused the April 2026 data loss.** The `docker-compose.yml` mounts the `chroma-data` volume at `/data` inside the container. Do not change the `/data` path (e.g. to `/chroma/chroma`). If you're seeing this on a fresh install with the unchanged compose file, surface to the human — something else is wrong.
 
 ### Port already in use
 

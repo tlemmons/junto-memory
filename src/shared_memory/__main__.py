@@ -482,10 +482,31 @@ def main():
         except Exception as e:
             chroma_status = f"unhealthy: {str(e)}"
 
-        status = "healthy" if chroma_status == "healthy" else "degraded"
+        # Mongo must have a WRITABLE PRIMARY, not just be reachable — the server
+        # runs Mongo as replica set rs0 for transactions, and every knowledge
+        # write needs a primary. A fresh install that hasn't run rs.initiate()
+        # has no primary; without this check /health would report "healthy" off
+        # Chroma alone while the first write fails. So health is only green when
+        # Mongo is actually writable. (isWritablePrimary is the hello/isMaster
+        # flag; on an uninitiated set server-selection times out -> caught here.)
+        try:
+            db = get_mongo()
+            if db is None:
+                mongo_status = "unhealthy: not initialized"
+            else:
+                hello = db.client.admin.command("hello")
+                if hello.get("isWritablePrimary") or hello.get("ismaster"):
+                    mongo_status = "healthy"
+                else:
+                    mongo_status = "no primary (replica set not initiated?)"
+        except Exception as e:
+            mongo_status = f"unhealthy: {str(e)}"
+
+        status = "healthy" if (chroma_status == "healthy" and mongo_status == "healthy") else "degraded"
         return JSONResponse({
             "status": status,
             "chroma": chroma_status,
+            "mongo": mongo_status,
             "active_sessions": len(active_sessions),
             "active_locks": len(file_locks),
             "active_signals": len(active_signals)
