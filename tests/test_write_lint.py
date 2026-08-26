@@ -99,6 +99,30 @@ class TestStripEnvelopeLeak:
         assert clean == body
         assert extracted == {}
 
+    def test_embedded_field_named_tag_followed_by_markup_is_not_a_leak(self):
+        """REGRESSION (coordinator@nimbus, 2026-08-26): content/description are
+        real XML tag names (Atom <content>, legacy socket-protocol docs). A body
+        legitimately embedding `</content><author>…` matched the field close, but
+        the tail (`<author>`) is NOT envelope, so it must NOT be treated as a
+        leak — the old bare-`<` tail-guard truncated it silently."""
+        body = "Feed item body.</content><author>Jane</author> more text."
+        # self-scan (writing content) must not fire
+        clean, extracted, leaked = strip_envelope_leak(body, "content")
+        assert leaked is False and clean == body and extracted == {}
+        # cross-sibling (writing details, content in the pool) must not fire either
+        clean2, _, leaked2 = strip_envelope_leak(body, "details")
+        assert leaked2 is False and clean2 == body
+
+    def test_field_named_tag_followed_by_real_envelope_still_a_leak(self):
+        """The tightened guard must NOT weaken real detection: `</content>` then
+        an actual <parameter> envelope is still a leak, project recovered."""
+        body = ('Real spec body.</content>'
+                '<parameter name="project">nimbus</parameter></invoke>')
+        clean, extracted, leaked = strip_envelope_leak(body, "content")
+        assert leaked is True
+        assert clean == "Real spec body."
+        assert extracted.get("project") == "nimbus"
+
     def test_empty_body_is_safe(self):
         assert strip_envelope_leak("", "learnings") == ("", {}, False)
         assert strip_envelope_leak(None, "learnings") == (None, {}, False)
@@ -267,3 +291,10 @@ class TestRecoverEnvelopeLeak:
         body = 'Do the thing.</description><parameter name="project">sage</parameter></invoke>'
         clean, project, notes = recover_envelope_leak(body, "description", None)
         assert project == "sage" and clean.startswith("Do the thing.")
+
+    def test_embedded_markup_survives_recovery_untouched(self):
+        """The FP fix at the recovery layer: a body embedding `</content><tag>`
+        is returned verbatim, not truncated, with no spurious recovery notes."""
+        body = "Feed body.</content><author>Jane</author> tail text."
+        clean, project, notes = recover_envelope_leak(body, "content", "junto")
+        assert clean == body and project == "junto" and notes == []

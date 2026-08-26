@@ -339,9 +339,13 @@ async def memory_define_spec(
         result["write_lint"] = _spec_lint_notes
         result["action_required"] = (
             "Your tool-call emission is malformed — it serialized the call's own "
-            "XML envelope into `content`. The server repaired this write, but it "
-            "cannot repair the client. Fix the emission; see write_lint above for "
-            "what was recovered."
+            "XML envelope into `content`. The server repaired the body, but it "
+            "cannot repair the client. IMPORTANT: any parameter the leak swallowed "
+            f"(e.g. spec_type — this spec persisted as spec_type='{spec_type}') was "
+            "NOT received as an argument and fell back to its default. For a "
+            "versioned spec that changes get/list filtering and owner enforcement, "
+            "so verify spec_type/version/owner and re-define if wrong. See "
+            "write_lint above for what was recovered into the body."
         )
     return json.dumps(result, indent=2)
 

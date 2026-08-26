@@ -50,6 +50,22 @@ _DEBRIS_RE = re.compile(
     r"</?(?:antml:)?(?:invoke|function_calls|parameter)>\s*", re.IGNORECASE
 )
 
+# ENVELOPE-TAIL discriminator: what may legitimately sit IMMEDIATELY after a
+# field's own closing tag in a REAL leak — a sibling <parameter>, or the
+# call's </invoke> / <function_calls> envelope (plain or antml:-namespaced).
+# The tail must MATCH one of these to be treated as corruption. The previous
+# guard also admitted a bare `<` / `</`, which false-fired on legitimately
+# embedded markup: `</content>` and `</description>` are the writers' own field
+# names AND real-world XML tag names (Atom <content>, nimbus's legacy socket-
+# protocol docs), so a body like `...</content><author>…` matched `</content>`,
+# saw a `<` tail, and got SILENTLY TRUNCATED with no <parameter> to re-route.
+# Requiring an envelope-specific token keeps every real-leak shape (and the
+# nested `</handoff_notes></invoke>` case) while letting embedded markup pass.
+# (coordinator@nimbus review of review/write-lint-mongo-escape, 2026-08-26.)
+_ENVELOPE_TAIL_RE = re.compile(
+    r"^\s*</?(?:antml:)?(?:parameter|invoke|function_calls)\b", re.IGNORECASE
+)
+
 # ID-shaped references. Hex length in the corpus runs 12-16; accept 6+ so
 # truncated citations are still checked rather than silently skipped.
 _REF_RE = re.compile(
@@ -101,8 +117,13 @@ def strip_envelope_leak(body: str, field_name: str) -> Tuple[str, Dict[str, str]
     # live 2026-08-08 (learning_24b33b8aa7ff16f1, learning_f588ce30c5b5c9a4:
     # `</details>\n<parameter name="project">nimbus`, ending in a bare value).
     # Caught by the librarian acting as the corpus verification layer.
-    _tail = body[cut_end:].lstrip()
-    if _tail and not _tail.startswith(("<parameter", "</", "<", "<function_calls")):
+    #
+    # The tail must be ENVELOPE (see _ENVELOPE_TAIL_RE) — a bare `<`/`</` is NOT
+    # enough, because content/description are real XML tag names and a body may
+    # legitimately embed `</content><author>…`. Only a <parameter>/invoke/
+    # function_calls token immediately after the field's close is corruption.
+    _tail = body[cut_end:]
+    if _tail.strip() and not _ENVELOPE_TAIL_RE.match(_tail):
         return body, {}, False
 
     clean = body[:cut].rstrip()
