@@ -102,6 +102,20 @@ async def memory_register_function(
     now = utc_now_iso()
     requires = requires or []
 
+    # Write-lint (backlog_1115f9fe35f7): register_function was the ONE free-text
+    # writer NOT routed through the envelope recovery path, so func-ref bodies
+    # leaked freely (`**Gotchas:** …</gotchas>\n</invoke>\n<invoke name=…`,
+    # learning_08dfd3f8cbf6f0ce). Recover gotchas + purpose and route a swallowed
+    # project BEFORE collection selection. Best-effort; never blocks the write.
+    try:
+        from shared_memory.write_lint import recover_envelope_leak
+        if gotchas:
+            gotchas, project, _ = recover_envelope_leak(gotchas, "gotchas", project)
+        if purpose:
+            purpose, project, _ = recover_envelope_leak(purpose, "purpose", project)
+    except Exception:
+        pass
+
     if project:
         project = normalize_project(project)
 

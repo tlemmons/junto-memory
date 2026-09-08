@@ -134,6 +134,106 @@ class TestStripEnvelopeLeak:
         assert clean == "Handoff text."
 
 
+class TestBareParamTagTails:
+    """REGRESSION (2026-09-08, learning_08dfd3f8cbf6f0ce): the 2026-08-26 tail-
+    guard tightening required an envelope token (parameter|invoke|function_calls)
+    IMMEDIATELY after the field close. But the two DOMINANT corpus shapes put the
+    emitter's own bare param-tag there first — so both slipped through write-time.
+    The guard now also admits the leaking writers' distinctive sibling param-tags.
+    """
+
+    def test_record_learning_bare_project_tags_tail_is_a_leak(self):
+        """shape (b): </details> then bare <project>/<tags> then </invoke>."""
+        body = (
+            "Real learning body about a race.</details>\n"
+            '<project>nimbus</project>\n<tags>["race","timing"]</tags>\n</invoke>'
+        )
+        clean, _, leaked = strip_envelope_leak(body, "details")
+        assert leaked is True
+        assert clean == "Real learning body about a race."
+
+    def test_end_session_summary_files_modified_tail_is_a_leak(self):
+        """shape (c): summary swallowed the call — </summary> then <files_modified>.
+        A real serialized call is corroborated by a trailing envelope token."""
+        body = (
+            "Migrated storm off dying hardware.</summary>\n"
+            '<files_modified>[]</files_modified>\n<learnings>none</learnings>\n</invoke>'
+        )
+        clean, _, leaked = strip_envelope_leak(body, "summary")
+        assert leaked is True
+        assert clean == "Migrated storm off dying hardware."
+
+    def test_register_function_gotchas_close_then_invoke_is_a_leak(self):
+        """shape (d): register_function's gotchas swallowed the envelope. Requires
+        `gotchas` in _ENVELOPE_FIELDS so a cut point exists at all."""
+        body = (
+            "Use over v1 - attachment bug.</gotchas>\n</invoke>\n"
+            '<invoke name="mcp__junto__memory_record_learning">'
+        )
+        clean, _, leaked = strip_envelope_leak(body, "gotchas")
+        assert leaked is True
+        assert clean == "Use over v1 - attachment bug."
+
+    def test_malformed_stray_quote_files_modified_tail_is_a_leak(self):
+        """4th emitter variant: `<files_modified">` (stray quote, not `>`)."""
+        body = (
+            "Faceted 8 rows.</summary>\n"
+            '<files_modified">["mcp_orchestrator.learning_facets (8 rows)"]</invoke>'
+        )
+        _, _, leaked = strip_envelope_leak(body, "summary")
+        assert leaked is True
+
+    def test_backlog_param_family_tail_is_a_leak(self):
+        """add_backlog_item family: </description> then <priority>/<assigned_to>."""
+        body = (
+            "Do the frames migration.</description>\n"
+            "<priority>medium</priority>\n<project>nimbus</project>\n"
+            "<assigned_to>frames-team</assigned_to>\n</invoke>"
+        )
+        _, _, leaked = strip_envelope_leak(body, "description")
+        assert leaked is True
+
+    def test_documented_shape_without_terminator_is_not_a_leak(self):
+        """FP GUARD (c9de3ea review): a doc DOCUMENTING the leak shape as a literal
+        block — a bare param-tag after a field close but NO envelope terminator
+        anywhere in the tail. Must NOT truncate: it is documentation, not a call.
+        Reviewer's confirmed cases A/N/I."""
+        cases = [
+            # end_session shape written out as an example, then prose
+            ("Migrated storm off dying hw.</summary>\n<files_modified>[]</files_modified>\n"
+             "<learnings>none</learnings>\nWe now strip that at write time.", "summary"),
+            # add_backlog_item shape as an example ending in prose
+            ("Migrate frames.</description>\n<priority>medium</priority>\n"
+             "<project>nimbus</project>\nThat is the whole envelope.", "description"),
+            # minimal content-close then a bare param, no terminator
+            ("Config:</content>\n<priority>1</priority>", "content"),
+        ]
+        for body, field in cases:
+            clean, extracted, leaked = strip_envelope_leak(body, field)
+            assert leaked is False, f"documented shape must not fire: {body[:40]!r}"
+            assert clean == body and extracted == {}
+
+    def test_excluded_generic_tags_stay_safe_atom_summary_then_content(self):
+        """FP GUARD: <content>/<summary>/<description> are DELIBERATELY excluded
+        from the tail allowlist — they collide with Atom vocabulary. An Atom entry
+        `</summary>\\n<content>…` must NOT be treated as a leak."""
+        body = "Feed entry blurb.</summary>\n<content>Full article body here.</content>"
+        clean, _, leaked = strip_envelope_leak(body, "summary")
+        assert leaked is False
+        assert clean == body
+
+    def test_prose_quoting_a_bare_param_tag_is_not_a_leak(self):
+        """FP GUARD: a discussion doc describing the shape in prose. The tail after
+        the field close is prose (' then a '), not a bare param-tag."""
+        body = (
+            "The leak ends with </details> then a bare <project> tag before the "
+            "</invoke>. The lint now catches that. Normal prose continues here."
+        )
+        clean, _, leaked = strip_envelope_leak(body, "details")
+        assert leaked is False
+        assert clean == body
+
+
 class TestExtractRefs:
     def test_extracts_distinct_refs_in_order(self):
         text = (
