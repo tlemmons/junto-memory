@@ -882,13 +882,19 @@ async def memory_end_session(
             if s_leaked:
                 lint_notes.append("envelope leak stripped from summary")
                 _rehn = s_extracted.pop("handoff_notes", None)
-                if _rehn and not handoff_notes:
-                    handoff_notes = _rehn
-                    lint_notes.append("re-routed swallowed handoff_notes to its field")
+                if _rehn:
+                    if not handoff_notes:
+                        handoff_notes = _rehn
+                        lint_notes.append("re-routed swallowed handoff_notes to its field")
+                    else:
+                        s_extracted["handoff_notes"] = _rehn  # both present: keep, don't drop
                 _rel = s_extracted.pop("learnings", None)
-                if _rel and not learnings:
-                    learnings = _rel
-                    lint_notes.append("re-routed swallowed learnings to its field")
+                if _rel:
+                    if not learnings:
+                        learnings = _rel
+                        lint_notes.append("re-routed swallowed learnings to its field")
+                    else:
+                        s_extracted["learnings"] = _rel
                 for pname, ptext in s_extracted.items():
                     summary += f"\n\n## [write-lint] recovered {pname}\n{ptext}"
                     lint_notes.append(f"recovered '{pname}' block kept in summary")

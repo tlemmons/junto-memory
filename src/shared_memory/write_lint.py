@@ -77,15 +77,30 @@ _DEBRIS_RE = re.compile(
 # (memory@junto, backlog_1115f9fe35f7 back-catalogue re-run, 2026-09-08.)
 # The `[">]` after the param name admits both the well-formed `<files_modified>`
 # and the observed MALFORMED `<files_modified">` (stray-quote) serialization — a
-# 4th emitter variant, 15 real leaks in the corpus (2026-09-08); the name itself
-# is distinctive enough that a stray quote after it cannot occur in prose.
+# 4th emitter variant, 15 real leaks in the corpus (2026-09-08).
+#
+# Two named branches: `env` is an UNAMBIGUOUS envelope token (proof on its own);
+# `bare` is one of the leaking writers' own param-tags. A `bare` match is trusted
+# ONLY when the tail is CORROBORATED by a real envelope token elsewhere (see
+# _ENVELOPE_TOKEN_RE + the check in strip_envelope_leak). Without that, a doc that
+# DOCUMENTS the leak shape as a literal/fenced block — common in this
+# self-documenting corpus — would be silently truncated (second-agent review of
+# c9de3ea flagged this as a data-loss FP; the 4 confirmed cases all lacked a
+# terminator, while real bare-tag leaks end in `…</invoke>`). content|summary|
+# description stay excluded from `bare` (Atom / socket-proto collision).
 _ENVELOPE_TAIL_RE = re.compile(
     r"^\s*(?:"
-    r"</?(?:antml:)?(?:parameter|invoke|function_calls)\b"
-    r'|<(?:project|tags|files_modified|learnings|handoff_notes|gotchas'
-    r'|priority|assigned_to|target_version|prefer_over|requires)[">]'
+    r"(?P<env></?(?:antml:)?(?:parameter|invoke|function_calls)\b)"
+    r'|(?P<bare><(?:project|tags|files_modified|learnings|handoff_notes|gotchas'
+    r'|priority|assigned_to|target_version|prefer_over|requires)[">])'
     r")",
     re.IGNORECASE,
+)
+
+# Unambiguous tool-call envelope tokens — presence in the tail is proof of a real
+# serialized call, the corroboration a `bare`-tag tail requires.
+_ENVELOPE_TOKEN_RE = re.compile(
+    r"<parameter\s+name=|</?(?:antml:)?(?:invoke|function_calls)\b", re.IGNORECASE
 )
 
 # ID-shaped references. Hex length in the corpus runs 12-16; accept 6+ so
@@ -145,8 +160,17 @@ def strip_envelope_leak(body: str, field_name: str) -> Tuple[str, Dict[str, str]
     # legitimately embed `</content><author>…`. Only a <parameter>/invoke/
     # function_calls token immediately after the field's close is corruption.
     _tail = body[cut_end:]
-    if _tail.strip() and not _ENVELOPE_TAIL_RE.match(_tail):
-        return body, {}, False
+    if _tail.strip():
+        m = _ENVELOPE_TAIL_RE.match(_tail)
+        if not m:
+            return body, {}, False
+        # A bare param-tag alone is NOT proof — it must be corroborated by an
+        # actual envelope token in the tail. Otherwise a doc DOCUMENTING the leak
+        # shape as a literal block gets truncated with nothing to re-route (the
+        # FP = silent data loss; c9de3ea review, 2026-09-08). An `env` match is
+        # self-evidencing and needs no corroboration.
+        if m.group("bare") and not _ENVELOPE_TOKEN_RE.search(_tail):
+            return body, {}, False
 
     clean = body[:cut].rstrip()
     tail = body[cut:]
