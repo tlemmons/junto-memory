@@ -869,6 +869,29 @@ async def memory_end_session(
     lint_notes = []
     try:
         from shared_memory.write_lint import strip_envelope_leak
+        # summary is the DOMINANT leak surface — a malformed end_session emission
+        # serializes the whole call into `summary`, swallowing files_modified /
+        # handoff_notes / learnings after a bare `</summary>` (shape (c),
+        # learning_08dfd3f8cbf6f0ce). It was previously UNLINTED, so it leaked
+        # into both the rendered handoff and the work-item doc (documents=[summary]).
+        # Strip it and RE-ROUTE the swallowed text params to their real fields
+        # (when those are empty) so they render in their proper sections; keep
+        # anything else in-summary under a recovered heading. Never reject.
+        if summary:
+            summary, s_extracted, s_leaked = strip_envelope_leak(summary, "summary")
+            if s_leaked:
+                lint_notes.append("envelope leak stripped from summary")
+                _rehn = s_extracted.pop("handoff_notes", None)
+                if _rehn and not handoff_notes:
+                    handoff_notes = _rehn
+                    lint_notes.append("re-routed swallowed handoff_notes to its field")
+                _rel = s_extracted.pop("learnings", None)
+                if _rel and not learnings:
+                    learnings = _rel
+                    lint_notes.append("re-routed swallowed learnings to its field")
+                for pname, ptext in s_extracted.items():
+                    summary += f"\n\n## [write-lint] recovered {pname}\n{ptext}"
+                    lint_notes.append(f"recovered '{pname}' block kept in summary")
         if learnings:
             learnings, extracted, leaked = strip_envelope_leak(learnings, "learnings")
             if leaked:

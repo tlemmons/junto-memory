@@ -34,7 +34,7 @@ from typing import Dict, List, Tuple
 # `content` (store, define_spec) and `description` (add_backlog_item) join the
 # set so all free-text writers are mutually protective — a leak that swallows a
 # sibling's tag into any of them is caught wherever it lands (backlog_8d33a63e2626).
-_ENVELOPE_FIELDS = ("learnings", "handoff_notes", "details", "summary", "content", "description")
+_ENVELOPE_FIELDS = ("learnings", "handoff_notes", "details", "summary", "content", "description", "gotchas")
 
 # <parameter name="xyz">content</parameter-or-field-close-or-EOF>
 _PARAM_BLOCK_RE = re.compile(
@@ -51,19 +51,41 @@ _DEBRIS_RE = re.compile(
 )
 
 # ENVELOPE-TAIL discriminator: what may legitimately sit IMMEDIATELY after a
-# field's own closing tag in a REAL leak — a sibling <parameter>, or the
-# call's </invoke> / <function_calls> envelope (plain or antml:-namespaced).
-# The tail must MATCH one of these to be treated as corruption. The previous
-# guard also admitted a bare `<` / `</`, which false-fired on legitimately
-# embedded markup: `</content>` and `</description>` are the writers' own field
-# names AND real-world XML tag names (Atom <content>, nimbus's legacy socket-
-# protocol docs), so a body like `...</content><author>…` matched `</content>`,
-# saw a `<` tail, and got SILENTLY TRUNCATED with no <parameter> to re-route.
-# Requiring an envelope-specific token keeps every real-leak shape (and the
-# nested `</handoff_notes></invoke>` case) while letting embedded markup pass.
-# (coordinator@nimbus review of review/write-lint-mongo-escape, 2026-08-26.)
+# field's own closing tag in a REAL leak — a sibling <parameter>, the call's
+# </invoke> / <function_calls> envelope (plain or antml:-namespaced), OR one of
+# the emitter's OWN bare parameter-tags (see below). The tail must MATCH one of
+# these to be treated as corruption.
+#
+# HISTORY. The original guard admitted a bare `<` / `</`, which false-fired on
+# legitimately embedded markup: `</content>` / `</description>` are the writers'
+# own field names AND real XML tag names (Atom <content>, nimbus's legacy
+# socket-protocol docs), so `...</content><author>…` matched `</content>`, saw a
+# `<` tail, and got SILENTLY TRUNCATED. The 2026-08-26 fix required an
+# envelope-specific token (parameter|invoke|function_calls) after the field
+# close — which killed that FP class but SILENTLY REINTRODUCED a false-NEGATIVE
+# class (learning_08dfd3f8cbf6f0ce, verified 2026-09-08): the two DOMINANT
+# corpus leak shapes put the emitter's own bare param-tag first, not an envelope
+# token, so both slipped through write-time:
+#   record_learning : `…</details>\n<project>nimbus</project>\n<tags>[…]\n</invoke>`
+#   end_session     : `…</summary>\n<files_modified>[]…\n<learnings>…`
+# A bare `<project>` / `<files_modified>` immediately after a field's CLOSING tag
+# cannot occur in legitimate text — no body closes its own enclosing field and
+# then opens one of the memory tools' parameter names. We therefore also admit
+# those DISTINCTIVE param-tags. Deliberately EXCLUDED: <content>, <summary>,
+# <description> — they collide with real XML vocabularies (Atom) and are the
+# field names themselves, so re-admitting them would reopen the 08-26 FP class.
+# (memory@junto, backlog_1115f9fe35f7 back-catalogue re-run, 2026-09-08.)
+# The `[">]` after the param name admits both the well-formed `<files_modified>`
+# and the observed MALFORMED `<files_modified">` (stray-quote) serialization — a
+# 4th emitter variant, 15 real leaks in the corpus (2026-09-08); the name itself
+# is distinctive enough that a stray quote after it cannot occur in prose.
 _ENVELOPE_TAIL_RE = re.compile(
-    r"^\s*</?(?:antml:)?(?:parameter|invoke|function_calls)\b", re.IGNORECASE
+    r"^\s*(?:"
+    r"</?(?:antml:)?(?:parameter|invoke|function_calls)\b"
+    r'|<(?:project|tags|files_modified|learnings|handoff_notes|gotchas'
+    r'|priority|assigned_to|target_version|prefer_over|requires)[">]'
+    r")",
+    re.IGNORECASE,
 )
 
 # ID-shaped references. Hex length in the corpus runs 12-16; accept 6+ so
