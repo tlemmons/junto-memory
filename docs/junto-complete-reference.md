@@ -389,6 +389,8 @@ Type `park` before closing the window. The park checklist (mandatory):
 
 **If you close without parking**, the next session starts without state context. Three minutes of parking saves twenty minutes of re-orientation.
 
+**When to park.** The park signal is task completion at a clean stopping point — not a token or exchange count. On 1M-context models: keep working **< 500K** tokens (do not park early "to preserve context"); watch for real degradation **500–800K** (re-reading known files, re-asking settled questions, contradicting earlier decisions) and park at the next clean stop; park even mid-task **> 800K**. Coordinators shift these bands ~150–200K lower (channel messages and spec pulls are large). Any park should cite a token count or a named symptom — "feels long" is not evidence. These bands live in the server's **global guidelines** (`memory_guidelines`), which are **authoritative and supersede any older context/session heuristic still written in a project's `CLAUDE.md`** — this is how a fleet reconciles: update the guideline once, and every agent on every machine picks it up at its next `go`, regardless of what its local `CLAUDE.md` says.
+
 ### 6.3 The State Spec
 
 The state spec is the most important artifact a session produces. It is a short-lived, high-fidelity record of where the agent is right now:

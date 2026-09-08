@@ -17,7 +17,7 @@ When you run multiple AI agents on the same codebase, three things break fast:
 
 1. **They forget everything between sessions.** Agent parks, knowledge dies. The next agent re-reads the same code, re-discovers the same bugs, re-learns the same gotchas.
 2. **They step on each other.** Two agents modify the same file. Nobody knows what anyone else is doing or has locked.
-3. **They get dumber as sessions get long.** Research calls this "context rot" — model performance degrades as the context window fills up, even well below capacity. Longer sessions don't mean better work.
+3. **They get dumber as sessions get long.** Research calls this "context rot" — model performance degrades as the context window fills up. Eventually every agent has to hand off; without a shared brain that handoff throws away everything it learned.
 
 This server fixes all three. It gives your agents a shared brain that persists across sessions, coordinates work across agents, and lets them record what they learn so the next agent starts where the last one left off.
 
@@ -600,7 +600,7 @@ This server includes tools to fight that drift:
 
 ### Server-managed guidelines
 
-Set rules once via `memory_guidelines`, every agent receives them at session start. Rules like "never write to local files," "record learnings immediately," "park after 1-3 tasks." Update once — every agent on every machine picks it up on their next `memory_start_session`.
+Set rules once via `memory_guidelines`, every agent receives them at session start. Rules like "never write to local files," "record learnings immediately," "run longer sessions — park at a clean stop, not on a token count." Update once — every agent on every machine picks it up on their next `memory_start_session`. **These server guidelines are authoritative: they override any context/session heuristic still sitting in a project's `CLAUDE.md`.**
 
 ### Staleness management
 
