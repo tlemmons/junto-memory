@@ -600,7 +600,15 @@ This server includes tools to fight that drift:
 
 ### Server-managed guidelines
 
-Set rules once via `memory_guidelines`, every agent receives them at session start. Rules like "never write to local files," "record learnings immediately," "run longer sessions — park at a clean stop, not on a token count." Update once — every agent on every machine picks it up on their next `memory_start_session`. **These server guidelines are authoritative: they override any context/session heuristic still sitting in a project's `CLAUDE.md`.**
+Every agent receives a set of behavioral rules at session start (in the `memory_start_session` response). There are two tiers:
+
+**Built-in global defaults (shipped, universal).** Junto ships a set of `scope="global"` rules in code — [`src/shared_memory/global_guidelines.py`](src/shared_memory/global_guidelines.py) — that are re-seeded into the DB on every server boot. So a fresh server (yours, or an isolated peer/work box) gets sane defaults with **zero manual setup**, and updating a default travels with the deploy. These are deliberately **universal process** — memory-first querying, running longer sessions and parking at a clean stop, accuracy over agreement, persisting knowledge to the server, recording learnings immediately, session discipline, message semantics, pointers-not-summaries, contracts-before-code, freshness checks, concise output, and reading the source before asserting. Nothing team- or deployment-specific lives here. Global scope is **code-managed and read-only through the tool** — change a default by editing that file and deploying (the seeder re-asserts it), not with a live edit.
+
+**Your own rules (project-scoped, runtime).** Add rules specific to your team or project with `memory_guidelines(action="set", scope="<project>", name=..., rule=...)` — these are writable at runtime and served only to agents in that project. This is where deployment specifics go.
+
+**Approval boundaries.** The built-in "execute, don't ask" rule is intentionally generic — it states the principle (do reversible work; only a human approves the irreversible) and **defers the exact boundaries to your fleet's own approval contract**. Define yours as a spec (e.g. `memory_define_spec(name="approval-contract", spec_type="interface", ...)`) or a project-scoped guideline; agents pull it when an action's reversibility is in question. Don't bake one fleet's staging/prod/merge policy into the shipped defaults.
+
+Server guidelines are authoritative for the process they cover — they override any stale context/session heuristic still sitting in a project's `CLAUDE.md`.
 
 ### Staleness management
 
