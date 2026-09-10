@@ -7,6 +7,6 @@ working across projects.
 
 from shared_memory.intent import get_current_context_tokens, get_current_intent_id
 
-__version__ = "1.38.0"
+__version__ = "1.39.0"
 
 __all__ = ["get_current_context_tokens", "get_current_intent_id"]

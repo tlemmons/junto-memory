@@ -10,6 +10,8 @@
 
 **A shared memory and coordination server for multiple AI coding agents, built on the Model Context Protocol (MCP).**
 
+> 📋 **Running a server already?** See [`CHANGELOG.md`](CHANGELOG.md) for release notes — the current release (1.39.0) changes how global guidelines are seeded and generalizes the `execute-don't-ask` default; each has an upgrade note.
+
 > [!IMPORTANT]
 > **This is meant to be set up by an AI agent, not installed by hand.** Junto exists to coordinate fleets of coding agents, so the install is written for one of those agents to read and run — clone the repo and hand it to a Claude Code (or any MCP-capable) session, and let it drive. The commands in this README and in [`AGENT_INSTALL.md`](AGENT_INSTALL.md) are there so you can follow along and so the agent has something exact to execute; they are **not** a hand-tuned human tutorial, and reading them straight through isn't the intended path. You stay in control — the agent pauses for every real decision (passwords, ports, auth). If handing setup to an agent isn't something you'd want to do, this probably isn't the tool for you.
 
