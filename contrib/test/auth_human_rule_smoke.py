@@ -89,7 +89,7 @@ async def main() -> int:
 
     # 2. invalid key hard-rejected
     async with open_mcp() as s:
-        out = await start(s, "smoke-badauth", api_key="smk_bogus_garbage")
+        out = await start(s, "smoke-badauth", api_key="not-a-real-key-test-fixture")
         ok = "error" in out and "Invalid" in out.get("error", "")
         results.append(("soft_auth_invalid_key", ok, out.get("error", "unexpected ok")[:80]))
 
@@ -201,7 +201,8 @@ async def main() -> int:
         subprocess.run(
             [
                 "docker", "exec", "mcp-mongodb",
-                "mongosh", "-u", "mcp_orch", "-p", "McpOrch2026!",
+                "mongosh", "-u", "mcp_orch", "-p",
+                os.environ.get("MONGO_PASSWORD", "changeme"),
                 "--authenticationDatabase", "admin", "mcp_orchestrator",
                 "--quiet", "--eval",
                 f"db.messages.deleteMany({{_id:{{$in:{ids_js}}}}})",
