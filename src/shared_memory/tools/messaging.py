@@ -1773,6 +1773,75 @@ async def memory_get_agent_status(
 
 
 @mcp.tool()
+async def memory_report_context(
+    session_id: str,
+    reports: list = None,
+    ctx: Context = None
+) -> str:
+    """
+    Report per-agent context-window fill for the fleet context gauge.
+
+    Lets an off-box reporter (one per machine) push every local agent's current
+    context occupancy into the central agent_status store, so memory_get_agent_status
+    returns it fleet-wide — any junto-connected agent on any machine, including the
+    caller's own. Sage's agents are covered by a direct-Mongo reporter; other boxes
+    use THIS tool because the Mongo port is localhost-only while this MCP server is
+    network-reachable (interface:context-tokens-sideband-v0).
+
+    TRUST: this sets another instance's context fields, so it is only appropriate in
+    a trusted fleet (home/junto). Adopter deployments should gate it (owner/admin) or
+    restrict it to self-reports.
+
+    Args:
+        session_id: Your session ID
+        reports: list of per-agent dicts:
+            {instance, context_tokens, context_window,
+             context_pct (optional; derived tokens*100//window if absent),
+             written_at (optional ISO capture time -> context_reported_at; default now)}
+    """
+    error = require_session(session_id)
+    if error:
+        return error
+    if not isinstance(reports, list) or not reports:
+        return json.dumps({"error": "reports must be a non-empty list of {instance, context_tokens, context_window}"})
+
+    db = get_mongo()
+    if db is None:
+        return json.dumps({"error": "MongoDB unavailable"})
+
+    now_iso = utc_now().isoformat()
+    written = 0
+    skipped = []
+    for r in reports:
+        if not isinstance(r, dict):
+            skipped.append(str(r)[:40])
+            continue
+        instance = r.get("instance")
+        tokens = r.get("context_tokens")
+        window = r.get("context_window")
+        if not instance or not isinstance(tokens, int) or tokens <= 0:
+            skipped.append(str(instance or r)[:40])
+            continue
+        pct = r.get("context_pct")
+        if pct is None and isinstance(window, int) and window > 0:
+            pct = tokens * 100 // window
+        db.agent_status.update_one(
+            {"instance": instance},
+            {"$set": {
+                "instance": instance,
+                "context_tokens": tokens,
+                "context_window": window,
+                "context_pct": pct,
+                "context_reported_at": r.get("written_at") or now_iso,
+            }},
+            upsert=True,
+        )
+        written += 1
+
+    return json.dumps({"status": "ok", "reported": written, "skipped": skipped})
+
+
+@mcp.tool()
 async def memory_list_agents(
     session_id: str,
     project: str = None,
