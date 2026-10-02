@@ -1742,13 +1742,28 @@ async def memory_get_agent_status(
             age_seconds = (now - last_hb).total_seconds()
             stale = age_seconds > 300  # 5 minutes = stale
 
+        # Context gauge (interface:context-tokens-sideband-v0 v0.2): the
+        # sage-context-report timer / plugin sideband upsert these. context_stale
+        # keys off the capture time (context_reported_at), not the heartbeat — a
+        # live agent whose reporter stopped (process dying) reads stale here while
+        # last_heartbeat may still be fresh. Absent reporter => all null + stale.
+        ctx_reported = parse_timestamp(doc.get("context_reported_at"))
+        ctx_stale = True
+        if ctx_reported:
+            ctx_stale = (now - ctx_reported).total_seconds() > 180  # ~3x reporter cadence
+
         agents.append({
             "instance": doc["instance"],
             "status": doc.get("status", "unknown"),
             "current_task": doc.get("current_task"),
             "tmux_target": doc.get("tmux_target"),
             "last_heartbeat": last_hb.isoformat() if last_hb else None,
-            "stale": stale
+            "stale": stale,
+            "context_tokens": doc.get("context_tokens"),
+            "context_window": doc.get("context_window"),
+            "context_pct": doc.get("context_pct"),
+            "context_reported_at": ctx_reported.isoformat() if ctx_reported else None,
+            "context_stale": ctx_stale,
         })
 
     return json.dumps({
