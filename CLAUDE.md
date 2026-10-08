@@ -131,6 +131,8 @@ The "near-verbatim, do not paraphrase" rule is load-bearing. Summarizing the spe
 
 Complete every step before `memory_end_session`. The state spec is the load-bearing artifact.
 
+Baseline: invoke the junto `park` skill (canonical checklist, includes the Jira-update step). The steps below are the junto-memory-specific format and remain in force; if they differ from the skill, the skill wins on the common steps.
+
 1. **Register functions.** Every new or significantly modified function:
    ```
    memory_register_function(name, file="src/shared_memory/...:LINE", purpose, gotchas, project="junto")
