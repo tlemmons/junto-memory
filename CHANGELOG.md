@@ -6,6 +6,24 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+### Added
+- **Idle→park nudge** (`src/shared_memory/idle_park.py`). After `idle_park_minutes`
+  (default **50**, under the ~60-min prompt-cache TTL) with no real tool call from an
+  agent name, the server pushes that agent one `is_system_notice` message
+  (`system_notice_kind="idle_park_nudge"`) telling it to park if it's at a clean stop.
+  One timer per (project, agent); inbox-plugin background calls (heartbeat, health,
+  start_session, emission stats) and `memory_report_context` don't reset it;
+  `memory_end_session` disarms it; it fires once per idle period. New push-control
+  config keys `idle_park_minutes` (0 disables) and `idle_park_optout` (comma-separated
+  agent names), set via `memory_admin push_control_set_config`.
+
+### Fixed
+- **Background tasks no longer die when any client disconnects.** The MCP SDK enters
+  the app lifespan once per client session; its teardown was cancelling the
+  process-global scheduler and SSE keepalive (and resetting the Chroma client) on every
+  disconnect. That is why `memory_set_reminder` delivery stalled intermittently. The
+  teardown is removed; the idempotent `start_*` calls self-heal on each session.
+
 ## [1.39.0] - 2026-09-10
 
 If you run a junto-memory server, the two `Changed` items below alter behavior on

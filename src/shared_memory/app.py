@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 
 from shared_memory.clients import app_lifespan
 from shared_memory.error_flag import build_call_tool_handler_with_error_flag
+from shared_memory.idle_park import build_call_tool_handler_with_idle_park
 from shared_memory.intent import build_call_tool_handler_with_intent
 from shared_memory.timing import build_call_tool_handler_with_timing
 
@@ -60,12 +61,16 @@ _orig_call_tool_handler = mcp._mcp_server.request_handlers[_mcp_types.CallToolRe
 # Composition (outer → inner):
 #   timing     — measures total wall time including all inner wrappers
 #   error_flag — post-processes the final result
+#   idle_park  — resets the caller's idle→park timer (sees the raw tool name
+#                + session_id before intent strips its sideband kwargs)
 #   intent     — extracts __intent_id from args before dispatch
 # When JUNTO_TIMING_LOG is unset (default), the timing wrapper is a no-op.
 mcp._mcp_server.request_handlers[_mcp_types.CallToolRequest] = (
     build_call_tool_handler_with_timing(
         build_call_tool_handler_with_error_flag(
-            build_call_tool_handler_with_intent(_orig_call_tool_handler)
+            build_call_tool_handler_with_idle_park(
+                build_call_tool_handler_with_intent(_orig_call_tool_handler)
+            )
         )
     )
 )

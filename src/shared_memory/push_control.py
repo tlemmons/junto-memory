@@ -45,6 +45,7 @@ DEFAULT_RECOVERY_BEHAVIOR = "annotated"   # annotated | quarantine | leave_it
 DEFAULT_INCIDENT_PAD_MESSAGES = 12         # min(pad_msgs, pad_seconds)
 DEFAULT_INCIDENT_PAD_SECONDS = 300
 DEFAULT_WARN_FRACTION = 0.8        # budget_warn alert at this fraction of push_budget
+DEFAULT_IDLE_PARK_MINUTES = 50     # under the ~60-min prompt-cache TTL (idle_park.py)
 EMISSION_HISTORY_TTL_DAYS = 90     # hourly peak docs age out after this
 
 VALID_RECOVERY_BEHAVIORS = {"annotated", "quarantine", "leave_it"}
@@ -61,6 +62,8 @@ CONFIG_KEYS = {
     "webhook_url": str,
     "webhook_token": str,
     "warn_fraction": float,
+    "idle_park_minutes": int,       # idle→park nudge threshold; 0 disables (idle_park.py)
+    "idle_park_optout": str,        # comma-separated agent names never nudged
 }
 
 # Default scope key — sentinel id for the server-level default in
@@ -284,6 +287,8 @@ def _default_config_dict() -> Dict[str, Any]:
         "webhook_url": None,
         "webhook_token": None,
         "warn_fraction": DEFAULT_WARN_FRACTION,
+        "idle_park_minutes": DEFAULT_IDLE_PARK_MINUTES,
+        "idle_park_optout": "",
     }
 
 
@@ -354,6 +359,8 @@ def set_config_value(db, project: Optional[str], key: str, value: Any, actor: st
                "incident_pad_messages", "incident_pad_seconds") and isinstance(value, int):
         if value < 1:
             return {"error": f"{key} must be >= 1"}
+    if key == "idle_park_minutes" and isinstance(value, int) and value < 0:
+        return {"error": "idle_park_minutes must be >= 0 (0 disables)"}
     if key == "warn_fraction" and isinstance(value, float):
         if not (0.0 < value < 1.0):
             return {"error": "warn_fraction must be between 0 and 1 (exclusive)"}
