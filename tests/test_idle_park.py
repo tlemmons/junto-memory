@@ -142,3 +142,25 @@ async def test_wrapper_notes_then_delegates():
     )
     assert await handler(req) == "ok"
     assert seen == ["memory_query"] and KEY in idle_park._timers
+
+
+class _FakeStatus:
+    def __init__(self, tokens):
+        self.tokens = tokens
+
+    def find_one(self, query, projection=None):
+        return None if self.tokens is None else {"instance": query["instance"], "context_tokens": self.tokens}
+
+
+class _StatusDb:
+    def __init__(self, tokens):
+        self.agent_status = _FakeStatus(tokens)
+
+
+@pytest.mark.parametrize("tokens,expected", [(150_000, 0), (200_000, 50), (600_000, 50), (None, 50)])
+def test_min_context_gate(monkeypatch, tokens, expected):
+    from shared_memory import push_control
+
+    monkeypatch.setattr(push_control, "get_effective_config",
+                        lambda db, p: {"idle_park_minutes": 50, "idle_park_min_context": 200_000})
+    assert idle_park._threshold_from_config(_StatusDb(tokens), "junto", "memory") == expected

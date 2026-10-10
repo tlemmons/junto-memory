@@ -13,9 +13,11 @@ version via `memory_health` (`server_version`).
   (`system_notice_kind="idle_park_nudge"`) telling it to park if it's at a clean stop.
   One timer per (project, agent); inbox-plugin background calls (heartbeat, health,
   start_session, emission stats) and `memory_report_context` don't reset it;
-  `memory_end_session` disarms it; it fires once per idle period. New push-control
-  config keys `idle_park_minutes` (0 disables) and `idle_park_optout` (comma-separated
-  agent names), set via `memory_admin push_control_set_config`.
+  `memory_end_session` disarms it; it fires once per idle period. Only agents whose
+  reported context (`memory_report_context` gauge) is at least `idle_park_min_context`
+  (default 200K) are nudged; agents with no report are still nudged. New push-control
+  config keys `idle_park_minutes` (0 disables), `idle_park_optout` (comma-separated
+  agent names) and `idle_park_min_context`, set via `memory_admin push_control_set_config`.
 
 ### Fixed
 - **Background tasks no longer die when any client disconnects.** The MCP SDK enters

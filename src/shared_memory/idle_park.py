@@ -22,6 +22,14 @@ Mechanics:
   an agent that reads the nudge and decides not to park is not re-nudged every
   hour while it stays idle. Real activity after the grace re-arms.
 - memory_end_session disarms the timer (parked agents are never nudged).
+- Only agents with a LARGE context are nudged: the context gauge
+  (agent_status.context_tokens, fed by memory_report_context) must be >=
+  `idle_park_min_context` (default 200K). Measured from transcripts
+  2026-10-10: a warm park costs ~0.45-0.9x context in input-token equivalents,
+  /clear+go ~80-210K, a cold resume ~2x context, and a cold park ~2.5-2.85x.
+  Below ~200K the nudge doesn't pay; it also stops a post-go agent being
+  nudged again. An agent with NO reported context is still nudged (unknown
+  size; e.g. boxes without the reporter).
 - Opt-out: push_control config `idle_park_minutes=0` (per project or server
   default) disables; `idle_park_optout` is a comma-separated agent list for
   always-on agents.
@@ -137,7 +145,24 @@ def _threshold_from_config(db, project: str, agent: str) -> int:
     optout = cfg.get("idle_park_optout") or ""
     if agent in {a.strip() for a in str(optout).split(",") if a.strip()}:
         return 0
+    if not minutes:
+        return 0
+    min_context = int(cfg.get("idle_park_min_context") or 0)
+    if min_context:
+        tokens = _reported_context_tokens(db, agent)
+        if tokens is not None and tokens < min_context:
+            return 0
     return int(minutes)
+
+
+def _reported_context_tokens(db, agent: str) -> Optional[int]:
+    """Last context size from the gauge (agent_status is keyed by instance only)."""
+    try:
+        doc = db.agent_status.find_one({"instance": agent}, {"context_tokens": 1})
+    except Exception:
+        return None
+    tokens = (doc or {}).get("context_tokens")
+    return tokens if isinstance(tokens, int) and tokens > 0 else None
 
 
 async def _send_nudge(db, project: str, agent: str, minutes: int) -> Optional[str]:
