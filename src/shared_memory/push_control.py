@@ -66,6 +66,7 @@ CONFIG_KEYS = {
     "idle_park_minutes": int,       # idle→park nudge threshold; 0 disables (idle_park.py)
     "idle_park_optout": str,        # comma-separated agent names never nudged
     "idle_park_min_context": int,   # only nudge agents whose reported context >= this
+    "idle_park_autoreset": str,     # comma-separated agents auto-/clear+go'd after a nudged park
 }
 
 # Default scope key — sentinel id for the server-level default in
@@ -292,6 +293,7 @@ def _default_config_dict() -> Dict[str, Any]:
         "idle_park_minutes": DEFAULT_IDLE_PARK_MINUTES,
         "idle_park_optout": "",
         "idle_park_min_context": DEFAULT_IDLE_PARK_MIN_CONTEXT,
+        "idle_park_autoreset": "",
     }
 
 

@@ -1776,6 +1776,7 @@ async def memory_get_agent_status(
 async def memory_report_context(
     session_id: str,
     reports: list = None,
+    reset_results: list = None,
     ctx: Context = None
 ) -> str:
     """
@@ -1798,6 +1799,14 @@ async def memory_report_context(
             {instance, context_tokens, context_window,
              context_pct (optional; derived tokens*100//window if absent),
              written_at (optional ISO capture time -> context_reported_at; default now)}
+        reset_results: optional outcomes for idle-park auto-resets this reporter
+            attempted (design:idle-park-autoreset-v0):
+            [{reset_id, outcome: done|failed|deferred, detail}]
+
+    Returns {status, reported, skipped, resets}. `resets` lists pending
+    idle-park auto-resets for agents in this call's reports
+    ([{reset_id, project, agent, requested_at}]); reporters that don't run the
+    tmux safe-inject gate can ignore it.
     """
     error = require_session(session_id)
     if error:
@@ -1838,7 +1847,18 @@ async def memory_report_context(
         )
         written += 1
 
-    return json.dumps({"status": "ok", "reported": written, "skipped": skipped})
+    from shared_memory.idle_park import apply_reset_results, pending_resets_for
+
+    response = {"status": "ok", "reported": written, "skipped": skipped}
+    try:
+        if reset_results:
+            response["reset_results"] = apply_reset_results(db, reset_results)
+        response["resets"] = pending_resets_for(
+            db, [r.get("instance") for r in reports if isinstance(r, dict)]
+        )
+    except Exception as e:
+        response["resets_error"] = str(e)
+    return json.dumps(response)
 
 
 @mcp.tool()

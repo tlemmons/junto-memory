@@ -7,6 +7,15 @@ version via `memory_health` (`server_version`).
 ## [Unreleased]
 
 ### Added
+- **Idle-park auto-reset** (design:idle-park-autoreset-v0, phase 2 of the nudge). An agent
+  that ends its session while its idle timer is in the nudged state, and is listed in the
+  new push-control key `idle_park_autoreset` (comma-separated, opt-in), gets a pending
+  `idle_park_resets` doc (one per agent; expires after 6h). `memory_report_context` now
+  returns `resets` (pending resets for the agents in that call's reports) and accepts
+  `reset_results` ([{reset_id, outcome: done|failed|deferred, detail}]). The per-box
+  reporter runs a tmux safe-inject gate (no recent keypress, park banner after the last
+  prompt, not busy, no dialog, empty input) and types `/clear` + `go`. Additive: old
+  reporters ignore `resets`, so their agents keep nudge-only behaviour.
 - **Idle→park nudge** (`src/shared_memory/idle_park.py`). After `idle_park_minutes`
   (default **50**, under the ~60-min prompt-cache TTL) with no real tool call from an
   agent name, the server pushes that agent one `is_system_notice` message

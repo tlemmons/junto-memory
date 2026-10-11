@@ -36,13 +36,22 @@ Mechanics:
 
 Delivery: an is_system_notice message (kind idle_park_nudge) → INJECT push via
 the normal inbox path, so the full body reaches the agent's channel.
+
+Phase 2 — auto-reset (design:idle-park-autoreset-v0, Tom 2026-10-11): when a
+nudged agent parks (memory_end_session while its timer is still in the nudged
+state) and is listed in `idle_park_autoreset`, an `idle_park_resets` doc goes
+pending. The per-box context reporter receives it in the memory_report_context
+response, runs a safe-inject gate on the agent's tmux pane, types /clear + go,
+and reports the outcome back on its next memory_report_context call.
 """
 
 import asyncio
 import logging
 import time
 import uuid
-from typing import Dict, Optional, Tuple
+from collections import deque
+from datetime import timedelta
+from typing import Deque, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +67,8 @@ BACKGROUND_TOOLS = frozenset({
 
 SWEEP_INTERVAL_SECONDS = 60
 REARM_GRACE_SECONDS = 600
+RESET_EXPIRY_HOURS = 6
+RESET_OUTCOMES = frozenset({"done", "failed", "deferred"})
 
 NUDGE_SUBJECT = "Idle — park now if at a clean stop (cache expires soon)"
 NUDGE_BODY = (
@@ -72,6 +83,10 @@ NUDGE_BODY = (
 _timers: Dict[Tuple[str, str], Dict[str, Optional[float]]] = {}
 
 _sweep_task: Optional[asyncio.Task] = None
+
+# (project, agent, nudged_at ISO) for agents that ended their session while
+# nudged. Drained into idle_park_resets by drain_parked() (sweep or report).
+_parked_after_nudge: Deque[Tuple[str, str, Optional[str]]] = deque()
 
 
 def _identity_for_session(session_id) -> Optional[Tuple[str, str]]:
@@ -98,7 +113,9 @@ def note_tool_call(tool_name: str, session_id, now: Optional[float] = None) -> N
         return
     now = time.monotonic() if now is None else now
     if tool_name == "memory_end_session":
-        _timers.pop(ident, None)
+        timer = _timers.pop(ident, None)
+        if timer is not None and timer.get("nudged_at") is not None:
+            _parked_after_nudge.append((ident[0], ident[1], timer.get("nudged_wall")))
         return
     timer = _timers.get(ident)
     if timer is None:
@@ -110,6 +127,7 @@ def note_tool_call(tool_name: str, session_id, now: Optional[float] = None) -> N
         return
     timer["last_real"] = now
     timer["nudged_at"] = None
+    timer["nudged_wall"] = None
 
 
 def due_agents(minutes_for, now: Optional[float] = None):
@@ -132,9 +150,12 @@ def due_agents(minutes_for, now: Optional[float] = None):
 
 
 def mark_nudged(project: str, agent: str, now: Optional[float] = None) -> None:
+    from shared_memory.helpers import utc_now
+
     timer = _timers.get((project, agent))
     if timer is not None:
         timer["nudged_at"] = time.monotonic() if now is None else now
+        timer["nudged_wall"] = utc_now().isoformat()
 
 
 def _threshold_from_config(db, project: str, agent: str) -> int:
@@ -163,6 +184,103 @@ def _reported_context_tokens(db, agent: str) -> Optional[int]:
         return None
     tokens = (doc or {}).get("context_tokens")
     return tokens if isinstance(tokens, int) and tokens > 0 else None
+
+
+def _csv(value) -> set:
+    return {a.strip() for a in str(value or "").split(",") if a.strip()}
+
+
+def drain_parked(db) -> int:
+    """Turn queued nudged-parks into pending idle_park_resets docs (opt-in only).
+
+    One pending doc per (project, agent): a second park while one is pending
+    is a no-op. Returns the number of docs created.
+    """
+    from shared_memory.helpers import utc_now
+    from shared_memory.push_control import get_effective_config
+
+    created = 0
+    while _parked_after_nudge:
+        project, agent, nudged_wall = _parked_after_nudge.popleft()
+        try:
+            cfg = get_effective_config(db, project)
+            if agent not in _csv(cfg.get("idle_park_autoreset")):
+                continue
+            res = db.idle_park_resets.update_one(
+                {"project": project, "agent": agent, "status": "pending"},
+                {"$setOnInsert": {
+                    "_id": f"reset_{uuid.uuid4().hex[:12]}",
+                    "project": project,
+                    "agent": agent,
+                    "status": "pending",
+                    "requested_at": utc_now(),
+                    "nudge_at": nudged_wall,
+                    "attempts": 0,
+                }},
+                upsert=True,
+            )
+            if res.upserted_id is not None:
+                created += 1
+                log.info("idle-park: reset pending for %s/%s (%s)", agent, project, res.upserted_id)
+        except Exception as e:
+            log.error("idle-park: could not record reset for %s/%s: %s", agent, project, e)
+    return created
+
+
+def pending_resets_for(db, instances) -> List[dict]:
+    """Pending resets for these agent names; expires ones older than RESET_EXPIRY_HOURS."""
+    from shared_memory.helpers import utc_now
+
+    drain_parked(db)
+    names = [i for i in instances if isinstance(i, str) and i]
+    if not names:
+        return []
+    cutoff = utc_now() - timedelta(hours=RESET_EXPIRY_HOURS)
+    db.idle_park_resets.update_many(
+        {"agent": {"$in": names}, "status": "pending", "requested_at": {"$lt": cutoff}},
+        {"$set": {"status": "expired", "finished_at": utc_now()}},
+    )
+    out = []
+    for doc in db.idle_park_resets.find({"agent": {"$in": names}, "status": "pending"}):
+        requested = doc.get("requested_at")
+        out.append({
+            "reset_id": doc["_id"],
+            "project": doc.get("project"),
+            "agent": doc.get("agent"),
+            "requested_at": requested.isoformat() if hasattr(requested, "isoformat") else requested,
+        })
+    return out
+
+
+def apply_reset_results(db, results) -> Dict[str, list]:
+    """Record reporter outcomes. done/failed close a pending reset; deferred only logs the attempt."""
+    from shared_memory.helpers import utc_now
+
+    applied, rejected = [], []
+    for r in results or []:
+        if not isinstance(r, dict):
+            rejected.append(str(r)[:40])
+            continue
+        reset_id = r.get("reset_id")
+        outcome = r.get("outcome")
+        detail = str(r.get("detail") or "")[:500]
+        if not reset_id or outcome not in RESET_OUTCOMES:
+            rejected.append(str(reset_id or r)[:40])
+            continue
+        now = utc_now()
+        if outcome == "deferred":
+            update = {"$set": {"last_attempt_at": now, "last_detail": detail}, "$inc": {"attempts": 1}}
+        else:
+            update = {"$set": {"status": outcome, "finished_at": now, "last_detail": detail},
+                      "$inc": {"attempts": 1}}
+        res = db.idle_park_resets.update_one({"_id": reset_id, "status": "pending"}, update)
+        if res.matched_count:
+            applied.append(reset_id)
+            if outcome != "deferred":
+                log.info("idle-park: reset %s %s (%s)", reset_id, outcome, detail)
+        else:
+            rejected.append(reset_id)
+    return {"applied": applied, "rejected": rejected}
 
 
 async def _send_nudge(db, project: str, agent: str, minutes: int) -> Optional[str]:
@@ -213,6 +331,7 @@ async def sweep_once(db) -> int:
     """Nudge every due agent once. Returns the number of nudges sent."""
     if db is None:
         return 0
+    drain_parked(db)
     sent = 0
     for project, agent, minutes in due_agents(lambda p, a: _threshold_from_config(db, p, a)):
         # Mark first: a failed insert must not turn into a nudge every minute.
