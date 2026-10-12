@@ -141,6 +141,21 @@ def _recall_stale_handoff(meta):
     return (utc_now() - ts) > timedelta(days=RECALL_HANDOFF_MAX_AGE_DAYS)
 
 
+def _recall_foreign_digest(meta, agent):
+    """Another agent's session digest: a handoff, or an end_session
+    park-summary learning (a list of pointers to that session's learnings).
+    Measured 10-05..10-12 on nimbus: 414 handoff headers served, 1 body
+    pulled; learnings 1,856 served, 32 pulled. The nimbus fleet survey
+    (msg_171e9f2de967) asked for exactly this de-weighting. A digest only
+    summarises; the learnings it points at surface on their own. The
+    requester's OWN digests still surface ("what was my last session doing")."""
+    if meta.get("type") != "handoff":
+        from shared_memory.facets import is_park_summary
+        if not is_park_summary(meta.get("tags")):
+            return False
+    return not agent or meta.get("claude_instance") != agent
+
+
 # Self-echo suppression window: a doc authored by the REQUESTING agent this
 # recently is context it already holds — injecting it back is waste by
 # construction (nimbus first-day case: an agent served its own 10-minute-old
@@ -156,11 +171,14 @@ def _recall_excluded(doc_id, meta, agent):
       is 100% redundant at ANY age — a fresh one is the worst case.
       Interface/design/runbook specs are NOT excluded.
     - stale handoffs (>14d, see above).
+    - other agents' session digests (handoffs, park-summary learnings).
     - self-echo: requester's own docs updated within 48h (only when the
       request identifies the agent)."""
     if str(doc_id).startswith("spec_state_"):
         return True
     if _recall_stale_handoff(meta):
+        return True
+    if _recall_foreign_digest(meta, agent):
         return True
     if agent and meta.get("claude_instance") == agent:
         from datetime import timedelta
@@ -399,7 +417,8 @@ async def _recall_payload(body, api_key, via_tunnel=False):
 
     if snippets:
         from shared_memory.recall_metrics import log_recall_event
-        log_recall_event(mongo, project, agent, [s["id"] for s in snippets], floor)
+        log_recall_event(mongo, project, agent, [s["id"] for s in snippets], floor,
+                         scores=[s["score"] for s in snippets])
 
     return 200, {
         "project": project,

@@ -52,8 +52,10 @@ def _ensure_indexes(db):
         logger.warning("recall_metrics: index setup failed (%s)", e)
 
 
-def log_recall_event(db, project, agent, ids, floor):
-    """Record a served injection set. Call only when count>0."""
+def log_recall_event(db, project, agent, ids, floor, scores=None):
+    """Record a served injection set. Call only when count>0. `scores`
+    (parallel to ids) lets a floor change be simulated from history
+    instead of guessed."""
     if db is None or not ids:
         return
     try:
@@ -64,6 +66,7 @@ def log_recall_event(db, project, agent, ids, floor):
             "agent": agent,
             "ids": list(ids),
             "floor": floor,
+            "scores": list(scores) if scores is not None else None,
         })
     except Exception as e:  # noqa: BLE001
         logger.warning("recall_metrics: event log failed (%s)", e)
