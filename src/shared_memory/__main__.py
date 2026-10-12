@@ -542,6 +542,10 @@ def main():
             "active_signals": len(active_signals)
         }, status_code=200 if status == "healthy" else 503)
 
+    # ── Junto Admin (settings / agents / alerts web UI) — admin_ui.py ──
+    from shared_memory.admin_ui import register_admin_routes
+    register_admin_routes(mcp, get_mongo)
+
     # ── Dashboard (read-only web UI) ──
 
     dashboard_html_path = Path(__file__).parent / "dashboard.html"
