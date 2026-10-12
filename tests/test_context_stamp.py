@@ -49,3 +49,26 @@ def test_stamp_writes_row(monkeypatch):
         active_sessions.pop("sx", None)
     row = db.context_stamps.rows[0]
     assert row["agent"] == "pipeline" and row["new_status"] == "superseded" and row["known"] is False
+
+
+def test_history_buckets_by_ten_minutes():
+    class _Hist:
+        def __init__(self):
+            self.rows = {}
+
+        def create_index(self, *a, **k):
+            pass
+
+        def update_one(self, q, change, upsert=False):
+            self.rows[(q["instance"], q["bucket"])] = change["$set"]
+
+    class _HDB:
+        context_history = _Hist()
+
+    db = _HDB()
+    cs._history_indexed = False
+    for minute in (1, 4, 9, 12):
+        cs.record_history(db, "pipeline", 400000 + minute, 1000000, NOW.replace(minute=minute))
+    buckets = sorted(b.minute for (_, b) in db.context_history.rows)
+    assert buckets == [0, 10]
+    assert db.context_history.rows[("pipeline", NOW.replace(minute=0))]["context_tokens"] == 400009

@@ -71,3 +71,33 @@ def stamp(db, session_id: str, kind: str, doc_id: str,
         db.context_stamps.insert_one(row)
     except Exception as e:  # noqa: BLE001
         log.warning("context_stamp: failed for %s (%s)", doc_id, e)
+
+
+# ── Time-in-band denominator ───────────────────────────────────────────────
+# agent_status keeps only the LATEST gauge reading, so "how long did agents
+# spend at 400-600K" is unanswerable from it. memory_report_context samples
+# into context_history: one row per agent per HISTORY_BUCKET_MINUTES (upsert,
+# so ~1/min reporting stays bounded), TTL HISTORY_TTL_DAYS.
+HISTORY_BUCKET_MINUTES = 10
+HISTORY_TTL_DAYS = 90
+_history_indexed = False
+
+
+def record_history(db, instance: str, tokens: int, window, now) -> None:
+    """Sample one gauge reading into context_history. Never raises."""
+    global _history_indexed
+    try:
+        if not _history_indexed:
+            db.context_history.create_index([("instance", 1), ("bucket", 1)], unique=True)
+            db.context_history.create_index("ts", expireAfterSeconds=HISTORY_TTL_DAYS * 86400)
+            _history_indexed = True
+        bucket = now.replace(minute=now.minute - now.minute % HISTORY_BUCKET_MINUTES,
+                             second=0, microsecond=0)
+        db.context_history.update_one(
+            {"instance": instance, "bucket": bucket},
+            {"$set": {"instance": instance, "bucket": bucket, "ts": now,
+                      "context_tokens": tokens, "context_window": window}},
+            upsert=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("context_stamp: history sample failed for %s (%s)", instance, e)

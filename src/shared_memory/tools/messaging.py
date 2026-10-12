@@ -1884,7 +1884,10 @@ async def memory_report_context(
     if db is None:
         return json.dumps({"error": "MongoDB unavailable"})
 
-    now_iso = utc_now().isoformat()
+    from shared_memory.context_stamp import record_history as record_context_history
+
+    now = utc_now()
+    now_iso = now.isoformat()
     written = 0
     skipped = []
     for r in reports:
@@ -1911,6 +1914,7 @@ async def memory_report_context(
             }},
             upsert=True,
         )
+        record_context_history(db, instance, tokens, window, now)
         written += 1
 
     from shared_memory.idle_park import apply_reset_results, pending_resets_for
