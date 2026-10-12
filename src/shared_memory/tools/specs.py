@@ -23,6 +23,26 @@ from shared_memory.op_log import (
 from shared_memory.state import active_sessions
 
 
+async def _case_variant_specs(collection, name: str) -> List[str]:
+    """Active spec names in `collection` that equal `name` case-insensitively
+    but not exactly (backlog_d3fb15db8acd). Spec doc ids are derived from the
+    name verbatim, so `db:Accounting.Sales` and `db:accounting.sales` are two
+    different docs; this is the only way to see the twin. Best-effort: a
+    Chroma error returns [] rather than blocking the write/read."""
+    target = name.casefold()
+    try:
+        result = await collection.get(where={"type": "spec"}, include=["metadatas"])
+    except Exception:
+        return []
+    variants = set()
+    for meta in result.get("metadatas") or []:
+        other = (meta or {}).get("spec_name") or ""
+        status = (meta or {}).get("status")
+        if other != name and other.casefold() == target and (not status or status == "active"):
+            variants.add(other)
+    return sorted(variants)
+
+
 @mcp.tool()
 async def memory_define_spec(
     session_id: str,
@@ -73,7 +93,9 @@ async def memory_define_spec(
         project: Project this belongs to (omit for shared specs)
         json_schema: Optional JSON schema for validation
         tags: Tags for categorization
-        force: Override safety checks (e.g., state spec overwrite protection). Default False.
+        force: Override safety checks (state spec overwrite protection; the
+            case-variant name collision guard that refuses to create
+            `db:accounting.sales` beside an existing `db:Accounting.Sales`). Default False.
     """
     error = require_session(session_id)
     if error:
@@ -240,6 +262,26 @@ async def memory_define_spec(
 
         action = "updated"
     else:
+        # Case-variant collision guard (backlog_d3fb15db8acd): creating
+        # `db:accounting.sales` next to an existing `db:Accounting.Sales`
+        # silently forks the spec — readers keep finding the stale original.
+        # Refuse unless force=True.
+        if not force:
+            variants = await _case_variant_specs(collection, name)
+            if variants:
+                return json.dumps({
+                    "error": "Case-variant spec name collision",
+                    "spec_name": name,
+                    "existing": variants,
+                    "location": location,
+                    "suggestion": (
+                        f"A spec named {variants[0]!r} already exists and differs from "
+                        f"{name!r} only by letter case. Spec names are case-sensitive, so "
+                        "creating this would FORK it. Call memory_define_spec again with "
+                        "the existing name to update it. Pass force=True only if you "
+                        "really want a separate spec."
+                    ),
+                })
         # New spec - default to version 1.0.0
         if not version:
             version = "1.0.0"
@@ -470,6 +512,21 @@ async def memory_get_spec(
             response["json_schema"] = json.loads(meta["json_schema"])
         return json.dumps(response, indent=2)
 
+    # Miss: surface case-insensitive near-matches (backlog_d3fb15db8acd).
+    did_you_mean = []
+    for collection in collections_to_try:
+        for variant in await _case_variant_specs(collection, name):
+            if variant not in did_you_mean:
+                did_you_mean.append(variant)
+    if did_you_mean:
+        return json.dumps({
+            "error": f"Spec '{name}' not found",
+            "did_you_mean": did_you_mean,
+            "suggestion": (
+                "Spec names are case-sensitive. A spec differing only by case exists. "
+                f"Retry memory_get_spec(name={did_you_mean[0]!r})."
+            ),
+        })
     return json.dumps({
         "error": f"Spec '{name}' not found",
         "suggestion": "Use memory_list_specs to see available specs"
