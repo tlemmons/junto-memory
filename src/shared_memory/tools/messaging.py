@@ -626,6 +626,52 @@ def _advance_parent_obligation_on_reply(db, parent_id: str, replier: str, now) -
         return None
 
 
+SIZE_HINT_CHARS = 3000
+POSSIBLE_PARENT_MAX = 3
+
+
+def _send_hints(db, message, to_instance, to_project, sender, sender_project,
+                in_response_to) -> Dict[str, Any]:
+    """Advisory send-response fields (design:action-lapse-v0 C + D). Never
+    blocks, never raises.
+
+    size_hint: the body is long. Every recipient pays it in context (nimbus avg
+    1,807 chars, 23% over 3K).
+    possible_parent: a direct send with no in_response_to while the recipient
+    has open asks to the sender. The usual cause of obligations that never
+    clear is a reply sent as a new message.
+    """
+    hints: Dict[str, Any] = {}
+    try:
+        n = len(message or "")
+        if n > SIZE_HINT_CHARS:
+            hints["size_hint"] = (
+                f"long message ({n} chars): every recipient pays this in context. "
+                "Consider a spec/doc plus a pointer."
+            )
+        if db is not None and not in_response_to and to_instance and to_instance != "*":
+            rows = list(db.messages.find(
+                {"from_instance": to_instance, "from_project": to_project,
+                 "to_instance": sender, "to_project": sender_project,
+                 "category": {"$in": ACTION_CATEGORIES}, "status": "pending",
+                 "obligation": {"$in": ["open", "responded"]}},
+                {"category": 1, "created_at": 1, "subject": 1, "message": 1},
+            ).sort([("created_at", -1)]).limit(POSSIBLE_PARENT_MAX))
+            if rows:
+                hints["possible_parent"] = [{
+                    "id": r["_id"],
+                    "category": r.get("category"),
+                    "created": r["created_at"].isoformat() if hasattr(r.get("created_at"), "isoformat") else None,
+                    "preview": ((r.get("subject") or r.get("message") or "").replace("\n", " "))[:60],
+                } for r in rows]
+                hints["possible_parent_hint"] = (
+                    "If this answers one of these, resend with in_response_to=<id> so it clears."
+                )
+    except Exception:
+        pass
+    return hints
+
+
 def _set_action_message_expiry(db, message_id):
     """Stage-5 TTL: when an ACTION message reaches a terminal state (acked or
     obligation resolved), give it expire_at = created + 7d so it ages out. Until
@@ -1123,6 +1169,9 @@ async def memory_send_message(
     }
     if _ref_advisory:
         response.update(_ref_advisory)
+    response.update(_send_hints(db, message, to_instance, msg_doc["to_project"],
+                                session_info["claude_instance"], from_project,
+                                in_response_to))
 
     # Read-side idle-queue visibility (backlog_da56a6e0c46b). When the recipient
     # has NO live stream to receive this push, tell the sender what's already
@@ -1466,6 +1515,23 @@ async def memory_update_message_status(
     # "resolved"/"responded" are not delivery statuses; route them to the
     # `obligation` field. "resolved" is the explicit done verb (clears a
     # task/blocker that a reply left "responded").
+    # Revive / lapse (design:action-lapse-v0): "open" puts a lapsed (or any)
+    # action back in the lane; "lapsed" retires one by hand. Neither touches
+    # expire_at — a lapsed message persists, it just leaves the action lane.
+    if status in ("open", "lapsed"):
+        if status == "open":
+            change = {"$set": {"obligation": "open"},
+                      "$unset": {"lapsed_at": "", "lapsed_from": ""}}
+        else:
+            msg = db.messages.find_one({"_id": message_id}, {"obligation": 1})
+            change = {"$set": {"obligation": "lapsed", "lapsed_at": now,
+                               "lapsed_from": (msg or {}).get("obligation") or "open"}}
+        result = db.messages.update_one(
+            {"_id": message_id, "category": {"$in": ACTION_CATEGORIES}}, change)
+        if result.matched_count == 0:
+            return json.dumps({"error": f"Action message not found: {message_id}"})
+        return json.dumps({"obligation": status, "message_id": message_id, "updated": True})
+
     if status in ("responded", "resolved"):
         obl_update = {"obligation": status, "responded_at": now}
         if status == "resolved":
@@ -1483,7 +1549,7 @@ async def memory_update_message_status(
         })
 
     if status not in MESSAGE_STATUSES:
-        return json.dumps({"error": f"Invalid status. Must be one of: {MESSAGE_STATUSES} (or obligation verbs: responded, resolved)"})
+        return json.dumps({"error": f"Invalid status. Must be one of: {MESSAGE_STATUSES} (or obligation verbs: responded, resolved, open, lapsed)"})
 
     update = {"status": status}
 

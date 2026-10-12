@@ -141,6 +141,16 @@ def _recall_stale_handoff(meta):
     return (utc_now() - ts) > timedelta(days=RECALL_HANDOFF_MAX_AGE_DAYS)
 
 
+def _recall_age_days(updated):
+    """Whole days since `updated` (interface:recall-v0 1.4.0), None if undateable.
+    Lets a hook show "· 143d" so a stale header looks stale."""
+    from shared_memory.helpers import parse_timestamp, utc_now
+    ts = parse_timestamp(updated) if updated else None
+    if ts is None:
+        return None
+    return max(0, (utc_now() - ts).days)
+
+
 def _recall_foreign_digest(meta, agent):
     """Another agent's session digest: a handoff, or an end_session
     park-summary learning (a list of pointers to that session's learnings).
@@ -411,6 +421,7 @@ async def _recall_payload(body, api_key, via_tunnel=False):
         # corpus without a backfill.
         shape = modality_shape(c.get("title", ""), content)
         c["one_line"] = _recall_one_line(claims.get(c["id"]), content, shape)
+        c["age_days"] = _recall_age_days(c.get("updated"))
         if shape:
             c["shape"] = shape
         snippets.append(c)

@@ -117,6 +117,14 @@ async def app_lifespan(app):
         import logging
         logging.getLogger(__name__).error("lifespan: idle-park startup failed: %s", e)
 
+    # Start the stale-action lapse sweep (action_lapse.py).
+    try:
+        from shared_memory.action_lapse import start_action_lapse
+        start_action_lapse()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error("lifespan: action-lapse startup failed: %s", e)
+
     yield {}
 
     # NO teardown here. The MCP lowlevel Server.run() enters this lifespan once

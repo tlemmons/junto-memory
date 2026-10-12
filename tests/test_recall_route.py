@@ -300,3 +300,10 @@ def test_recall_event_logged_on_hits_only(stub, monkeypatch):
     stub["proj"].rows = []
     _run(m._recall_payload({"project": "junto", "query": "x"}, None))
     assert not logged  # count=0 -> no event row
+
+
+def test_age_days_on_snippets(stub):
+    _, payload = _run(m._recall_payload({"project": "junto", "query": "x"}, None))
+    assert payload["snippets"] and all("age_days" in s for s in payload["snippets"])
+    assert m._recall_age_days("") is None
+    assert isinstance(m._recall_age_days("2026-01-01T00:00:00+00:00"), int)
