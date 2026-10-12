@@ -48,6 +48,7 @@ DEFAULT_WARN_FRACTION = 0.8        # budget_warn alert at this fraction of push_
 DEFAULT_IDLE_PARK_MINUTES = 50     # under the ~60-min prompt-cache TTL (idle_park.py)
 DEFAULT_IDLE_PARK_MIN_CONTEXT = 200_000  # below this a warm park doesn't pay for itself
 DEFAULT_ACTION_LAPSE_DAYS = 30     # open action obligations lapse after this (action_lapse.py)
+DEFAULT_ACTION_LAPSE_RESPONDED_DAYS = 7  # answered-but-never-closed tasks/blockers lapse after this
 EMISSION_HISTORY_TTL_DAYS = 90     # hourly peak docs age out after this
 
 VALID_RECOVERY_BEHAVIORS = {"annotated", "quarantine", "leave_it"}
@@ -69,6 +70,7 @@ CONFIG_KEYS = {
     "idle_park_min_context": int,   # only nudge agents whose reported context >= this
     "idle_park_autoreset": str,     # comma-separated agents auto-/clear+go'd after a nudged park
     "action_lapse_days": int,       # unanswered action msgs lapse after N days; 0 disables
+    "action_lapse_responded_days": int,  # responded tasks/blockers lapse N days after the reply; 0 = use action_lapse_days
 }
 
 # Default scope key — sentinel id for the server-level default in
@@ -297,6 +299,7 @@ def _default_config_dict() -> Dict[str, Any]:
         "idle_park_min_context": DEFAULT_IDLE_PARK_MIN_CONTEXT,
         "idle_park_autoreset": "",
         "action_lapse_days": DEFAULT_ACTION_LAPSE_DAYS,
+        "action_lapse_responded_days": DEFAULT_ACTION_LAPSE_RESPONDED_DAYS,
     }
 
 
@@ -367,7 +370,8 @@ def set_config_value(db, project: Optional[str], key: str, value: Any, actor: st
                "incident_pad_messages", "incident_pad_seconds") and isinstance(value, int):
         if value < 1:
             return {"error": f"{key} must be >= 1"}
-    if key in ("idle_park_minutes", "idle_park_min_context", "action_lapse_days") and isinstance(value, int) and value < 0:
+    if key in ("idle_park_minutes", "idle_park_min_context", "action_lapse_days",
+                                                         "action_lapse_responded_days") and isinstance(value, int) and value < 0:
         return {"error": f"{key} must be >= 0"}
     if key == "warn_fraction" and isinstance(value, float):
         if not (0.0 < value < 1.0):

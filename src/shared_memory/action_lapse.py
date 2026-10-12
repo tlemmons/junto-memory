@@ -32,18 +32,26 @@ DIGEST_SUBJECT = "Lapsed: {n} unanswered action message(s) older than {days}d le
 _sweep_task: Optional[asyncio.Task] = None
 
 
-def _candidates(db, project: str, cutoff) -> List[Dict]:
+def _candidates(db, project: str, cutoff, responded_cutoff=None) -> List[Dict]:
+    """Open/unset obligations older than `cutoff`. Responded ones (answered,
+    never closed — the bulk of nimbus sediment, learning_7260ac9541c520d5)
+    lapse once the REPLY is older than `responded_cutoff` (created_at when
+    responded_at is missing); without one they share `cutoff`."""
+    rc = responded_cutoff or cutoff
     return list(db.messages.find(
         {
             "to_project": project,
             "to_instance": {"$ne": "*"},
             "category": {"$in": ACTION_CATEGORIES},
             "status": "pending",
-            "obligation": {"$in": ["open", "responded", None]},
-            "created_at": {"$lt": cutoff},
             "sent_by_human": {"$ne": True},
             "user_originated": {"$ne": True},
             "require_human": {"$ne": True},
+            "$or": [
+                {"obligation": {"$in": ["open", None]}, "created_at": {"$lt": cutoff}},
+                {"obligation": "responded", "responded_at": {"$lt": rc}},
+                {"obligation": "responded", "responded_at": None, "created_at": {"$lt": rc}},
+            ],
         },
         {"_id": 1, "to_instance": 1, "from_instance": 1, "from_project": 1,
          "subject": 1, "message": 1, "obligation": 1, "created_at": 1, "category": 1},
@@ -71,8 +79,8 @@ def build_digest(items: List[Dict], days: int) -> str:
     for d in items:
         by_sender["%s@%s" % (d.get("from_instance", "?"), d.get("from_project", "?"))].append(d)
     lines = [
-        "%d action message(s) addressed to you sat unanswered for over %d days and were "
-        "marked obligation=lapsed. They are NOT deleted and no longer count in your action "
+        "%d action message(s) addressed to you were left open (unanswered for over %d days, "
+        "or answered but never marked done) and are now obligation=lapsed. They are NOT deleted and no longer count in your action "
         "lane. If one is still real, revive it with memory_update_message_status(<id>, \"open\") "
         "or just reply with in_response_to=<id>. (design:action-lapse-v0)" % (len(items), days),
         "",
@@ -142,13 +150,15 @@ async def _send_digest(db, project: str, agent: str, body: str, n: int, days: in
     return message_id
 
 
-async def sweep_project(db, project: str, days: int, now=None) -> Dict[str, int]:
+async def sweep_project(db, project: str, days: int, now=None,
+                        responded_days: int = 0) -> Dict[str, int]:
     """Lapse one project's stale actions. Returns {agent: lapsed_count}."""
     from shared_memory.helpers import utc_now
 
     now = now or utc_now()
     cutoff = now - timedelta(days=days)
-    cands = _candidates(db, project, cutoff)
+    responded_cutoff = now - timedelta(days=responded_days) if responded_days > 0 else None
+    cands = _candidates(db, project, cutoff, responded_cutoff)
     exempt = _human_touched(db, [d["_id"] for d in cands], cutoff)
     by_agent = defaultdict(list)
     for d in cands:
@@ -191,12 +201,14 @@ async def sweep_once(db) -> Dict[str, Dict[str, int]]:
         if not project:
             continue
         try:
-            days = int(get_effective_config(db, project).get("action_lapse_days") or 0)
+            cfg = get_effective_config(db, project)
+            days = int(cfg.get("action_lapse_days") or 0)
+            responded_days = int(cfg.get("action_lapse_responded_days") or 0)
         except Exception:
-            days = 0
+            days, responded_days = 0, 0
         if days <= 0:
             continue
-        res = await sweep_project(db, project, days)
+        res = await sweep_project(db, project, days, responded_days=responded_days)
         if res:
             out[project] = res
             log.info("action-lapse: %s lapsed %d message(s) across %d agent(s)",

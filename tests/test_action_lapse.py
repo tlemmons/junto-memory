@@ -13,6 +13,10 @@ NOW = datetime(2026, 10, 12, 12, 0, 0, tzinfo=timezone.utc)
 
 def _match(doc, query):
     for k, cond in query.items():
+        if k == "$or":
+            if not any(_match(doc, q) for q in cond):
+                return False
+            continue
         v = doc.get(k)
         if isinstance(cond, dict):
             for op, arg in cond.items():
@@ -185,3 +189,25 @@ def test_revive_and_manual_lapse(monkeypatch):
     r = json.loads(asyncio.run(m.memory_update_message_status("s", "x", "lapsed")))
     assert db.messages.docs["x"]["obligation"] == "lapsed"
     assert db.messages.docs["x"]["lapsed_from"] == "open"
+
+
+def test_responded_lapse_uses_reply_age(monkeypatch):
+    db = _DB([
+        _msg("resp_old_reply", 20, obligation="responded", responded_at=NOW - timedelta(days=10)),
+        _msg("resp_fresh_reply", 20, obligation="responded", responded_at=NOW - timedelta(days=2)),
+        _msg("resp_no_ts", 9, obligation="responded"),
+        _msg("open_20d", 20),
+    ])
+    sent = []
+
+    async def _fake_digest(db_, project, agent, body, n, days):
+        sent.append(n)
+
+    monkeypatch.setattr(al, "_send_digest", _fake_digest)
+    res = asyncio.run(al.sweep_project(db, "nimbus", 30, now=NOW, responded_days=7))
+    d = db.messages.docs
+    assert d["resp_old_reply"]["obligation"] == "lapsed"
+    assert d["resp_fresh_reply"]["obligation"] == "responded"
+    assert d["resp_no_ts"]["obligation"] == "lapsed"   # falls back to created_at
+    assert d["open_20d"]["obligation"] == "open"       # open still waits 30d
+    assert res == {"coordinator": 2}

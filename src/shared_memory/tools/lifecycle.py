@@ -289,6 +289,10 @@ async def memory_change_status(
     except Exception:
         pass
 
+    # Corrections/retractions mark the actual mistakes (context_stamp.py).
+    from shared_memory.context_stamp import stamp as _context_stamp
+    _context_stamp(None, session_id, "status_change", doc_id, new_status=new_status)
+
     return json.dumps({
         "status": "updated",
         "doc_id": doc_id,
