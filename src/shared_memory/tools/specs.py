@@ -149,6 +149,8 @@ async def memory_define_spec(
 
     # Check if spec already exists
     existing = None
+    write_guard = None
+    _dropped: List[str] = []
     try:
         result = await collection.get(ids=[spec_doc_id], include=["documents", "metadatas"])
         if result["ids"]:
@@ -210,11 +212,24 @@ async def memory_define_spec(
 
         # State spec overwrite protection: reject if new content is much shorter
         # This prevents tangent sessions from accidentally erasing prior context
+        existing_len = len(existing["content"])
+        new_len = len(content)
+        shrink_tripped = existing_len > 200 and new_len < existing_len * 0.5
+        if name.startswith("state:"):
+            # interface:state-spec-write-guard-v0 — advisory, never blocks.
+            # Recorded on op_log/audit because force used to leave no trace.
+            from shared_memory.state_guard import dropped_standing
+            _dropped = dropped_standing(existing["content"], content)
+            write_guard = {
+                "forced": bool(force),
+                "shrink_guard_overridden": bool(force) and shrink_tripped,
+                "size_before": existing_len,
+                "size_after": new_len,
+                "dropped_standing": len(_dropped),
+            }
         if name.startswith("state:") and not force:
-            existing_len = len(existing["content"])
-            new_len = len(content)
             # If new content is less than half the length, block it
-            if existing_len > 200 and new_len < existing_len * 0.5:
+            if shrink_tripped:
                 return json.dumps({
                     "error": "State spec overwrite protection triggered",
                     "spec_name": name,
@@ -349,6 +364,8 @@ async def memory_define_spec(
     # (see design:local-first-junto-v0-mvp v0.5.0 §7.4).
     if spec_type == "agent_state":
         spec_payload["origin_server_id"] = ORIGIN_SERVER_ID
+    if write_guard is not None:
+        spec_payload["write_guard"] = write_guard
     emit_op_log_from_context(
         db=get_mongo(),
         op_type=spec_op_type,
@@ -364,8 +381,11 @@ async def memory_define_spec(
     # Audit log for spec changes
     try:
         from shared_memory.audit import log_audit
+        _audit_details = {"spec_name": name, "version": version}
+        if write_guard is not None:
+            _audit_details["write_guard"] = write_guard
         log_audit(f"spec.{action}", owner, project or "",
-                  {"spec_name": name, "version": version}, session_id)
+                  _audit_details, session_id)
     except Exception:
         pass
 
@@ -377,6 +397,17 @@ async def memory_define_spec(
         "location": location,
         "note": "Owner-only updates enforced. Previous versions preserved in history."
     }
+    if _dropped:
+        from shared_memory.state_guard import MAX_REPORTED
+        result["dropped_standing"] = _dropped[:MAX_REPORTED]
+        result["dropped_standing_count"] = len(_dropped)
+        result["dropped_standing_note"] = (
+            f"{len(_dropped)} rule-shaped line(s) (NEVER/ALWAYS/MUST/⚠️…) from the previous "
+            "version's Key Context / rules sections are not in this version — they are now "
+            "deleted from the live spec. Re-add any that still hold; move durable "
+            "lessons to memory_record_learning or CLAUDE.md. (Advisory; the write "
+            "was saved.)"
+        )
     if _spec_lint_notes:
         result["write_lint"] = _spec_lint_notes
         result["action_required"] = (
