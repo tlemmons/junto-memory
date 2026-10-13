@@ -1194,6 +1194,25 @@ def complete_run(db, key_doc: Dict[str, Any], body: Dict[str, Any]) -> Tuple[Dic
         task_update["last_canary_local_date"] = now.astimezone(
             ZoneInfo(sched.get("timezone") or DEFAULT_TZ)).date().isoformat()
     db.di_tasks.update_one({"_id": task["_id"]}, {"$set": task_update})
+    failed_rows = [i for i in stored if i.get("error")]
+    if failed_rows and task.get("schedule"):  # one-offs: the "job done" notice already counts errors
+        # The cursor still advances past these items, so this notice is the only
+        # thing that keeps one (e.g. a customer email) from vanishing silently
+        # (nimbusSupport msg_03088a74ebf4). An action category: someone must handle them.
+        lines = []
+        for i in failed_rows[:25]:
+            m = i.get("meta") or {}
+            ident = " · ".join(str(m[k])[:120] for k in ("from", "subject", "date") if m.get(k))
+            lines.append(f"- {i['item_ref']}" + (f" ({ident})" if ident else "") + f": {i['error'][:200]}")
+        more = f"\n…and {len(failed_rows) - 25} more" if len(failed_rows) > 25 else ""
+        notices.append({
+            "to": [task["owner"]], "category": "task", "kind": "delegated_failure",
+            "subject": f"[{task['name']}] {len(failed_rows)} item(s) FAILED, not routed",
+            "body": (f"Task '{task['name']}' ({task['_id']}) run {run['_id']}: {len(failed_rows)} of {len(stored)} "
+                     f"item(s) got no valid model output, so no route ran for them and the source cursor has "
+                     f"moved past them. Handle them another way:\n" + "\n".join(lines) + more
+                     + f"\nDetails: memory_job(run_id='{run['_id']}', action='result')."),
+        })
     if canary.get("failed"):
         notices.append({
             "to": [task["owner"]], "category": "info", "kind": "delegated_failure",
@@ -1206,7 +1225,9 @@ def complete_run(db, key_doc: Dict[str, Any], body: Dict[str, Any]) -> Tuple[Dic
             "to": [task["owner"]], "category": "info", "kind": "delegated_result",
             "subject": f"Delegated job done: {task['name']}",
             "body": (f"One-off task '{task['name']}' run {run['_id']} done: {examined} examined, routes "
-                     f"{json.dumps(route_counts)}. Results: memory_job(run_id='{run['_id']}', action='result')."),
+                     f"{json.dumps(route_counts)}"
+                     + (f" ({failed_items} FAILED: no valid output, not routed)" if failed_items else "")
+                     + f". Results: memory_job(run_id='{run['_id']}', action='result')."),
         })
     return {"status": status, "routed": route_counts, "canary": canary}, notices
 

@@ -198,8 +198,11 @@ def test_claim_complete_routes_and_canary(db):
     res, notices = di.complete_run(db, runner, body)
     assert res["routed"] == {"notify": 1, "drop": 1, "error": 1}  # uid:9 fails schema (no confidence)
     assert res["canary"]["passed"] == 1 and not res["canary"]["failed"]
-    assert len(notices) == 1 and notices[0]["to"] == [OWNER] and notices[0]["category"] == "task"
-    assert "Frame dark: customer_issue (0.9)" in notices[0]["body"]
+    routed = [n for n in notices if n["kind"] == "delegated_result"]
+    assert len(routed) == 1 and routed[0]["to"] == [OWNER] and routed[0]["category"] == "task"
+    assert "Frame dark: customer_issue (0.9)" in routed[0]["body"]
+    failed = [n for n in notices if n["kind"] == "delegated_failure"]
+    assert len(failed) == 1 and "uid:9" in failed[0]["body"]  # schema failure is reported, not dropped
     task = db.di_tasks.find_one({"_id": tid})
     assert task["cursor"] == 9 and task["consecutive_failures"] == 0
 
@@ -215,6 +218,21 @@ def test_zero_items_without_evidence_fails_and_autopauses(db):
         assert res["status"] == "failed"
     assert res["paused"] is True and "AUTO-PAUSED" in notices[0]["subject"]
     assert db.di_tasks.find_one({"_id": tid})["status"] == "paused"
+
+
+def test_failed_items_notify_owner_with_identity(db):
+    _scope(db)
+    _task(db, canaries=[])
+    di.schedule_due(db, datetime.now(timezone.utc))
+    runner = _runner(db)
+    run_id = di.claim_run(db, runner)["run"]["run_id"]
+    _, notices = di.complete_run(db, runner, {"run_id": run_id, "items_examined": 2, "source_evidence": {"matched": 2},
+        "items": [{"item_ref": "uid:1", "meta": {"subject": "Frame is black", "from": "a@b.c"},
+                   "error": "model reply was not JSON"},
+                  {"item_ref": "uid:2", "meta": {}, "output": {"classification": "spam_scam", "confidence": 0.9}}]})
+    fails = [n for n in notices if n["kind"] == "delegated_failure"]
+    assert len(fails) == 1 and fails[0]["category"] == "task" and fails[0]["to"] == [OWNER]
+    assert "uid:1" in fails[0]["body"] and "Frame is black" in fails[0]["body"] and "uid:2" not in fails[0]["body"]
 
 
 def test_zero_items_with_evidence_is_a_real_zero(db):
