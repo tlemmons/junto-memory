@@ -262,3 +262,59 @@ def test_synthetic_canary_accepted(db):
     assert res["status"] == "created"
     bad = _task(db, name="t2", canaries=[{"expect": {"classification": "spam_scam"}}])
     assert any("synthetic" in d for d in bad["details"])
+
+
+# ── tools (1.4.0) ──
+
+def _tool_scope(db, **over):
+    fields = {"adapter": "mcp", "tools": {"provider": "mcp", "url": "http://127.0.0.1:8199/mcp",
+                                          "credential_ref": "/tok", "allowed": ["frames_offline", "frame_lookup"]},
+              "runner_hosts_allowed": ["sage"], "grants": [OWNER], "content_visible_to": [OWNER]}
+    fields.update(over)
+    return di.define_scope(db, "cerebro/tom", "nimbus:frames", fields)
+
+
+FRAME_SCHEMA = {"type": "object", "properties": {"action": {"type": "string", "enum": ["contact_owner", "wait"]}},
+                "required": ["action"]}
+
+
+def test_tool_scope_validation(db):
+    assert "adapter mcp needs" in di.define_scope(db, "x", "bad:mcp", {"adapter": "mcp", "runner_hosts_allowed": ["sage"]})["error"]
+    assert _tool_scope(db)["status"] == "created"
+    base = {"name": "offline", "scope": "nimbus:frames", "instructions": "Decide.", "output_schema": FRAME_SCHEMA,
+            "source_params": {"tool": "frames_offline"}}
+    bad = di.create_task(db, OWNER, False, dict(base, tools=["add_user_note"]))
+    assert any("not allowed" in d for d in bad["details"])
+    bad = di.create_task(db, OWNER, False, dict(base, source_params={"tool": "nope"}))
+    assert any("source_params.tool" in d for d in bad["details"])
+    assert di.create_task(db, "nimbus/other", False, dict(base, tools=["frame_lookup"]))["error"].startswith("scope")
+    ok = di.create_task(db, OWNER, False, dict(base, tools=["frame_lookup"], max_tool_calls=4))
+    assert ok["status"] == "created"
+
+
+def test_tools_from_another_scope_need_a_grant(db):
+    _scope(db)
+    _tool_scope(db, grants=["nimbus/coordinator"])
+    res = _task(db, tools=["frame_lookup"], tool_scope="nimbus:frames")
+    assert any("not granted" in d for d in res["details"])
+
+
+def test_claim_carries_intersected_tools_and_logs_calls(db):
+    _tool_scope(db)
+    di.create_task(db, OWNER, False, {"name": "offline", "scope": "nimbus:frames", "instructions": "Decide.",
+                                      "output_schema": FRAME_SCHEMA, "source_params": {"tool": "frames_offline"},
+                                      "tools": ["frame_lookup"]})
+    key = di.create_runner_key(db, "cerebro/tom", "sage-1", "sage")["key"]
+    runner = di.authenticate_runner(db, key)
+    di.register_runner(db, runner, {"scopes_served": ["nimbus:frames"]})
+    claim = di.claim_run(db, runner)
+    tools = claim["tool_scope"]["tools"]
+    assert tools["allowed"] == ["frame_lookup"] and tools["source_tool"] == "frames_offline"
+    assert tools["credential_ref"] == "/tok"
+    res, _ = di.complete_run(db, runner, {
+        "run_id": claim["run"]["run_id"], "items_examined": 1, "source_evidence": {"tool": "frames_offline", "returned": 1},
+        "items": [{"item_ref": "mcp:frames_offline:F1", "meta": {"frame_id": "F1"}, "output": {"action": "wait"},
+                   "tool_calls": [{"tool": "frame_lookup", "args": {"frame_id": "F1"}, "ok": True}]}]})
+    run = db.di_runs.find_one({"_id": claim["run"]["run_id"]})
+    assert run["tool_calls_total"] == 1 and run["items"][0]["tool_calls"][0]["tool"] == "frame_lookup"
+    assert "tools_allowed" in di.scopes_for(db, OWNER, False)[0]

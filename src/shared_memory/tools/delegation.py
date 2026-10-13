@@ -50,6 +50,9 @@ async def memory_delegate(
     expect_items: bool = False,
     description: str = "",
     run_now: bool = False,
+    tools: Optional[List[str]] = None,
+    tool_scope: Optional[str] = None,
+    max_tool_calls: int = 8,
 ) -> str:
     """Create a task for a LOCAL model worker (runs on Tom's hardware, not a cloud model).
 
@@ -90,6 +93,11 @@ async def memory_delegate(
         expect_items: Fail a run that finds 0 items (sweeps). Leave False for polls.
         description: Free text for humans.
         run_now: For a scheduled task, also run once immediately.
+        tools: READ tools the local model may call while working on each item, e.g.
+            ["frame_lookup"]. Must be in the tool scope's allowed list
+            (memory_runners(action="scopes") shows tools_allowed). Every call is logged.
+        tool_scope: Scope that provides the tools, if different from `scope`.
+        max_tool_calls: Per-item tool-call budget (1-20, default 8).
 
     Returns: {task_id, version, task_status, run_id?} or {error, details}.
     """
@@ -101,6 +109,7 @@ async def memory_delegate(
         "source_params": source_params, "model": model, "routes": routes, "schedule": schedule,
         "canaries": canaries, "per_item": per_item, "expect_items": expect_items,
         "description": description, "run_now": run_now,
+        "tools": tools, "tool_scope": tool_scope, "max_tool_calls": max_tool_calls,
     }))
 
 
@@ -121,7 +130,8 @@ async def memory_schedule(
             - list: your tasks (admins: all_tasks=True for everyone's)
             - get: full definition incl. instructions, schema, routes, cursor
             - edit: apply `changes` (any of instructions, output_schema, source_params, model,
-              routes, schedule, canaries, description, per_item, expect_items). Versioned;
+              routes, schedule, canaries, description, per_item, expect_items, tools,
+              tool_scope, max_tool_calls). Versioned;
               takes effect on the next run.
             - pause / resume / delete; run_now queues one run immediately
             - history: previous definition versions

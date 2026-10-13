@@ -49,11 +49,16 @@ MIN_EVERY_SECONDS = 300
 DEFAULT_PAUSE_AFTER_FAILURES = 3
 DEFAULT_DIGEST_AT = "07:00"
 
-ADAPTERS = {"imap", "gmail_api", "file", "inline"}
+ADAPTERS = {"imap", "gmail_api", "file", "inline", "mcp", "none"}
+TOOL_PROVIDERS = {"mcp"}
+MAX_TOOLS = 30
+DEFAULT_MAX_TOOL_CALLS = 8
+MAX_TOOL_CALLS = 20
 ROUTE_ACTIONS = {"notify", "digest", "drop"}
 ROUTE_OPS = {"eq", "ne", "in", "not_in", "lt", "lte", "gt", "gte", "exists", "true", "false"}
 EDITABLE_FIELDS = {"instructions", "output_schema", "source_params", "model", "routes", "schedule",
-                   "canaries", "description", "per_item", "expect_items"}
+                   "canaries", "description", "per_item", "expect_items", "tools", "tool_scope",
+                   "max_tool_calls"}
 # Edits to these re-require Tom's approval on an approval=first_run scope.
 APPROVAL_FIELDS = {"instructions", "output_schema", "source_params"}
 RUN_STATUSES = {"queued", "claimed", "done", "failed", "cancelled"}
@@ -226,6 +231,11 @@ def validate_task_fields(fields: Dict[str, Any], scope: Dict[str, Any]) -> List[
 
     if not isinstance(fields.get("source_params", {}), dict):
         errors.append("source_params: must be an object")
+    elif scope.get("adapter") == "mcp":
+        src_tool = (fields.get("source_params") or {}).get("tool")
+        if src_tool not in ((scope.get("tools") or {}).get("allowed") or []):
+            errors.append(f"source_params.tool: required for an mcp scope, one of "
+                          f"{(scope.get('tools') or {}).get('allowed') or []}")
     if fields.get("model") is not None and not isinstance(fields.get("model"), str):
         errors.append("model: must be a string (an Ollama model name)")
 
@@ -311,7 +321,7 @@ def validate_task_fields(fields: Dict[str, Any], scope: Dict[str, Any]) -> List[
 
 # ── scopes ─────────────────────────────────────────────────────────────────
 
-SCOPE_FIELDS = {"adapter", "adapter_config", "runner_hosts_allowed", "grants", "content_visible_to",
+SCOPE_FIELDS = {"adapter", "adapter_config", "tools", "runner_hosts_allowed", "grants", "content_visible_to",
                 "restricted", "approval", "notes"}
 
 
@@ -339,6 +349,15 @@ def define_scope(db, actor: str, name: str, fields: Dict[str, Any]) -> Dict[str,
                 return {"error": f"{key}: entries are 'project/agent' ('{v}')"}
     if not merged["runner_hosts_allowed"]:
         return {"error": "runner_hosts_allowed: at least one host"}
+    tools = merged.get("tools")
+    if tools is not None:
+        if not isinstance(tools, dict) or tools.get("provider") not in TOOL_PROVIDERS or not tools.get("url"):
+            return {"error": f"tools: {{provider: one of {sorted(TOOL_PROVIDERS)}, url, credential_ref?, allowed[]}}"}
+        allowed_tools = tools.get("allowed") or []
+        if not isinstance(allowed_tools, list) or not all(isinstance(t, str) for t in allowed_tools):
+            return {"error": "tools.allowed: list of tool names"}
+    if merged.get("adapter") == "mcp" and not tools:
+        return {"error": "adapter mcp needs a tools provider on the same scope"}
     merged.setdefault("adapter_config", {})
     merged.setdefault("restricted", False)
     merged.setdefault("approval", "none")
@@ -356,8 +375,11 @@ def define_scope(db, actor: str, name: str, fields: Dict[str, Any]) -> Dict[str,
 
 def scope_public(scope: Dict[str, Any]) -> Dict[str, Any]:
     """Scope as shown to agents: no adapter_config (holds credential paths)."""
-    return {k: scope.get(k) for k in ("adapter", "runner_hosts_allowed", "grants", "content_visible_to",
-                                       "restricted", "approval", "notes")} | {"name": scope["_id"]}
+    out = {k: scope.get(k) for k in ("adapter", "runner_hosts_allowed", "grants", "content_visible_to",
+                                      "restricted", "approval", "notes")} | {"name": scope["_id"]}
+    if scope.get("tools"):
+        out["tools_allowed"] = (scope["tools"] or {}).get("allowed") or []
+    return out
 
 
 def scopes_for(db, who: Optional[str], admin: bool) -> List[Dict[str, Any]]:
@@ -378,6 +400,35 @@ def _write_version(db, task: Dict[str, Any], actor: str, changed: List[str]) -> 
         "changed": changed,
         "definition": {k: task.get(k) for k in EDITABLE_FIELDS | {"name", "scope"}},
     })
+
+
+def validate_task_tools(db, fields: Dict[str, Any], task_scope: Dict[str, Any], owner: str,
+                        admin: bool) -> List[str]:
+    """Tools a task may call = runner credential (enforced by the provider) ∩ the tool
+    scope's allowed list (Tom) ∩ the task's own list (owner); the owner must be granted
+    the tool scope (§6.1)."""
+    tools = fields.get("tools") or []
+    if not tools:
+        return []
+    if not isinstance(tools, list) or not all(isinstance(t, str) and t for t in tools) or len(tools) > MAX_TOOLS:
+        return [f"tools: list of at most {MAX_TOOLS} tool names"]
+    mtc = fields.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS)
+    errors = []
+    if not isinstance(mtc, int) or not 1 <= mtc <= MAX_TOOL_CALLS:
+        errors.append(f"max_tool_calls: 1..{MAX_TOOL_CALLS}")
+    name = fields.get("tool_scope") or task_scope.get("_id")
+    tscope = task_scope if name == task_scope.get("_id") else db.di_scopes.find_one({"_id": name})
+    if not tscope or not tscope.get("tools"):
+        return errors + [f"tool_scope '{name}': no such scope with a tools provider"]
+    if not admin and owner not in (tscope.get("grants") or []):
+        errors.append(f"tool_scope '{name}' is not granted to {owner}")
+    if not set(tscope.get("runner_hosts_allowed") or []) & set(task_scope.get("runner_hosts_allowed") or []):
+        errors.append(f"tool_scope '{name}' and scope '{task_scope.get('_id')}' share no runner host")
+    allowed = set((tscope["tools"] or {}).get("allowed") or [])
+    missing = sorted(set(tools) - allowed)
+    if missing:
+        errors.append(f"tools not allowed by scope '{name}': {missing}; allowed: {sorted(allowed)}")
+    return errors
 
 
 def create_task(db, who: str, admin: bool, fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -404,8 +455,11 @@ def create_task(db, who: str, admin: bool, fields: Dict[str, Any]) -> Dict[str, 
         "description": fields.get("description") or "",
         "per_item": bool(fields.get("per_item", True)),
         "expect_items": bool(fields.get("expect_items", False)),
+        "tools": fields.get("tools") or [],
+        "tool_scope": fields.get("tool_scope"),
+        "max_tool_calls": fields.get("max_tool_calls") or DEFAULT_MAX_TOOL_CALLS,
     }
-    errors = validate_task_fields(defn, scope)
+    errors = validate_task_fields(defn, scope) + validate_task_tools(db, defn, scope, who, admin)
     if errors:
         return {"error": "invalid task", "details": errors}
     now = _now()
@@ -474,7 +528,7 @@ def edit_task(db, task_id: str, who: str, admin: bool, changes: Dict[str, Any]) 
     scope = db.di_scopes.find_one({"_id": task["scope"]}) or {}
     merged = {k: task.get(k) for k in EDITABLE_FIELDS}
     merged.update(changes)
-    errors = validate_task_fields(merged, scope)
+    errors = validate_task_fields(merged, scope) + validate_task_tools(db, merged, scope, task["owner"], admin)
     if errors:
         return {"error": "invalid change", "details": errors}
     now = _now()
@@ -658,11 +712,23 @@ def claim_run(db, key_doc: Dict[str, Any]) -> Dict[str, Any]:
         return {}
     task = db.di_tasks.find_one({"_id": run["task_id"]}) or {}
     scope = db.di_scopes.find_one({"_id": run["scope"]}) or {}
+    tool_scope = None
+    if task.get("tools") or scope.get("adapter") == "mcp":
+        tname = task.get("tool_scope") or scope.get("_id")
+        tdoc = scope if tname == scope.get("_id") else (db.di_scopes.find_one({"_id": tname}) or {})
+        tcfg = dict(tdoc.get("tools") or {})
+        allowed = set(tcfg.get("allowed") or [])
+        tcfg["allowed"] = sorted(allowed & set(task.get("tools") or []))
+        source_tool = (task.get("source_params") or {}).get("tool") if scope.get("adapter") == "mcp" else None
+        if source_tool and source_tool in allowed:
+            tcfg["source_tool"] = source_tool
+        tool_scope = {"name": tname, "tools": tcfg}
     return _jsonable({
         "run": {"run_id": run["_id"], "task_id": run["task_id"], "task_version": run["task_version"],
                 "canary_due": run.get("canary_due", False)},
         "task": {k: task.get(k) for k in ("name", "instructions", "output_schema", "source_params", "model",
-                                          "per_item", "canaries", "expect_items")},
+                                          "per_item", "canaries", "expect_items", "tools", "max_tool_calls")},
+        "tool_scope": tool_scope,
         "scope": {"name": scope.get("_id"), "adapter": scope.get("adapter"),
                   "adapter_config": scope.get("adapter_config") or {}},
         "cursor": task.get("cursor"),
@@ -850,14 +916,15 @@ def complete_run(db, key_doc: Dict[str, Any], body: Dict[str, Any]) -> Tuple[Dic
                 err = "schema: " + "; ".join(problems)
         if err or out is None:
             failed_items += 1
-            stored.append({"item_ref": it.get("item_ref"), "meta": meta, "error": (err or "no output")[:500]})
+            stored.append({"item_ref": it.get("item_ref"), "meta": meta, "error": (err or "no output")[:500],
+                           "tool_calls": (it.get("tool_calls") or [])[:MAX_TOOL_CALLS]})
             route_counts["error"] = route_counts.get("error", 0) + 1
             continue
         route = choose_route(task.get("routes"), out, meta)
         action = route["then"]
         route_counts[action] = route_counts.get(action, 0) + 1
         stored.append({"item_ref": it.get("item_ref"), "meta": meta, "output": out, "route": action,
-                       "to": route.get("to")})
+                       "to": route.get("to"), "tool_calls": (it.get("tool_calls") or [])[:MAX_TOOL_CALLS]})
         if action == "notify":
             notices.append({
                 "to": [route["to"]], "category": route.get("category", "info"),
@@ -870,6 +937,7 @@ def complete_run(db, key_doc: Dict[str, Any], body: Dict[str, Any]) -> Tuple[Dic
     db.di_runs.update_one({"_id": run["_id"]}, {"$set": {
         "status": status, "finished_at": now, "items": stored, "items_examined": examined,
         "items_failed": failed_items, "route_counts": route_counts, "canary": canary,
+        "tool_calls_total": sum(len(i.get("tool_calls") or []) for i in stored),
         "source_evidence": evidence, "cursor_in": task.get("cursor"), "cursor_out": body.get("cursor_out"),
         "model": body.get("model") or task.get("model"),
         "duration_s": round((now - _aware(run.get("claimed_at") or now)).total_seconds(), 1),
