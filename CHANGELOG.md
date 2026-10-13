@@ -56,6 +56,13 @@ version via `memory_health` (`server_version`).
   agent names) and `idle_park_min_context`, set via `memory_admin push_control_set_config`.
 
 ### Fixed
+- **Runner 0.4.0: no more silent truncation or runaway replies.** The runner set neither
+  `num_ctx` nor `num_predict`, so Ollama's 4,096-token default silently truncated long
+  items, and a model could generate until the 600 s timeout (one call held the queue
+  10+ min). It now sizes `num_ctx` per run (buckets 8K/16K, model caps), cuts oversize
+  items itself with a visible marker, caps replies at 2,048 tokens, and reports `num_ctx` +
+  `items_truncated` in run evidence (only when items exist, so the server's
+  "0 items, no evidence" guard still fires).
 - Ephemeral reporter identities (`ctx-reporter-*`) replace their earlier sessions on start
   instead of piling up (108 active sessions → 18).
 - Spec names that differ only by case are refused; `get_spec` suggests the existing twin.

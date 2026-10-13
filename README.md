@@ -497,7 +497,9 @@ The runner creates its X25519 key pair on first start and registers its installe
 | Items per run | 200 |
 | Instructions | 20,000 chars |
 | Inline item | 20,000 chars (imap `max_chars` defaults to 12,000) |
-| Model context | The runner doesn't set `num_ctx` yet, so Ollama's default applies (4,096 tokens on Ollama 0.12 unless `OLLAMA_CONTEXT_LENGTH` is set). That budget covers instructions + item + output, and longer prompts are truncated without an error. Keep item + instructions under ~10,000 chars for now. |
+| Model context | The runner picks `num_ctx` per run: the smallest of 8,192 / 16,384 tokens (config `num_ctx_buckets`) that fits the run's longest item, capped by the model's trained context, `num_ctx_max` per model, and 4,096 for models over 30 GB (they don't fit one 24 GB card). One value per run, because changing `num_ctx` reloads the model. An item that still doesn't fit is cut by the runner with a visible marker; run evidence shows `num_ctx` and `items_truncated`. At 16K that is about 38,000 chars of item. |
+| Reply length | `num_predict` 2,048 tokens per model call (config `num_predict`), so one item can't hold the runner until the 600 s timeout |
+| Queue | One runner works one run at a time, oldest queued first. Scheduled runs wait behind one-off batches. |
 | Schedule | every ≥ 5 minutes; daily digest at 07:00 in the task's timezone unless `digest_at` is set |
 
 A model too big for VRAM (e.g. a 72B model on 2×24 GB) runs partly on CPU and evicts every other loaded model. Keep big models out of batches.
