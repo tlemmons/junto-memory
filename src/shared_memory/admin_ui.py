@@ -326,3 +326,64 @@ def register_admin_routes(mcp, get_mongo) -> None:
         for d in db.config_changes.find({}, {"_id": 0}).sort("ts", -1).limit(200):
             rows.append({k: _jsonable(v) for k, v in d.items()})
         return JSONResponse({"changes": rows})
+
+
+def register_connection_routes(mcp, get_mongo) -> None:
+    """Connections tab (interface:delegated-inference-v0 1.5.0 §3).
+
+    GET  /admin/api/connections            connections (no secrets) + audit
+    POST /admin/api/connections/activate   {name, secret?, widen?}   (owner key)
+    POST /admin/api/connections/revoke     {name}                    (owner key)
+
+    Secrets go in through POST only and are never echoed back.
+    """
+    from starlette.responses import JSONResponse
+
+    from shared_memory import delegation as di
+    from shared_memory import vault
+
+    @mcp.custom_route("/admin/api/connections", methods=["GET"])
+    async def admin_connections(request):
+        blocked = _lan_only(request)
+        if blocked:
+            return blocked
+        db = get_mongo()
+        if db is None:
+            return JSONResponse({"error": "MongoDB unavailable"}, status_code=503)
+        return JSONResponse({"connections": di.connections_admin(db), "audit": di.connection_audit(db, 100),
+                             "vault_ready": vault.available()})
+
+    async def _write(request, fn):
+        a = _auth(request)
+        if not a["ok"]:
+            return JSONResponse({"error": a["error"]}, status_code=a["status"])
+        db = get_mongo()
+        if db is None:
+            return JSONResponse({"error": "MongoDB unavailable"}, status_code=503)
+        try:
+            body = json.loads(await request.body() or b"{}")
+        except ValueError:
+            return JSONResponse({"error": "body must be JSON"}, status_code=400)
+        result = fn(db, f"admin-ui:{a['name']}", body)
+        if result.get("status") in ("active", "revoked"):
+            try:
+                from shared_memory.delegation import send_notices
+                db_conn = db.di_scopes.find_one({"_id": body.get("name")}) or {}
+                owner = db_conn.get("requested_by")
+                if owner:
+                    await send_notices(db, [{"to": [owner], "category": "info", "kind": "connection_status",
+                                             "subject": f"Connection {body.get('name')} is {result['status']}",
+                                             "body": f"Tom set connection '{body.get('name')}' to {result['status']}. "
+                                                     f"Tasks started: {result.get('tasks_started', 0)}."}])
+            except Exception as e:  # notice is best-effort
+                log.warning("connections: owner notice failed: %s", e)
+        return JSONResponse(result, status_code=400 if result.get("error") else 200)
+
+    @mcp.custom_route("/admin/api/connections/activate", methods=["POST"])
+    async def admin_connection_activate(request):
+        return await _write(request, lambda db, actor, b: di.activate_connection(
+            db, actor, b.get("name") or "", b.get("secret") or None, b.get("widen") or None))
+
+    @mcp.custom_route("/admin/api/connections/revoke", methods=["POST"])
+    async def admin_connection_revoke(request):
+        return await _write(request, lambda db, actor, b: di.revoke_connection(db, actor, b.get("name") or ""))

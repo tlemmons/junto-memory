@@ -53,6 +53,7 @@ async def memory_delegate(
     tools: Optional[List[str]] = None,
     tool_scope: Optional[str] = None,
     max_tool_calls: int = 8,
+    connection: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Create a task for a LOCAL model worker (runs on Tom's hardware, not a cloud model).
 
@@ -98,6 +99,12 @@ async def memory_delegate(
             (memory_runners(action="scopes") shows tools_allowed). Every call is logged.
         tool_scope: Scope that provides the tools, if different from `scope`.
         max_tool_calls: Per-item tool-call budget (1-20, default 8).
+        connection: Request a NEW data connection named `scope` as part of this task:
+            {"type": "imap"|"gmail"|"mcp"|"file"|"inline", "params": {...},
+             "secret": "password"|"token"|"oauth"|"none", "tools_allowed": [...] (mcp), "notes": "..."}.
+            imap params {host, port, user}; gmail {mailbox}; mcp {url}; file {roots}.
+            You never handle the secret: Tom supplies it in /admin → Connections, and
+            the task starts automatically once he does (status awaiting_connection until then).
 
     Returns: {task_id, version, task_status, run_id?} or {error, details}.
     """
@@ -110,6 +117,7 @@ async def memory_delegate(
         "canaries": canaries, "per_item": per_item, "expect_items": expect_items,
         "description": description, "run_now": run_now,
         "tools": tools, "tool_scope": tool_scope, "max_tool_calls": max_tool_calls,
+        "connection": connection,
     }))
 
 
@@ -210,7 +218,10 @@ async def memory_runners(
         session_id: Your session ID.
         action:
             - list: runners (host, models, scopes served, last heartbeat)
-            - scopes: scopes you can build tasks on (admins: all)
+            - scopes: connections/scopes you can build tasks on (admins: all), with status
+            - request_connection: ask for a new connection: name + fields {type, params,
+              secret, tools_allowed?, notes?} (see memory_delegate's connection arg). Tom
+              activates it in /admin; you never see the secret.
             - define_scope: OWNER/ADMIN only. name + fields {adapter, adapter_config,
               runner_hosts_allowed, grants, content_visible_to, restricted, approval, notes}
             - create_runner_key: OWNER/ADMIN only. runner_id + host. Returns the key once.
@@ -227,6 +238,8 @@ async def memory_runners(
         return _out({"runners": rows})
     if action == "scopes":
         return _out({"scopes": di.scopes_for(db, who, admin)})
+    if action == "request_connection":
+        return _out(di.request_connection(db, who, name or "", fields or {}))
     if action == "define_scope":
         if not admin:
             return _out({"error": "define_scope needs an owner/admin role (scopes are Tom's)"})
@@ -235,4 +248,4 @@ async def memory_runners(
         if not admin:
             return _out({"error": "create_runner_key needs an owner/admin role"})
         return _out(di.create_runner_key(db, who, runner_id or "", host or ""))
-    return _out({"error": "action: list|scopes|define_scope|create_runner_key"})
+    return _out({"error": "action: list|scopes|request_connection|define_scope|create_runner_key"})

@@ -64,6 +64,7 @@
     <button data-tab="settings">Settings</button>
     <button data-tab="agents">Agents</button>
     <button data-tab="alerts">Alerts</button>
+    <button data-tab="connections">Connections</button>
     <button data-tab="changes">Change log</button>
   </nav>
   <div class="login">
@@ -92,6 +93,11 @@
   <section id="tab-alerts" class="hidden">
     <div class="toolbar"><label><input type="checkbox" id="all-alerts"> include acknowledged</label></div>
     <div class="panel"><h2>Alerts</h2><div class="scroll" id="alerts"></div></div>
+  </section>
+  <section id="tab-connections" class="hidden">
+    <p class="muted">Data connections for local-model tasks. Agents request them; you activate one by entering its secret (that is the approval) or approving it. Secrets are encrypted in the vault and never shown again. <span id="vault-state"></span></p>
+    <div class="panel"><h2>Connections</h2><div class="scroll" id="connections"></div></div>
+    <div class="panel"><h2>Connection audit</h2><div class="scroll" id="conn-audit"></div></div>
   </section>
   <section id="tab-changes" class="hidden"><div class="panel"><h2>Settings changes</h2><div class="scroll" id="changes"></div></div></section>
 </main>
@@ -142,7 +148,8 @@ document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
 });
 
 async function renderOverview() {
-  const [h, al, ag] = await Promise.all([api('/health'), api('/admin/api/alerts'), api('/admin/api/agents')]);
+  const [h, al, ag, cn] = await Promise.all([api('/health'), api('/admin/api/alerts'), api('/admin/api/agents'), api('/admin/api/connections')]);
+  const pendingConn = (cn.connections || []).filter(c => c.status && c.status.startsWith('pending')).length;
   const agents = ag.agents || [];
   const fresh = agents.filter(a => a.context_reported_at && (Date.now() - new Date(a.context_reported_at)) < 15*60*1000);
   const high = fresh.filter(a => (a.context_tokens || 0) >= 500000);
@@ -152,6 +159,7 @@ async function renderOverview() {
     ['Open alerts', (al.alerts || []).length ? '<span class="pill warn">' + al.alerts.length + '</span>' : '0'],
     ['Agents reporting context', fresh.length + ' / ' + agents.length],
     ['Agents ≥ 500K context', high.length ? '<span class="pill warn">' + high.length + '</span>' : '0'],
+    ['Connections awaiting you', pendingConn ? '<span class="pill warn">' + pendingConn + '</span>' : '0'],
   ];
   $('tiles').innerHTML = tiles.map(([l, n]) => '<div class="tile"><div class="n">' + n + '</div><div class="l">' + l + '</div></div>').join('');
 }
@@ -259,8 +267,54 @@ async function renderChanges() {
   $('changes').innerHTML = html + '</tbody></table>';
 }
 
+async function renderConnections() {
+  const d = await api('/admin/api/connections');
+  if (d.error) { $('connections').innerHTML = '<p class="muted">' + esc(d.error) + '</p>'; return; }
+  $('vault-state').innerHTML = d.vault_ready ? '<span class="pill ok">vault ready</span>' : '<span class="pill bad">vault key missing on server</span>';
+  const pill = (st) => '<span class="pill ' + (st === 'active' ? 'ok' : st === 'revoked' ? 'bad' : 'warn') + '">' + esc(st) + '</span>';
+  let html = '<table><thead><tr><th>Connection</th><th>Status</th><th>Type</th><th>Params</th><th>Requested by</th><th>Granted to</th><th>Secret</th><th>Tasks</th><th>Action</th></tr></thead><tbody>';
+  for (const c of d.connections || []) {
+    const id = 'sec_' + c.name.replace(/[^a-z0-9]/gi, '_');
+    let act = '';
+    if (CAN_WRITE) {
+      if (c.secret_kind && c.secret_kind !== 'none' && c.secret_kind !== 'oauth') {
+        act += '<input type="password" id="' + id + '" placeholder="' + esc(c.secret_kind) + '" size="14"> ' +
+               '<button class="btn" onclick="activateConn(\'' + esc(c.name) + '\', \'' + id + '\')">' + (c.secret_set ? 'Rotate' : 'Activate') + '</button> ';
+      } else if (c.secret_kind === 'oauth') {
+        act += '<span class="muted">Google sign-in: coming (phase 3)</span> ';
+      } else if (c.status !== 'active') {
+        act += '<button class="btn" onclick="activateConn(\'' + esc(c.name) + '\', null)">Approve</button> ';
+      }
+      if (c.status !== 'revoked') act += '<button class="btn" onclick="revokeConn(\'' + esc(c.name) + '\')">Revoke</button>';
+    } else { act = '<span class="muted">unlock to edit</span>'; }
+    const secret = c.secret_kind === 'none' || !c.secret_kind ? '<span class="muted">none</span>' :
+      (c.secret_set ? 'set ' + age(c.secret_set_at) + ' ago' + (c.secret_set_by ? ' by ' + esc(c.secret_set_by) : '') :
+       (c.legacy_credential_file ? 'runner file (legacy)' : '<span class="pill warn">missing</span>'));
+    html += '<tr><td class="k">' + esc(c.name) + '</td><td>' + pill(c.status) + '</td><td>' + esc(c.type) + '</td><td class="eff">' + fmt(c.params) +
+            (c.tools_allowed ? '<br><span class="muted">tools: ' + esc(c.tools_allowed.join(', ')) + '</span>' : '') +
+            '</td><td>' + esc(c.requested_by || '—') + '</td><td>' + esc((c.grants || []).join(', ')) + '</td><td>' + secret + '</td><td>' + esc(c.tasks) + '</td><td>' + act + '</td></tr>';
+  }
+  $('connections').innerHTML = html + '</tbody></table>';
+  let a = '<table><thead><tr><th>When</th><th>Who</th><th>What</th><th>Connection</th><th>Detail</th></tr></thead><tbody>';
+  for (const r of d.audit || []) a += '<tr><td class="muted">' + esc(new Date(r.at).toLocaleString()) + '</td><td>' + esc(r.actor) + '</td><td>' + esc(r.kind) + '</td><td>' + esc(r.target) + '</td><td class="eff">' + fmt(r.detail) + '</td></tr>';
+  $('conn-audit').innerHTML = a + '</tbody></table>';
+}
+async function activateConn(name, inputId) {
+  let body = { name };
+  if (inputId) { const el = $(inputId); if (!el.value) { toast('Enter the secret first', true); return; } body.secret = el.value; el.value = ''; }
+  const r = await api('/admin/api/connections/activate', { method: 'POST', body: JSON.stringify(body) });
+  if (r.error) toast(r.error, true); else toast(name + ' active' + (r.tasks_started ? ', ' + r.tasks_started + ' task(s) started' : ''));
+  renderConnections();
+}
+async function revokeConn(name) {
+  if (!confirm('Revoke ' + name + '? Its secret is destroyed and queued runs are cancelled.')) return;
+  const r = await api('/admin/api/connections/revoke', { method: 'POST', body: JSON.stringify({ name }) });
+  if (r.error) toast(r.error, true); else toast(name + ' revoked');
+  renderConnections();
+}
+
 function render() {
-  return ({ overview: renderOverview, settings: renderSettings, agents: renderAgents, alerts: renderAlerts, changes: renderChanges })[TAB]();
+  return ({ overview: renderOverview, settings: renderSettings, agents: renderAgents, alerts: renderAlerts, connections: renderConnections, changes: renderChanges })[TAB]();
 }
 checkLogin().then(render);
 setInterval(() => { if (TAB === 'overview' || TAB === 'agents' || TAB === 'alerts') render(); }, 30000);

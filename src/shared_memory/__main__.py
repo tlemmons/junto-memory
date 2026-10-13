@@ -543,8 +543,9 @@ def main():
         }, status_code=200 if status == "healthy" else 503)
 
     # ── Junto Admin (settings / agents / alerts web UI) — admin_ui.py ──
-    from shared_memory.admin_ui import register_admin_routes
+    from shared_memory.admin_ui import register_admin_routes, register_connection_routes
     register_admin_routes(mcp, get_mongo)
+    register_connection_routes(mcp, get_mongo)
 
     # ── Delegated-inference runner API (runners are service principals) — runner_api.py ──
     from shared_memory.runner_api import register_runner_routes

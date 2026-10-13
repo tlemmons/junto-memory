@@ -3,6 +3,7 @@
 @pytest.mark.integration: skipped when mongodb or its password isn't available.
 Each test gets its own throwaway database, dropped afterwards.
 """
+import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -332,3 +333,104 @@ def test_edit_and_run_now_force_canaries(db):
     task = db.di_tasks.find_one({"_id": tid})
     assert task["last_canary_local_date"] is None
     assert db.di_runs.find_one({"_id": di.queue_run(db, task, reason="schedule")})["canary_due"] is True
+
+
+# ── connections + vault (1.5.0) ──
+
+@pytest.fixture
+def vault_key(monkeypatch):
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv("JUNTO_VAULT_KEY", Fernet.generate_key().decode())
+
+
+def _runner_with_key(db, scopes_served=()):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    import base64
+    priv = X25519PrivateKey.generate()
+    pub = base64.b64encode(priv.public_key().public_bytes(serialization.Encoding.Raw,
+                                                          serialization.PublicFormat.Raw)).decode()
+    key = di.create_runner_key(db, "cerebro/tom", "sage-1", "sage")["key"]
+    doc = di.authenticate_runner(db, key)
+    assert di.register_runner(db, doc, {"scopes_served": list(scopes_served), "public_key": pub,
+                                        "adapters": ["imap", "mcp", "inline", "file"]})["status"] == "registered"
+    return doc, priv
+
+
+IMAP_CONN = {"type": "imap", "params": {"host": "imap.example.com", "user": "box@example.com"}, "secret": "password"}
+
+
+def test_request_connection_via_delegate_waits_then_starts(db, vault_key):
+    res = di.create_task(db, OWNER, False, {"name": "triage", "scope": "mail:other", "connection": IMAP_CONN,
+                                            "instructions": "Classify.", "output_schema": SCHEMA})
+    assert res["task_status"] == "awaiting_connection" and res["connection_status"] == "pending_secret"
+    assert "run_id" not in res
+    conn = di.scopes_for(db, OWNER, False)[0]
+    assert conn["status"] == "pending_secret" and conn["secret_set"] is False and conn["grants"] == [OWNER]
+    assert "needs a password" in di.activate_connection(db, "admin-ui:tom", "mail:other")["error"]
+    out = di.activate_connection(db, "admin-ui:tom", "mail:other", secret="hunter2 pw")
+    assert out["status"] == "active" and out["tasks_started"] == 1
+    task = db.di_tasks.find_one({"_id": res["task_id"]})
+    assert task["status"] == "active"
+    assert db.di_runs.count_documents({"task_id": res["task_id"], "status": "queued"}) == 1  # one-off ran
+
+
+def test_secret_never_leaves_except_sealed_to_runner(db, vault_key):
+    from shared_memory import vault
+    di.request_connection(db, OWNER, "mail:other", IMAP_CONN)
+    di.activate_connection(db, "admin-ui:tom", "mail:other", secret="s3cret-value")
+    stored = db.di_scopes.find_one({"_id": "mail:other"})
+    assert "s3cret-value" not in json.dumps(stored, default=str)
+    assert "s3cret-value" not in json.dumps(di.scopes_for(db, OWNER, False)) + json.dumps(di.connections_admin(db))
+    di.create_task(db, OWNER, False, {"name": "t", "scope": "mail:other", "instructions": "x", "output_schema": SCHEMA})
+    runner, priv = _runner_with_key(db)
+    claim = di.claim_run(db, runner)
+    sealed = claim["scope"]["secret_sealed"]
+    assert "s3cret-value" not in json.dumps(sealed)
+    assert vault.open_sealed(sealed, priv) == "s3cret-value"
+
+
+def test_revoke_stops_claims_and_destroys_secret(db, vault_key):
+    di.request_connection(db, OWNER, "mail:other", IMAP_CONN)
+    di.activate_connection(db, "admin-ui:tom", "mail:other", secret="pw")
+    di.create_task(db, OWNER, False, {"name": "t", "scope": "mail:other", "instructions": "x", "output_schema": SCHEMA})
+    runner, _ = _runner_with_key(db)
+    out = di.revoke_connection(db, "admin-ui:tom", "mail:other")
+    assert out["queued_runs_cancelled"] == 1
+    assert "secret_enc" not in db.di_scopes.find_one({"_id": "mail:other"})
+    assert di.claim_run(db, runner) == {}
+    kinds = [a["kind"] for a in di.connection_audit(db)]
+    assert {"connection_request", "connection_activate", "connection_revoke"} <= set(kinds)
+
+
+def test_rotation_replaces_secret(db, vault_key):
+    from shared_memory import vault
+    di.request_connection(db, OWNER, "mail:other", IMAP_CONN)
+    di.activate_connection(db, "admin-ui:tom", "mail:other", secret="old")
+    di.activate_connection(db, "admin-ui:tom", "mail:other", secret="new")
+    assert vault.decrypt(db.di_scopes.find_one({"_id": "mail:other"})["secret_enc"]) == "new"
+    assert any(a["kind"] == "connection_rotate" for a in di.connection_audit(db))
+
+
+def test_request_validation(db):
+    assert "type" in di.request_connection(db, OWNER, "x:y", {"type": "ftp"})["error"]
+    assert "needs" in di.request_connection(db, OWNER, "x:y", {"type": "imap", "params": {"host": "h"}})["error"]
+    assert "oauth" in di.request_connection(db, OWNER, "x:g", {"type": "gmail", "params": {"mailbox": "a@b"},
+                                                               "secret": "password"})["error"]
+    assert "tools_allowed" in di.request_connection(db, OWNER, "x:m", {"type": "mcp", "params": {"url": "http://x"},
+                                                                       "secret": "token"})["error"]
+    ok = di.request_connection(db, OWNER, "x:i", {"type": "inline"})
+    assert ok["status"] == "pending_approval"
+    assert di.activate_connection(db, "admin-ui:tom", "x:i")["status"] == "active"
+
+
+def test_digest_line_uses_template_or_useful_default(db):
+    _scope(db)
+    task = {"name": "t", "owner": OWNER, "output_schema": SCHEMA, "version": 1, "model": "m"}
+    scope = db.di_scopes.find_one({"_id": "mail:support"})
+    meta = {"item_ref": "mcp:offline_frames:284", "frameId": 284}
+    out = {"classification": "other", "confidence": 0.4}
+    line = di.digest_line({"then": "digest", "template": "Frame {item.frameId}: {classification}"}, task, scope, out, meta)
+    assert line == "Frame 284: other"
+    default = di.digest_line({"then": "digest"}, task, scope, out, meta)
+    assert "mcp:offline_frames:284" in default and "classification=other" in default

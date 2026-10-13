@@ -49,7 +49,7 @@ import urllib.error
 import urllib.request
 from html.parser import HTMLParser
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 log = logging.getLogger("junto-runner")
 
 
@@ -66,6 +66,44 @@ def load_config(path):
     with open(os.path.expanduser(cfg["key_file"])) as fh:
         cfg["_key"] = fh.read().strip()
     return cfg
+
+
+def load_keypair(cfg):
+    """The runner's X25519 key: connection secrets arrive sealed to it (contract 1.5.0 §7)."""
+    import base64
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+    path = os.path.expanduser(cfg.get("private_key_file", "~/.config/junto-runner/runner_x25519.key"))
+    if os.path.exists(path):
+        with open(path, "rb") as fh:
+            priv = X25519PrivateKey.from_private_bytes(base64.b64decode(fh.read().strip()))
+    else:
+        priv = X25519PrivateKey.generate()
+        raw = priv.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+                                 serialization.NoEncryption())
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(base64.b64encode(raw))
+    pub = priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    cfg["_private_key"] = priv
+    return base64.b64encode(pub).decode()
+
+
+def open_sealed(cfg, sealed):
+    """Inverse of shared_memory.vault.seal. Plaintext lives only in memory for this run."""
+    if not sealed:
+        return None
+    import base64
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    info = b"junto-delegation-seal-v1"
+    shared = cfg["_private_key"].exchange(X25519PublicKey.from_public_bytes(base64.b64decode(sealed["epk"])))
+    key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(shared)
+    return AESGCM(key).decrypt(base64.b64decode(sealed["nonce"]), base64.b64decode(sealed["ct"]), info).decode()
 
 
 def _post(url, body, headers=None, timeout=60):
@@ -156,6 +194,13 @@ class AdapterError(Exception):
     pass
 
 
+def _secret_or_file(scope_name, secret, cred_ref, local_scope):
+    """Vault secret (sealed to this runner) wins; else the legacy whitelisted credential file."""
+    if secret:
+        return secret.strip()
+    return _read_credential(scope_name, cred_ref, local_scope or {})
+
+
 def _read_credential(scope_name, cred_ref, local_scope):
     allowed = [os.path.realpath(os.path.expanduser(p)) for p in local_scope.get("credential_files", [])]
     real = os.path.realpath(os.path.expanduser(cred_ref or ""))
@@ -171,15 +216,17 @@ class ImapAdapter:
     _GM = re.compile(rb"X-GM-(MSGID|THRID) (\d+)")
     _UID = re.compile(rb"UID (\d+)")
 
-    def __init__(self, scope_name, adapter_config, local_scope):
+    def __init__(self, scope_name, adapter_config, local_scope, secret=None):
         self.scope_name = scope_name
         self.cfg = adapter_config
-        self.local = local_scope
+        self.local = local_scope or {}
+        self.secret = secret
         self.conn = None
 
     def _connect(self):
         if self.conn is None:
-            pw = _read_credential(self.scope_name, self.cfg.get("credential_ref"), self.local)
+            # Google shows app passwords as "abcd efgh ijkl mnop"; the spaces aren't part of it.
+            pw = _secret_or_file(self.scope_name, self.secret, self.cfg.get("credential_ref"), self.local).replace(" ", "")
             conn = imaplib.IMAP4_SSL(self.cfg.get("host", "imap.gmail.com"), int(self.cfg.get("port", 993)),
                                      timeout=60)
             conn.login(self.cfg["user"], pw)
@@ -267,8 +314,9 @@ class ImapAdapter:
 
 
 class FileAdapter:
-    def __init__(self, scope_name, adapter_config, local_scope):
-        self.roots = [os.path.realpath(os.path.expanduser(r)) for r in local_scope.get("file_roots", [])]
+    def __init__(self, scope_name, adapter_config, local_scope, secret=None):
+        roots = (adapter_config or {}).get("roots") or (local_scope or {}).get("file_roots", [])
+        self.roots = [os.path.realpath(os.path.expanduser(r)) for r in roots]
         self.scope_name = scope_name
 
     def _allowed(self, path):
@@ -298,7 +346,7 @@ class FileAdapter:
 
 
 class InlineAdapter:
-    def __init__(self, *_):
+    def __init__(self, *_, **__):
         pass
 
     def fetch(self, params, cursor):
@@ -320,12 +368,12 @@ class McpToolbox:
     token is the runner's OWN read-only credential (never an agent's).
     """
 
-    def __init__(self, scope_name, tools_cfg, local_scope):
+    def __init__(self, scope_name, tools_cfg, local_scope, secret=None):
         self.allowed = set(tools_cfg.get("allowed") or [])
         if tools_cfg.get("source_tool"):
             self.allowed.add(tools_cfg["source_tool"])
         cred = tools_cfg.get("credential_ref")
-        self.token = _read_credential(scope_name, cred, local_scope) if cred else None
+        self.token = _secret_or_file(scope_name, secret, cred, local_scope) if (secret or cred) else None
         self.url = tools_cfg["url"]
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
@@ -418,7 +466,7 @@ class McpSourceAdapter:
     evidence_fields? (top-level counts copied into run evidence), degraded_if? (conditions on the
     raw result that mean the read failed: the run FAILS instead of reporting a false zero)}."""
 
-    def __init__(self, scope_name, adapter_config, local_scope, toolbox=None):
+    def __init__(self, scope_name, adapter_config, local_scope, toolbox=None, secret=None):
         self.toolbox = toolbox
 
     def fetch(self, params, cursor):
@@ -599,16 +647,14 @@ def _structured(cfg, task, messages):
 
 def process(cfg, server, claim):
     run, task, scope = claim["run"], claim["task"], claim["scope"]
-    local_scope = cfg["scopes"].get(scope["name"])
-    if local_scope is None:
-        raise AdapterError(f"scope {scope['name']} is not configured on this runner")
+    local_scope = cfg["scopes"].get(scope["name"]) or {}
+    scope_secret = open_sealed(cfg, scope.get("secret_sealed"))
     toolbox = None
     tool_scope = claim.get("tool_scope")
     if tool_scope:
-        local_tools = cfg["scopes"].get(tool_scope["name"])
-        if local_tools is None:
-            raise AdapterError(f"tool scope {tool_scope['name']} is not configured on this runner")
-        toolbox = McpToolbox(tool_scope["name"], tool_scope["tools"], local_tools)
+        local_tools = cfg["scopes"].get(tool_scope["name"]) or {}
+        toolbox = McpToolbox(tool_scope["name"], tool_scope["tools"], local_tools,
+                             secret=open_sealed(cfg, tool_scope.get("secret_sealed")))
     if scope["adapter"] == "none":
         adapter = InlineAdapter()
         task = dict(task, source_params={"items": [(task.get("source_params") or {}).get("prompt", "Run the task.")]})
@@ -618,7 +664,7 @@ def process(cfg, server, claim):
             raise AdapterError(f"adapter {scope['adapter']} is not implemented on this runner")
         adapter = (adapter_cls(scope["name"], scope.get("adapter_config") or {}, local_scope, toolbox)
                    if adapter_cls is McpSourceAdapter else
-                   adapter_cls(scope["name"], scope.get("adapter_config") or {}, local_scope))
+                   adapter_cls(scope["name"], scope.get("adapter_config") or {}, local_scope, secret=scope_secret))
     use_tools = bool(toolbox and toolbox.model_tools() and task.get("tools"))
 
     def run_model(it):
@@ -684,6 +730,7 @@ def main():
     cfg = load_config(args.config)
     server = Server(cfg)
     reg = server.call("register", {"models": ollama_models(cfg), "scopes_served": sorted(cfg["scopes"]),
+                                   "adapters": sorted(ADAPTERS) + ["none"], "public_key": load_keypair(cfg),
                                    "version": VERSION, "host": socket.gethostname()})
     if reg.get("error"):
         log.error("register failed: %s", reg)

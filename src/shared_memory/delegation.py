@@ -49,7 +49,9 @@ MIN_EVERY_SECONDS = 300
 DEFAULT_PAUSE_AFTER_FAILURES = 3
 DEFAULT_DIGEST_AT = "07:00"
 
-ADAPTERS = {"imap", "gmail_api", "file", "inline", "mcp", "none"}
+ADAPTERS = {"imap", "gmail", "gmail_api", "file", "inline", "mcp", "none"}
+SECRET_KINDS = {"none", "password", "token", "oauth"}
+ACTIVE = (None, "active")  # pre-1.5 scopes have no status and count as active
 TOOL_PROVIDERS = {"mcp"}
 MAX_TOOLS = 30
 DEFAULT_MAX_TOOL_CALLS = 8
@@ -259,6 +261,10 @@ def validate_task_fields(fields: Dict[str, Any], scope: Dict[str, Any]) -> List[
                 errors.append(f"routes[{i}].if: needs field + op in {sorted(ROUTE_OPS)}")
             elif not _route_field_ok(cond["field"], props):
                 errors.append(f"routes[{i}].if.field '{cond['field']}': not in output_schema (or item.<meta>)")
+        if r.get("template") and action != "notify":
+            for ph in _PLACEHOLDER_RE.findall(r.get("template") or ""):
+                if not _route_field_ok(ph, props):
+                    errors.append(f"routes[{i}].template: unknown field {{{ph}}}")
         if action == "notify":
             to = r.get("to") or ""
             p, a = _split_ident(to)
@@ -324,7 +330,7 @@ def validate_task_fields(fields: Dict[str, Any], scope: Dict[str, Any]) -> List[
 # ── scopes ─────────────────────────────────────────────────────────────────
 
 SCOPE_FIELDS = {"adapter", "adapter_config", "tools", "runner_hosts_allowed", "grants", "content_visible_to",
-                "restricted", "approval", "notes"}
+                "restricted", "approval", "notes", "secret_kind"}
 
 
 def define_scope(db, actor: str, name: str, fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -378,10 +384,169 @@ def define_scope(db, actor: str, name: str, fields: Dict[str, Any]) -> Dict[str,
 def scope_public(scope: Dict[str, Any]) -> Dict[str, Any]:
     """Scope as shown to agents: no adapter_config (holds credential paths)."""
     out = {k: scope.get(k) for k in ("adapter", "runner_hosts_allowed", "grants", "content_visible_to",
-                                      "restricted", "approval", "notes")} | {"name": scope["_id"]}
+                                      "restricted", "approval", "notes", "secret_kind")} | {"name": scope["_id"]}
+    out["type"] = scope.get("adapter")
+    out["status"] = scope.get("status") or "active"
+    out["params"] = {k: v for k, v in (scope.get("adapter_config") or {}).items() if k != "credential_ref"}
+    out["secret_set"] = bool(scope.get("secret_enc"))
+    out["secret_set_at"] = scope.get("secret_set_at")
+    out["secret_set_by"] = scope.get("secret_set_by")
+    out["requested_by"] = scope.get("requested_by")
     if scope.get("tools"):
         out["tools_allowed"] = (scope["tools"] or {}).get("allowed") or []
-    return out
+    return _jsonable(out)
+
+
+# ── connections (1.5.0): agent-requested, Tom-activated, secrets in the vault ──
+
+CONNECTION_PARAM_KEYS = {
+    "imap": {"host", "port", "user"},
+    "gmail": {"mailbox"},
+    "mcp": {"url"},
+    "file": {"roots"},
+    "inline": set(),
+}
+
+
+def _audit(db, actor: str, kind: str, target: str, detail: Optional[Dict[str, Any]] = None) -> None:
+    db.di_audit.insert_one({"at": _now(), "actor": actor, "kind": kind, "target": target, "detail": detail or {}})
+
+
+def request_connection(db, who: str, name: str, conn: Dict[str, Any]) -> Dict[str, Any]:
+    """Any agent may request a typed connection; it stays inactive until Tom activates it."""
+    if not name or not re.match(r"^[a-z0-9][a-z0-9:_.-]{1,63}$", name):
+        return {"error": "connection name: lowercase letters, digits, ':_.-' (2-64 chars)"}
+    if db.di_scopes.find_one({"_id": name}):
+        return {"error": f"connection '{name}' already exists; use it as scope, or pick another name"}
+    if not isinstance(conn, dict):
+        return {"error": "connection: {type, params, secret, tools_allowed?, notes?}"}
+    ctype = conn.get("type")
+    if ctype not in CONNECTION_PARAM_KEYS:
+        return {"error": f"connection.type: one of {sorted(CONNECTION_PARAM_KEYS)}"}
+    params = conn.get("params") or {}
+    if not isinstance(params, dict):
+        return {"error": "connection.params: an object"}
+    unknown = set(params) - CONNECTION_PARAM_KEYS[ctype]
+    missing = CONNECTION_PARAM_KEYS[ctype] - set(params) - ({"port"} if ctype == "imap" else set())
+    if unknown or missing:
+        return {"error": f"connection.params for {ctype}: needs {sorted(CONNECTION_PARAM_KEYS[ctype])}",
+                "unknown": sorted(unknown), "missing": sorted(missing)}
+    secret_kind = conn.get("secret", "none" if ctype in ("file", "inline") else "password")
+    if secret_kind not in SECRET_KINDS:
+        return {"error": f"connection.secret: one of {sorted(SECRET_KINDS)}"}
+    if ctype == "gmail" and secret_kind != "oauth":
+        return {"error": "gmail connections use secret 'oauth' (Tom's Google sign-in, gmail.readonly)"}
+    doc = {
+        "_id": name, "adapter": ctype, "adapter_config": params, "secret_kind": secret_kind,
+        "runner_hosts_allowed": ["sage"], "grants": [who], "content_visible_to": [who],
+        "restricted": False, "approval": "none", "notes": str(conn.get("notes") or "")[:1000],
+        "status": "pending_secret" if secret_kind != "none" else "pending_approval",
+        "requested_by": who, "created_at": _now(), "created_by": who,
+    }
+    if ctype == "mcp":
+        allowed = conn.get("tools_allowed") or []
+        if not isinstance(allowed, list) or not all(isinstance(t, str) for t in allowed) or not allowed:
+            return {"error": "mcp connections need tools_allowed: the tool names you need"}
+        doc["tools"] = {"provider": "mcp", "url": params["url"], "allowed": allowed}
+    db.di_scopes.insert_one(doc)
+    _audit(db, who, "connection_request", name, {"type": ctype, "params": params, "secret_kind": secret_kind})
+    return {"status": doc["status"], "connection": name,
+            "note": "Tom activates it in /admin → Connections (secret or approval); tasks on it wait until then"}
+
+
+def activate_connection(db, actor: str, name: str, secret: Optional[str] = None,
+                        widen: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Owner/admin only (enforced by callers). Supplying the secret IS the approval; a new
+    secret replaces the old one (rotation: the next claim seals the new value)."""
+    from shared_memory import vault
+
+    scope = db.di_scopes.find_one({"_id": name})
+    if not scope:
+        return {"error": f"connection '{name}' not found"}
+    update: Dict[str, Any] = {"status": "active", "activated_at": _now(), "activated_by": actor}
+    kind = scope.get("secret_kind") or "none"
+    if kind != "none":
+        if secret is None and not scope.get("secret_enc"):
+            return {"error": f"connection '{name}' needs a {kind} secret"}
+        if secret is not None:
+            try:
+                update["secret_enc"] = vault.encrypt(secret)
+            except vault.VaultError as e:
+                return {"error": str(e)}
+            update["secret_set_at"] = _now()
+            update["secret_set_by"] = actor
+    elif secret:
+        return {"error": f"connection '{name}' takes no secret"}
+    if widen:
+        allowed_keys = {"grants", "content_visible_to", "runner_hosts_allowed", "restricted", "approval", "notes"}
+        bad = set(widen) - allowed_keys
+        if bad:
+            return {"error": f"cannot change {sorted(bad)} here"}
+        for key in ("grants", "content_visible_to", "runner_hosts_allowed"):
+            if key in widen and (not isinstance(widen[key], list) or not all(isinstance(v, str) for v in widen[key])):
+                return {"error": f"{key}: list of strings"}
+        update.update(widen)
+    db.di_scopes.update_one({"_id": name}, {"$set": update, "$unset": {"revoked_at": "", "revoked_by": ""}})
+    _audit(db, actor, "connection_rotate" if (secret and scope.get("secret_enc")) else "connection_activate", name,
+           {"secret_changed": secret is not None, "widen": widen or {}})
+    started = _wake_tasks(db, name)
+    return {"status": "active", "connection": name, "tasks_started": started}
+
+
+def revoke_connection(db, actor: str, name: str) -> Dict[str, Any]:
+    """Stops new claims immediately and destroys the stored secret; queued runs are cancelled."""
+    scope = db.di_scopes.find_one({"_id": name})
+    if not scope:
+        return {"error": f"connection '{name}' not found"}
+    now = _now()
+    db.di_scopes.update_one({"_id": name}, {"$set": {"status": "revoked", "revoked_at": now, "revoked_by": actor},
+                                            "$unset": {"secret_enc": ""}})
+    cancelled = db.di_runs.update_many({"scope": name, "status": "queued"},
+                                       {"$set": {"status": "cancelled", "finished_at": now,
+                                                 "error": "connection revoked"}}).modified_count
+    _audit(db, actor, "connection_revoke", name, {"queued_runs_cancelled": cancelled})
+    return {"status": "revoked", "connection": name, "queued_runs_cancelled": cancelled}
+
+
+def _scope_active(db, name: Optional[str]) -> bool:
+    if not name:
+        return True
+    doc = db.di_scopes.find_one({"_id": name}, {"status": 1})
+    return bool(doc) and doc.get("status") in ACTIVE
+
+
+def _wake_tasks(db, name: str) -> int:
+    """Start tasks that were waiting for this connection (and whose other connection is active)."""
+    started = 0
+    now = _now()
+    for task in db.di_tasks.find({"status": "awaiting_connection", "deleted": {"$ne": True},
+                                  "$or": [{"scope": name}, {"tool_scope": name}]}):
+        if not (_scope_active(db, task.get("scope")) and _scope_active(db, task.get("tool_scope"))):
+            continue
+        update = {"status": "active", "next_run_at": now if task.get("schedule") else None}
+        db.di_tasks.update_one({"_id": task["_id"]}, {"$set": update})
+        task.update(update)
+        if not task.get("schedule"):
+            queue_run(db, task, reason="one-off (connection activated)")
+        started += 1
+    return started
+
+
+def connections_admin(db) -> List[Dict[str, Any]]:
+    rows = []
+    for s in db.di_scopes.find().sort("_id", 1):
+        row = scope_public(s)
+        row["tasks"] = db.di_tasks.count_documents({"deleted": {"$ne": True},
+                                                    "$or": [{"scope": s["_id"]}, {"tool_scope": s["_id"]}]})
+        row["legacy_credential_file"] = bool((s.get("adapter_config") or {}).get("credential_ref")
+                                             or (s.get("tools") or {}).get("credential_ref"))
+        rows.append(row)
+    return rows
+
+
+def connection_audit(db, limit: int = 100) -> List[Dict[str, Any]]:
+    rows = db.di_audit.find({"kind": {"$regex": "^(connection_|scope|runner_key)"}}).sort("at", -1).limit(limit)
+    return [_jsonable({k: v for k, v in r.items() if k not in ("_id", "before", "after")}) for r in rows]
 
 
 def scopes_for(db, who: Optional[str], admin: bool) -> List[Dict[str, Any]]:
@@ -438,10 +603,19 @@ def create_task(db, who: str, admin: bool, fields: Dict[str, Any]) -> Dict[str, 
     if not name or len(name) > 80:
         return {"error": "name: required, max 80 chars"}
     scope = db.di_scopes.find_one({"_id": fields.get("scope")})
+    conn_result = None
+    if not scope and fields.get("connection"):
+        conn_result = request_connection(db, who, fields.get("scope") or "", fields["connection"])
+        if conn_result.get("error"):
+            return {"error": "connection request failed", "details": [conn_result["error"]]}
+        scope = db.di_scopes.find_one({"_id": fields.get("scope")})
     if not scope:
-        return {"error": f"scope '{fields.get('scope')}' not found; memory_runners(action='scopes') lists yours"}
+        return {"error": f"scope '{fields.get('scope')}' not found; memory_runners(action='scopes') lists yours, "
+                         "or pass connection={type, params, secret} to request a new one"}
     if not admin and who not in (scope.get("grants") or []):
         return {"error": f"scope '{scope['_id']}' is not granted to {who}"}
+    if scope.get("status") == "revoked":
+        return {"error": f"connection '{scope['_id']}' is revoked"}
     if db.di_tasks.count_documents({"owner": who, "deleted": {"$ne": True}}) >= MAX_TASKS_PER_AGENT:
         return {"error": f"task cap reached ({MAX_TASKS_PER_AGENT}); delete one first"}
     if db.di_tasks.find_one({"owner": who, "name": name, "deleted": {"$ne": True}}):
@@ -467,25 +641,31 @@ def create_task(db, who: str, admin: bool, fields: Dict[str, Any]) -> Dict[str, 
     now = _now()
     task_id = f"task_{uuid.uuid4().hex[:12]}"
     needs_approval = bool(defn["schedule"]) and scope.get("approval") == "first_run"
+    waiting = not (_scope_active(db, scope["_id"]) and _scope_active(db, defn.get("tool_scope")))
     task = {
         "_id": task_id, "name": name, "scope": scope["_id"], "owner": who, **defn,
-        "version": 1, "status": "awaiting_approval" if needs_approval else "active",
+        "version": 1,
+        "status": "awaiting_connection" if waiting else ("awaiting_approval" if needs_approval else "active"),
         "cursor": None, "consecutive_failures": 0,
         "next_run_at": None, "last_run_at": None, "last_success_at": None,
         "last_canary_local_date": None, "digest_next_at": None,
         "created_at": now, "updated_at": now, "created_by": who, "updated_by": who,
     }
     if defn["schedule"]:
-        task["next_run_at"] = now if not needs_approval else None
+        task["next_run_at"] = now if not (needs_approval or waiting) else None
         task["digest_next_at"] = _digest_due_after(defn["schedule"].get("digest_at") or DEFAULT_DIGEST_AT,
                                                    defn["schedule"].get("timezone"), now)
     db.di_tasks.insert_one(task)
     _write_version(db, task, who, sorted(defn))
     out = {"status": "created", "task_id": task_id, "version": 1, "task_status": task["status"]}
     if not defn["schedule"] or fields.get("run_now"):
-        if not needs_approval:
+        if not needs_approval and not waiting:
             out["run_id"] = queue_run(db, task, reason="one-off" if not defn["schedule"] else "run_now")
-    if needs_approval:
+    if waiting:
+        out["note"] = "waiting for Tom to activate the connection in /admin → Connections; starts automatically"
+        if conn_result:
+            out["connection_status"] = conn_result["status"]
+    elif needs_approval:
         out["note"] = "scope requires Tom's approval before the first scheduled run"
     return out
 
@@ -571,6 +751,8 @@ def set_task_status(db, task_id: str, who: str, admin: bool, action: str) -> Dic
     if action in ("resume", "approve"):
         if task["status"] == "awaiting_approval" and action == "resume":
             return {"error": "task is awaiting Tom's approval"}
+        if task["status"] == "awaiting_connection":
+            return {"error": "task is waiting for its connection to be activated"}
         update = {"status": "active", "consecutive_failures": 0,
                   "next_run_at": now if task.get("schedule") else None}
     elif action == "pause":
@@ -673,11 +855,16 @@ def authenticate_runner(db, raw_key: Optional[str]) -> Optional[Dict[str, Any]]:
 def register_runner(db, key_doc: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
     models = [m for m in (body.get("models") or []) if isinstance(m, str)][:200]
     scopes = [s for s in (body.get("scopes_served") or []) if isinstance(s, str)][:100]
+    adapters = [a for a in (body.get("adapters") or []) if a in ADAPTERS]
+    pub = body.get("public_key")
+    from shared_memory import vault
+    if pub is not None and not vault.valid_public_key(pub):
+        return {"error": "public_key: base64 raw X25519 public key"}
     now = _now()
     db.di_runners.update_one(
         {"_id": key_doc["_id"]},
-        {"$set": {"host": key_doc.get("host"), "models": models, "scopes_served": scopes,
-                  "version": str(body.get("version") or "")[:40], "last_heartbeat": now},
+        {"$set": {"host": key_doc.get("host"), "models": models, "scopes_served": scopes, "adapters": adapters,
+                  "public_key": pub, "version": str(body.get("version") or "")[:40], "last_heartbeat": now},
          "$setOnInsert": {"registered_at": now}},
         upsert=True,
     )
@@ -701,8 +888,13 @@ def heartbeat_runner(db, key_doc: Dict[str, Any], body: Dict[str, Any]) -> Dict[
 def claim_run(db, key_doc: Dict[str, Any]) -> Dict[str, Any]:
     runner = db.di_runners.find_one({"_id": key_doc["_id"]}) or {}
     host = key_doc.get("host")
-    served = runner.get("scopes_served") or []
-    allowed = [s["_id"] for s in db.di_scopes.find({"_id": {"$in": served}, "runner_hosts_allowed": host})]
+    served = set(runner.get("scopes_served") or [])
+    adapters = set(runner.get("adapters") or [])
+    allowed = []
+    for s in db.di_scopes.find({"runner_hosts_allowed": host, "status": {"$in": list(ACTIVE)}}):
+        legacy = bool((s.get("adapter_config") or {}).get("credential_ref"))
+        if s["_id"] in served or (not legacy and s.get("adapter") in adapters):
+            allowed.append(s["_id"])
     if not allowed:
         return {}
     now = _now()
@@ -717,6 +909,17 @@ def claim_run(db, key_doc: Dict[str, Any]) -> Dict[str, Any]:
         return {}
     task = db.di_tasks.find_one({"_id": run["task_id"]}) or {}
     scope = db.di_scopes.find_one({"_id": run["scope"]}) or {}
+    tname = task.get("tool_scope")
+    if tname and not _scope_active(db, tname):
+        db.di_runs.update_one({"_id": run["_id"]}, {"$set": {"status": "failed", "finished_at": now,
+                                                             "error": f"tool connection {tname} is not active"}})
+        return {}
+    try:
+        scope_secret = _seal_for(scope, runner)
+    except Exception as e:
+        db.di_runs.update_one({"_id": run["_id"]}, {"$set": {"status": "failed", "finished_at": now,
+                                                             "error": f"secret unavailable: {e}"}})
+        return {}
     tool_scope = None
     if task.get("tools") or scope.get("adapter") == "mcp":
         tname = task.get("tool_scope") or scope.get("_id")
@@ -727,7 +930,7 @@ def claim_run(db, key_doc: Dict[str, Any]) -> Dict[str, Any]:
         source_tool = (task.get("source_params") or {}).get("tool") if scope.get("adapter") == "mcp" else None
         if source_tool and source_tool in allowed:
             tcfg["source_tool"] = source_tool
-        tool_scope = {"name": tname, "tools": tcfg}
+        tool_scope = {"name": tname, "tools": tcfg, "secret_sealed": _seal_for(tdoc, runner)}
     return _jsonable({
         "run": {"run_id": run["_id"], "task_id": run["task_id"], "task_version": run["task_version"],
                 "canary_due": run.get("canary_due", False)},
@@ -735,9 +938,19 @@ def claim_run(db, key_doc: Dict[str, Any]) -> Dict[str, Any]:
                                           "per_item", "canaries", "expect_items", "tools", "max_tool_calls")},
         "tool_scope": tool_scope,
         "scope": {"name": scope.get("_id"), "adapter": scope.get("adapter"),
-                  "adapter_config": scope.get("adapter_config") or {}},
+                  "adapter_config": scope.get("adapter_config") or {}, "secret_sealed": scope_secret},
         "cursor": task.get("cursor"),
     })
+
+
+def _seal_for(scope: Dict[str, Any], runner: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The scope's secret sealed to this runner, or None when the scope has no vault secret."""
+    if not scope or not scope.get("secret_enc"):
+        return None
+    from shared_memory import vault
+    if not runner.get("public_key"):
+        raise RuntimeError("runner registered no public_key; upgrade the runner")
+    return vault.seal(vault.decrypt(scope["secret_enc"]), runner["public_key"])
 
 
 def _fail_task_run(db, run: Dict[str, Any], task: Dict[str, Any], error: str, now: datetime) -> Dict[str, Any]:
@@ -829,19 +1042,34 @@ def visible_payload(output_schema, output, meta, target: str, scope) -> Dict[str
     return {"output": safe, "item": {"item_ref": meta.get("item_ref")}}
 
 
+def _fill(template: str, view: Dict[str, Any]) -> str:
+    def sub(m):
+        field = m.group(1)
+        v = view["item"].get(field[5:]) if field.startswith("item.") else _lookup(field, view["output"], {})
+        return "" if v is None else (json.dumps(v) if isinstance(v, (dict, list)) else str(v))
+    return _PLACEHOLDER_RE.sub(sub, template)
+
+
+def digest_line(route, task, scope, output, meta) -> str:
+    """One digest bullet: the route's template if given, else item ref + subject/from + visible scalar fields."""
+    view = visible_payload(task.get("output_schema"), output, meta, task.get("owner"), scope)
+    if route.get("template"):
+        return _fill(route["template"], view)[:400]
+    item = view["item"]
+    head = [str(item.get("item_ref") or "")]
+    for k in ("date", "from", "subject"):
+        if item.get(k):
+            head.append(str(item[k])[:120])
+    fields = [f"{k}={v}" for k, v in (view["output"] or {}).items() if isinstance(v, (str, int, float, bool))]
+    return " | ".join(head + fields)[:400]
+
+
 def render_notice(route, task, scope, output, meta) -> str:
     target = route.get("to")
     view = visible_payload(task.get("output_schema"), output, meta, target, scope)
     template = route.get("template")
     if template:
-        def sub(m):
-            field = m.group(1)
-            if field.startswith("item."):
-                v = view["item"].get(field[5:])
-            else:
-                v = _lookup(field, view["output"], {})
-            return "" if v is None else (json.dumps(v) if isinstance(v, (dict, list)) else str(v))
-        text = _PLACEHOLDER_RE.sub(sub, template)
+        text = _fill(template, view)
     else:
         lines = [f"{k}: {json.dumps(v) if isinstance(v, (dict, list)) else v}" for k, v in view["item"].items()
                  if v not in (None, "")]
@@ -929,7 +1157,8 @@ def complete_run(db, key_doc: Dict[str, Any], body: Dict[str, Any]) -> Tuple[Dic
         action = route["then"]
         route_counts[action] = route_counts.get(action, 0) + 1
         stored.append({"item_ref": it.get("item_ref"), "meta": meta, "output": out, "route": action,
-                       "to": route.get("to"), "tool_calls": (it.get("tool_calls") or [])[:MAX_TOOL_CALLS]})
+                       "to": route.get("to"), "tool_calls": (it.get("tool_calls") or [])[:MAX_TOOL_CALLS],
+                       "digest_line": digest_line(route, task, scope, out, meta) if action == "digest" else None})
         if action == "notify":
             notices.append({
                 "to": [route["to"]], "category": route.get("category", "info"),
@@ -1014,11 +1243,12 @@ def digest_due(db, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
             for k, v in (r.get("route_counts") or {}).items():
                 counts[k] = counts.get(k, 0) + v
             for it in r.get("items") or []:
-                if it.get("route") == "digest" and len(digest_lines) < 60:
-                    m, o = it.get("meta") or {}, it.get("output") or {}
-                    digest_lines.append("- " + " | ".join(str(x) for x in (
-                        m.get("date"), m.get("from"), m.get("subject"), o.get("classification"),
-                        o.get("confidence")) if x not in (None, "")))
+                if it.get("route") == "digest" and len(digest_lines) < 100:
+                    line = it.get("digest_line")
+                    if not line:  # runs recorded before digest_line existed
+                        line = digest_line({}, task, db.di_scopes.find_one({"_id": task["scope"]}) or {},
+                                           it.get("output") or {}, it.get("meta") or {})
+                    digest_lines.append("- " + line)
         canaries = [r.get("canary") for r in done if (r.get("canary") or {}).get("ran")]
         canary_txt = ("none ran" if not canaries else
                       "; ".join(f"{c['passed']}/{c['expected']} passed" for c in canaries))
