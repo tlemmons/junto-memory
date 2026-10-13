@@ -43,6 +43,10 @@ REPORTER = "ctx-reporter-" + socket.gethostname().split(".")[0]
 
 PRESENCE_SECONDS = 600          # any tmux keypress on the session this recently = human here
 BANNER = "I AM PARKED"
+# The server's idle-park nudge as rendered in the pane. A reset doc exists only
+# when end_session answered that nudge, so the notice anchors the park even
+# when the agent paraphrases away the banner (nimbusSupport, msg_03714e33f488).
+NUDGE_MARKER = "[SYSTEM NOTICE] Idle"
 PROMPT = "\u276f"               # ❯ — CC input-line / submitted-prompt glyph
 BUSY_MARKERS = ("esc to interrupt", "queued messages")
 DIALOG_MARKERS = ("Do you want", "No, exit")
@@ -140,6 +144,10 @@ def _after_prompt(line):
     return line.split(PROMPT, 1)[1].replace("\u00a0", " ").strip()
 
 
+def _is_anchor(line):
+    return BANNER in line or NUDGE_MARKER in line
+
+
 def analyze(lines):
     """Gate facts from a pane capture. Returns (ok, reason)."""
     prompt_idx = [i for i, l in enumerate(lines) if l.lstrip().startswith(PROMPT)]
@@ -149,10 +157,10 @@ def analyze(lines):
     if _after_prompt(lines[input_idx]):
         return False, "input not empty"
     last_user = max([i for i in prompt_idx[:-1] if _after_prompt(lines[i])] or [-1])
-    banners = [i for i, l in enumerate(lines[:input_idx]) if BANNER in l]
-    if not banners or banners[-1] < last_user:
-        return False, "no park banner after last prompt"
-    tail = lines[banners[-1]:]
+    anchors = [i for i, l in enumerate(lines[:input_idx]) if _is_anchor(l)]
+    if not anchors or anchors[-1] < last_user:
+        return False, "no park banner or nudge after last prompt"
+    tail = lines[anchors[-1]:]
     text = "\n".join(tail)
     if any(m in text for m in BUSY_MARKERS):
         return False, "busy"
@@ -210,8 +218,8 @@ def attempt_reset(reset):
     send(pane, key="Enter")
     time.sleep(2.5)
     after = capture(pane)
-    if any(BANNER in l for l in after):
-        return "failed", "banner still on screen after /clear (pane %s)" % pane
+    if any(_is_anchor(l) for l in after):
+        return "failed", "park banner/nudge still on screen after /clear (pane %s)" % pane
     inputs = [l for l in after if l.lstrip().startswith(PROMPT)]
     if not inputs or _after_prompt(inputs[-1]):
         return "failed", "input line not empty/absent after /clear (pane %s)" % pane
