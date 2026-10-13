@@ -387,3 +387,91 @@ def register_connection_routes(mcp, get_mongo) -> None:
     @mcp.custom_route("/admin/api/connections/revoke", methods=["POST"])
     async def admin_connection_revoke(request):
         return await _write(request, lambda db, actor, b: di.revoke_connection(db, actor, b.get("name") or ""))
+
+
+def register_task_routes(mcp, get_mongo) -> None:
+    """Local-worker Tasks / Runs / Runners (interface:delegated-inference-v0).
+
+    GET  /admin/api/tasks                 all tasks
+    GET  /admin/api/runs?task_id=&limit=  recent runs (all tasks when no task_id)
+    GET  /admin/api/runners               runners + last heartbeat
+    POST /admin/api/tasks/action          {task_id, action: pause|resume|run_now|approve}  (owner key)
+    """
+    from starlette.responses import JSONResponse
+
+    from shared_memory import delegation as di
+
+    def _db():
+        return get_mongo()
+
+    @mcp.custom_route("/admin/api/tasks", methods=["GET"])
+    async def admin_tasks(request):
+        blocked = _lan_only(request)
+        if blocked:
+            return blocked
+        db = _db()
+        if db is None:
+            return JSONResponse({"error": "MongoDB unavailable"}, status_code=503)
+        return JSONResponse({"tasks": di.list_tasks(db, "", True, all_tasks=True)})
+
+    @mcp.custom_route("/admin/api/runs", methods=["GET"])
+    async def admin_runs(request):
+        blocked = _lan_only(request)
+        if blocked:
+            return blocked
+        db = _db()
+        if db is None:
+            return JSONResponse({"error": "MongoDB unavailable"}, status_code=503)
+        try:
+            limit = max(1, min(int(request.query_params.get("limit") or 50), 200))
+        except ValueError:
+            limit = 50
+        tid = request.query_params.get("task_id")
+        query = {"task_id": tid} if tid else {}
+        names = {t["_id"]: t.get("name") for t in db.di_tasks.find({}, {"name": 1})}
+        rows = []
+        for r in db.di_runs.find(query).sort("queued_at", -1).limit(limit):
+            row = di.run_public(r)
+            row["task_name"] = names.get(r.get("task_id"))
+            rows.append(row)
+        return JSONResponse({"runs": rows})
+
+    @mcp.custom_route("/admin/api/runners", methods=["GET"])
+    async def admin_runners(request):
+        blocked = _lan_only(request)
+        if blocked:
+            return blocked
+        db = _db()
+        if db is None:
+            return JSONResponse({"error": "MongoDB unavailable"}, status_code=503)
+        rows = [_jsonable_doc({k: v for k, v in r.items() if k != "public_key"} | {"runner_id": r["_id"]})
+                for r in db.di_runners.find().sort("_id", 1)]
+        return JSONResponse({"runners": rows})
+
+    @mcp.custom_route("/admin/api/tasks/action", methods=["POST"])
+    async def admin_task_action(request):
+        a = _auth(request)
+        if not a["ok"]:
+            return JSONResponse({"error": a["error"]}, status_code=a["status"])
+        db = _db()
+        if db is None:
+            return JSONResponse({"error": "MongoDB unavailable"}, status_code=503)
+        try:
+            body = json.loads(await request.body() or b"{}")
+        except ValueError:
+            return JSONResponse({"error": "body must be JSON"}, status_code=400)
+        tid, action = body.get("task_id") or "", body.get("action")
+        actor = f"admin-ui:{a['name']}"
+        if action == "run_now":
+            task = di.get_task(db, tid)
+            if not task:
+                return JSONResponse({"error": "task not found"}, status_code=400)
+            return JSONResponse({"status": "queued", "run_id": di.queue_run(db, task, reason=f"run_now by {actor}")})
+        if action not in ("pause", "resume", "approve"):
+            return JSONResponse({"error": "action: pause|resume|run_now|approve"}, status_code=400)
+        result = di.set_task_status(db, tid, actor, True, action)
+        return JSONResponse(result, status_code=400 if result.get("error") else 200)
+
+
+def _jsonable_doc(doc):
+    return json.loads(json.dumps(doc, default=_jsonable))

@@ -541,6 +541,10 @@ async def memory_start_session(
     # Generate session ID
     session_id = f"{project}_{claude_instance}_{uuid.uuid4().hex[:8]}"
 
+    # Ephemeral identities (per-run reporters): the new session replaces the old ones.
+    from shared_memory.helpers import replace_ephemeral_sessions
+    replace_ephemeral_sessions(project, claude_instance)
+
     # Register session
     active_sessions[session_id] = {
         "project": project,

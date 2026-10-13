@@ -497,6 +497,47 @@ def _sids_with_live_subscription() -> set:
     return subscribed
 
 
+# Identities that open a throwaway session per run (the per-box context reporters run
+# every ~40-60 s and never end their sessions). A new session for one of these
+# replaces its previous ones, so they don't pile up for the 6 h idle window.
+EPHEMERAL_INSTANCE_PREFIXES = ("ctx-reporter-",)
+
+
+def drop_session(sid: str) -> None:
+    """Remove one session: release its locks, MCP binding and inbox subscriptions."""
+    release_session_locks(sid)
+    # Drop MCP-session binding + inbox subscriptions (Phase C2)
+    try:
+        from shared_memory.state import mcp_session_to_app
+        from shared_memory.tools.messaging import inbox_subscriptions
+        dropped = [k for k, v in mcp_session_to_app.items() if v == sid]
+        for k in dropped:
+            mcp_session_to_app.pop(k, None)
+        if dropped:
+            for uri in list(inbox_subscriptions.keys()):
+                bucket = inbox_subscriptions.get(uri)
+                if bucket is None:
+                    continue
+                for s in dropped:
+                    bucket.discard(s)
+                if not bucket:
+                    inbox_subscriptions.pop(uri, None)
+    except Exception:
+        pass
+    active_sessions.pop(sid, None)
+
+
+def replace_ephemeral_sessions(project: str, claude_instance: str) -> int:
+    """Drop earlier sessions of an ephemeral identity before it registers a new one."""
+    if not claude_instance or not claude_instance.startswith(EPHEMERAL_INSTANCE_PREFIXES):
+        return 0
+    old = [sid for sid, info in active_sessions.items()
+           if info.get("project") == project and info.get("claude_instance") == claude_instance]
+    for sid in old:
+        drop_session(sid)
+    return len(old)
+
+
 def cleanup_stale_sessions():
     """Expire stale sessions on two tiers (backlog_940b9f9c66e1):
 
@@ -527,27 +568,7 @@ def cleanup_stale_sessions():
                 and sid not in subscribed_sids):
             to_remove.append(sid)
     for sid in to_remove:
-        # Release any locks held by this session
-        release_session_locks(sid)
-        # Drop MCP-session binding + inbox subscriptions (Phase C2)
-        try:
-            from shared_memory.state import mcp_session_to_app
-            from shared_memory.tools.messaging import inbox_subscriptions
-            dropped = [k for k, v in mcp_session_to_app.items() if v == sid]
-            for k in dropped:
-                mcp_session_to_app.pop(k, None)
-            if dropped:
-                for uri in list(inbox_subscriptions.keys()):
-                    bucket = inbox_subscriptions.get(uri)
-                    if bucket is None:
-                        continue
-                    for s in dropped:
-                        bucket.discard(s)
-                    if not bucket:
-                        inbox_subscriptions.pop(uri, None)
-        except Exception:
-            pass
-        del active_sessions[sid]
+        drop_session(sid)
     if to_remove:
         print(f"[MCP] Auto-expired {len(to_remove)} stale sessions "
               f"(>{SESSION_TTL_DAYS}d TTL or >{SESSION_IDLE_HOURS}h idle with no live subscription)")

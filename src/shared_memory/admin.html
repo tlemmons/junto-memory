@@ -64,6 +64,7 @@
     <button data-tab="settings">Settings</button>
     <button data-tab="agents">Agents</button>
     <button data-tab="alerts">Alerts</button>
+    <button data-tab="tasks">Local tasks</button>
     <button data-tab="connections">Connections</button>
     <button data-tab="changes">Change log</button>
   </nav>
@@ -93,6 +94,12 @@
   <section id="tab-alerts" class="hidden">
     <div class="toolbar"><label><input type="checkbox" id="all-alerts"> include acknowledged</label></div>
     <div class="panel"><h2>Alerts</h2><div class="scroll" id="alerts"></div></div>
+  </section>
+  <section id="tab-tasks" class="hidden">
+    <p class="muted">Tasks agents have handed to local-model workers. Owners edit them with memory_schedule; you can pause, resume, run now, or approve here.</p>
+    <div class="panel"><h2>Tasks</h2><div class="scroll" id="tasks"></div></div>
+    <div class="panel"><h2>Recent runs <span class="muted" id="runs-filter"></span></h2><div class="scroll" id="runs"></div></div>
+    <div class="panel"><h2>Runners</h2><div class="scroll" id="runners"></div></div>
   </section>
   <section id="tab-connections" class="hidden">
     <p class="muted">Data connections for local-model tasks. Agents request them; you activate one by entering its secret (that is the approval) or approving it. Secrets are encrypted in the vault and never shown again. <span id="vault-state"></span></p>
@@ -267,6 +274,49 @@ async function renderChanges() {
   $('changes').innerHTML = html + '</tbody></table>';
 }
 
+let RUN_TASK = null;
+async function renderTasks() {
+  const [t, r, rn] = await Promise.all([api('/admin/api/tasks'), api('/admin/api/runs?limit=60' + (RUN_TASK ? '&task_id=' + encodeURIComponent(RUN_TASK) : '')), api('/admin/api/runners')]);
+  const st = (s) => '<span class="pill ' + (s === 'active' ? 'ok' : (s === 'paused' || s === 'deleted') ? 'bad' : 'warn') + '">' + esc(s) + '</span>';
+  let html = '<table><thead><tr><th>Task</th><th>Owner</th><th>Connection</th><th>Status</th><th>Schedule</th><th>Model</th><th>Last run</th><th>Next run</th><th>Fails</th><th>Action</th></tr></thead><tbody>';
+  for (const x of t.tasks || []) {
+    const sched = x.schedule ? (x.schedule.every ? 'every ' + x.schedule.every : x.schedule.cron) : 'one-off';
+    let act = '<button class="btn" onclick="showRuns(\'' + esc(x.task_id) + '\')">Runs</button> ';
+    if (CAN_WRITE) {
+      act += '<button class="btn" onclick="taskAction(\'' + esc(x.task_id) + '\',\'run_now\')">Run now</button> ';
+      if (x.status === 'active') act += '<button class="btn" onclick="taskAction(\'' + esc(x.task_id) + '\',\'pause\')">Pause</button>';
+      else if (x.status === 'paused') act += '<button class="btn" onclick="taskAction(\'' + esc(x.task_id) + '\',\'resume\')">Resume</button>';
+      else if (x.status === 'awaiting_approval') act += '<button class="btn" onclick="taskAction(\'' + esc(x.task_id) + '\',\'approve\')">Approve</button>';
+    }
+    html += '<tr><td class="k">' + esc(x.name) + '<br><span class="muted">' + esc(x.task_id) + ' v' + esc(x.version) + '</span></td><td>' + esc(x.owner) + '</td><td>' + esc(x.scope) + '</td><td>' + st(x.status) +
+            '</td><td>' + esc(sched) + '</td><td>' + esc(x.model) + '</td><td>' + age(x.last_run_at) + '</td><td>' + (x.next_run_at ? esc(new Date(x.next_run_at + (x.next_run_at.endsWith('Z') ? '' : 'Z')).toLocaleTimeString()) : '—') +
+            '</td><td>' + (x.consecutive_failures ? '<span class="pill bad">' + esc(x.consecutive_failures) + '</span>' : '0') + '</td><td>' + act + '</td></tr>';
+  }
+  $('tasks').innerHTML = html + '</tbody></table>';
+  $('runs-filter').innerHTML = RUN_TASK ? '(task ' + esc(RUN_TASK) + ') <a href="#" onclick="showRuns(null);return false">show all</a>' : '(all tasks)';
+  let rh = '<table><thead><tr><th>Queued</th><th>Task</th><th>Status</th><th>Examined</th><th>Routes</th><th>Canary</th><th>Tools</th><th>Took</th><th>Evidence / error</th></tr></thead><tbody>';
+  for (const x of r.runs || []) {
+    const c = x.canary || {}; const can = c.ran ? (c.failed && c.failed.length ? '<span class="pill bad">' + c.passed + '/' + c.expected + '</span>' : '<span class="pill ok">' + c.passed + '/' + c.expected + '</span>') : '—';
+    const rs = x.status === 'done' ? 'ok' : x.status === 'failed' ? 'bad' : 'warn';
+    rh += '<tr><td class="muted">' + age(x.queued_at) + ' ago</td><td>' + esc(x.task_name || x.task_id) + '</td><td><span class="pill ' + rs + '">' + esc(x.status) + '</span></td><td>' + esc(x.items_examined ?? '—') +
+          '</td><td class="eff">' + fmt(x.route_counts) + '</td><td>' + can + '</td><td>' + esc(x.tool_calls_total ?? 0) + '</td><td>' + (x.duration_s != null ? esc(x.duration_s) + 's' : '—') +
+          '</td><td class="eff">' + (x.error ? '<span style="color:var(--red)">' + esc(x.error) + '</span>' : fmt(x.source_evidence)) + '</td></tr>';
+  }
+  $('runs').innerHTML = rh + '</tbody></table>';
+  let nh = '<table><thead><tr><th>Runner</th><th>Host</th><th>Version</th><th>Adapters</th><th>Last heartbeat</th><th>Models</th></tr></thead><tbody>';
+  for (const x of rn.runners || []) {
+    const fresh = x.last_heartbeat && (Date.now() - new Date(x.last_heartbeat + (x.last_heartbeat.endsWith('Z') ? '' : 'Z'))) < 5*60*1000;
+    nh += '<tr><td class="k">' + esc(x.runner_id) + '</td><td>' + esc(x.host) + '</td><td>' + esc(x.version) + '</td><td>' + esc((x.adapters || []).join(', ')) + '</td><td><span class="pill ' + (fresh ? 'ok' : 'bad') + '">' + age(x.last_heartbeat + (x.last_heartbeat && !x.last_heartbeat.endsWith('Z') ? 'Z' : '')) + ' ago</span></td><td class="muted">' + esc((x.models || []).length) + ' models</td></tr>';
+  }
+  $('runners').innerHTML = nh + '</tbody></table>';
+}
+function showRuns(tid) { RUN_TASK = tid; renderTasks(); }
+async function taskAction(tid, action) {
+  const r = await api('/admin/api/tasks/action', { method: 'POST', body: JSON.stringify({ task_id: tid, action }) });
+  if (r.error) toast(r.error, true); else toast(action + ': ' + (r.status || 'ok'));
+  renderTasks();
+}
+
 async function renderConnections() {
   const d = await api('/admin/api/connections');
   if (d.error) { $('connections').innerHTML = '<p class="muted">' + esc(d.error) + '</p>'; return; }
@@ -314,10 +364,10 @@ async function revokeConn(name) {
 }
 
 function render() {
-  return ({ overview: renderOverview, settings: renderSettings, agents: renderAgents, alerts: renderAlerts, connections: renderConnections, changes: renderChanges })[TAB]();
+  return ({ overview: renderOverview, settings: renderSettings, agents: renderAgents, alerts: renderAlerts, tasks: renderTasks, connections: renderConnections, changes: renderChanges })[TAB]();
 }
 checkLogin().then(render);
-setInterval(() => { if (TAB === 'overview' || TAB === 'agents' || TAB === 'alerts') render(); }, 30000);
+setInterval(() => { if (TAB === 'overview' || TAB === 'agents' || TAB === 'alerts' || TAB === 'tasks') render(); }, 30000);
 </script>
 </body>
 </html>
