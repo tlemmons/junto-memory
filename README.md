@@ -457,6 +457,7 @@ memory_delegate(
 - **Item content is untrusted data.** It reaches the model fenced, with the task restated after it. The default model, `gpt-oss:20b`, resisted every prompt-injection case in testing; `qwen3:14b` is faster but followed instructions planted in plausible mail, so use it only on trusted text.
 - **Canaries** are known items with expected outputs. They run daily (or every run) and after any edit to instructions, schema, model or source. A failed canary sends the owner a notice.
 - **Read-only sources.** IMAP opens with `EXAMINE` and `BODY.PEEK`. MCP tools are limited to the connection's `tools_allowed`, intersected with what the task asks for.
+- **Failed items are never silent.** An item with no valid output gets no route; for a scheduled task the owner gets an action notice listing each one (ref, from/subject, error), because the source cursor has moved past it.
 - **Visibility.** Only the task owner reads run results. Schema fields marked `"x-sensitive": true` are stripped from notifications to agents outside the connection's `content_visible_to`.
 
 ### Connections and the secret vault
@@ -497,9 +498,9 @@ The runner creates its X25519 key pair on first start and registers its installe
 | Items per run | 200 |
 | Instructions | 20,000 chars |
 | Inline item | 20,000 chars (imap `max_chars` defaults to 12,000) |
-| Model context | The runner picks `num_ctx` per run: the smallest of 8,192 / 16,384 tokens (config `num_ctx_buckets`) that fits the run's longest item, capped by the model's trained context, `num_ctx_max` per model, and 4,096 for models over 30 GB (they don't fit one 24 GB card). One value per run, because changing `num_ctx` reloads the model. An item that still doesn't fit is cut by the runner with a visible marker; run evidence shows `num_ctx` and `items_truncated`. At 16K that is about 38,000 chars of item. |
-| Reply length | `num_predict` 2,048 tokens per model call (config `num_predict`), so one item can't hold the runner until the 600 s timeout |
-| Queue | One runner works one run at a time, oldest queued first. Scheduled runs wait behind one-off batches. |
+| Model context | The runner picks `num_ctx` per run: the smallest of 8,192 / 16,384 tokens (config `num_ctx_buckets`) that fits the run's longest item, capped by the model's trained context, `num_ctx_max` per model, and 4,096 for models over 30 GB (they don't fit one 24 GB card). One value per run, because changing `num_ctx` reloads the model. An item that still doesn't fit is cut by the runner with a visible marker; run evidence shows `num_ctx` and `items_truncated`. With the reply budget reserved, 16K holds about 20,000 chars of item. |
+| Reply length | `num_predict` = min(8,192, context/2) tokens per model call, **including reasoning** (gpt-oss reasons even with `think: false`; 2,048 was too small). A reply cut at the cap fails as `reply cut at num_predict=…`. |
+| Queue | One runner works one run at a time. Runs of scheduled tasks are claimed before one-off batches, oldest first within each group. |
 | Schedule | every ≥ 5 minutes; daily digest at 07:00 in the task's timezone unless `digest_at` is set |
 
 A model too big for VRAM (e.g. a 72B model on 2×24 GB) runs partly on CPU and evicts every other loaded model. Keep big models out of batches.

@@ -56,6 +56,13 @@ version via `memory_health` (`server_version`).
   agent names) and `idle_park_min_context`, set via `memory_admin push_control_set_config`.
 
 ### Fixed
+- **Runner 0.4.1:** 0.4.0's 2,048-token reply cap counted gpt-oss reasoning and cut
+  replies before any JSON; now min(8,192, context/2), with a clear error on a cap hit.
+- **Failed items of scheduled tasks notify the owner** (action notice per run with each
+  item's ref, from/subject and error). Before, they were only counted while the cursor
+  moved past them.
+- **Scheduled tasks' runs are claimed before one-off batches** (`lane` on runs; queued
+  runs backfilled at startup).
 - **Runner 0.4.0: no more silent truncation or runaway replies.** The runner set neither
   `num_ctx` nor `num_predict`, so Ollama's 4,096-token default silently truncated long
   items, and a model could generate until the 600 s timeout (one call held the queue
