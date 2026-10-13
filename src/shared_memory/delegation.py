@@ -297,9 +297,11 @@ def validate_task_fields(fields: Dict[str, Any], scope: Dict[str, Any]) -> List[
         errors.append(f"canaries: list of at most {MAX_CANARIES}")
         canaries = []
     for i, c in enumerate(canaries):
-        if not isinstance(c, dict) or not isinstance(c.get("source_params"), dict) \
-                or not isinstance(c.get("expect"), dict) or not c["expect"]:
-            errors.append(f"canaries[{i}]: needs source_params (locator) and a non-empty expect")
+        locator_ok = isinstance(c, dict) and (isinstance(c.get("source_params"), dict)
+                                              or (isinstance(c.get("content"), str) and c["content"].strip()))
+        if not locator_ok or not isinstance(c.get("expect"), dict) or not c["expect"]:
+            errors.append(f"canaries[{i}]: needs source_params (a locator) or content (a synthetic item), "
+                          "and a non-empty expect")
             continue
         for f in c["expect"]:
             if f not in props:
