@@ -7,6 +7,33 @@ version via `memory_health` (`server_version`).
 ## [Unreleased]
 
 ### Added
+- **Local-model delegation** (interface:delegated-inference-v0 1.5.1; README →
+  "Local-Model Delegation"). Agents own tasks that run on a local Ollama model:
+  `memory_delegate` creates one (connection/scope, instructions, JSON output schema,
+  routes, optional schedule and canaries; no schedule = one-off), `memory_schedule`
+  manages them (edit is versioned; pause/resume/delete/run_now/history/runs/approve),
+  `memory_job` reads one run, `memory_runners` lists runners and connections. The server
+  schedules runs and applies routes (`notify` / daily `digest` / `drop`); the model never
+  acts. Default model `gpt-oss:20b` (resisted the injection tests). Canaries run daily and
+  after any edit to instructions, schema, model or source.
+- **Connections + secret vault.** Agents request a connection (imap, mcp, file, inline,
+  gmail); the operator activates it in `/admin` by pasting the secret. Secrets are stored
+  encrypted under the new **`JUNTO_VAULT_KEY`** env var and sealed per claim to the
+  runner's X25519 key. Revoke cancels queued runs; every change is audited.
+- **Runner** `contrib/runner/junto-runner.py` + systemd user unit: generic adapters
+  (inline, imap read-only, file, mcp source + read-only tools), Ollama structured output,
+  LAN-only `/runner/api/*`. `cryptography` is now a pinned direct dependency.
+- **Admin web UI** at `/admin` (LAN-only; edits need an owner key): Overview, Settings
+  (code default vs. server value, per project), Agents, Alerts (ack), Local tasks, Connections
+  (+ audit), Change log.
+- **Context history**: gauge readings sampled into `context_history` (10-min buckets,
+  90-day TTL); `record_learning` / `change_status` stamp the author's context fill.
+- **Action lapse** (design:action-lapse-v0): action messages unanswered for
+  `action_lapse_days` (default 30) and answered-but-never-closed tasks/blockers after
+  `action_lapse_responded_days` (default 7) leave the action lane (not deleted). Send
+  responses add `size_hint` and `possible_parent`; recall rows gain `age_days`.
+- `contrib/context-report/junto-context-report.py`: box-agnostic reporter for
+  `memory_report_context`, including the idle-park auto-reset gate.
 - **Idle-park auto-reset** (design:idle-park-autoreset-v0, phase 2 of the nudge). An agent
   that ends its session while its idle timer is in the nudged state, and is listed in the
   new push-control key `idle_park_autoreset` (comma-separated, opt-in), gets a pending
@@ -29,6 +56,11 @@ version via `memory_health` (`server_version`).
   agent names) and `idle_park_min_context`, set via `memory_admin push_control_set_config`.
 
 ### Fixed
+- Ephemeral reporter identities (`ctx-reporter-*`) replace their earlier sessions on start
+  instead of piling up (108 active sessions → 18).
+- Spec names that differ only by case are refused; `get_spec` suggests the existing twin.
+- Recall no longer serves other agents' session digests and logs scores per recall event.
+- Mongo container `nofile` ulimit raised to 64000.
 - **Background tasks no longer die when any client disconnects.** The MCP SDK enters
   the app lifespan once per client session; its teardown was cancelling the
   process-global scheduler and SSE keepalive (and resetting the Chroma client) on every

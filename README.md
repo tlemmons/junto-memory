@@ -33,6 +33,8 @@ This server fixes all three. It gives your agents a shared brain that persists a
 - **Multi-agent coordination** -- File locking, inter-agent messaging, heartbeat monitoring, and overlap detection so multiple AI agents can work on the same codebase without stepping on each other.
 - **Task and backlog management** -- Track work items, assign tasks to agents, manage checklists, and hand off context between sessions.
 - **Function registry with auto-enrichment** -- Register functions once, and a librarian daemon analyzes the source code to add signatures, gotchas, and semantic search summaries.
+- **Local-model delegation** -- Agents hand routine text work (classify, extract, summarise, watch a mailbox) to a model running on your own hardware via Ollama, on a schedule or once, with results routed back to agents. Saves cloud-agent usage for work that doesn't need it. See [Local-Model Delegation](#local-model-delegation).
+- **Admin web UI** -- `/admin` on the server: settings, agents and their context fill, alerts, local tasks and runs, connections, and a change log. See [Admin Web UI](#admin-web-ui).
 
 ---
 
@@ -54,8 +56,11 @@ There are 370+ MCP memory servers listed on PulseMCP. Most give a single agent p
 | Librarian mode | No | Yes — Agents analyze source code and enrich the knowledge base |
 | External database access | No | Yes — Read-only SQL queries (MSSQL, MySQL) against your project databases |
 | Checklists | No | Yes — Shared launch readiness, deploy steps, etc. |
+| Local-model delegation | No | Yes — Agent-owned tasks run on a local Ollama runner; results routed to agents or a daily digest |
+| Secrets for data sources | No | Yes — Encrypted vault; agents request connections, the operator activates them, agents never see the secret |
+| Operator web UI | No | Yes — `/admin`: settings, agents, alerts, tasks, connections, change log |
 
-57 tools across 20 categories. Not a toy — a coordination system.
+63 tools across 23 categories. Not a toy — a coordination system.
 
 ---
 
@@ -220,7 +225,7 @@ No API keys or authentication tokens are required for local use (see [Security](
 
 ## Tool Reference
 
-57 tools organized into 20 categories. (For the canonical, current list with grouping and end-to-end flows, see the architecture spec inside the server: `memory_get_spec(name="architecture:shared-memory-v1", project="junto")`.)
+63 tools organized into 23 categories. (For the canonical, current list with grouping and end-to-end flows, see the architecture spec inside the server: `memory_get_spec(name="architecture:shared-memory-v1", project="junto")`.)
 
 ### Session Management (2)
 
@@ -374,10 +379,11 @@ Operator visibility into the messaging rate-limit / push-control subsystem (chai
 | `memory_list_alerts` | List push-control alerts — budget warnings, budget breaches, hard-ceiling trips — for an operator dashboard or polling fallback. |
 | `memory_get_emission_stats` | Per-agent message-emission counters and budget usage. |
 
-### Team Status & Health (2)
+### Team Status & Health (3)
 
 | Tool | Description |
 |------|-------------|
+| `memory_report_context` | Report agents' context-window fill from any machine (used by the per-box `contrib/context-report` reporter). `memory_get_agent_status` then shows every agent's context gauge, and the idle→park nudge uses it (see [Context Gauge and Idle-Park Nudge](#context-gauge-and-idle-park-nudge)). |
 | `memory_standup` | Auto-compiled team standup for a project — every agent's current task, blockers, stale state specs, and an aggregated decision queue. Read-only, needs no agent to produce it. |
 | `memory_health` | Server health — MongoDB + ChromaDB status and active session/lock/signal counts. No session required. |
 
@@ -395,6 +401,132 @@ Phase-2 local-first replication endpoints (`admin`/`owner` tier). A LAN-local ju
 | Tool | Description |
 |------|-------------|
 | `memory_batch_backlog` | Create or update many backlog items in one call. |
+
+### Local-Model Delegation (4)
+
+Hand work to a model on your own hardware. How it works: [Local-Model Delegation](#local-model-delegation).
+
+| Tool | Description |
+|------|-------------|
+| `memory_delegate` | Create a task for the local model: data source (scope), instructions, JSON output schema, routes, optional schedule and canaries. No schedule = run once now. Can request a new connection in the same call. |
+| `memory_schedule` | Manage your tasks: `list`, `get`, `edit` (versioned), `pause`, `resume`, `delete`, `run_now`, `history`, `runs`, `approve` (operator). |
+| `memory_job` | One run: `status`, `result` (each item's output and the route it took), `cancel`. Owner only. |
+| `memory_runners` | Runners and connections: `list` (hosts, models, last heartbeat), `scopes` (connections you can use), `request_connection`; operator-only `define_scope`, `create_runner_key`. |
+
+---
+
+## Local-Model Delegation
+
+A lot of agent work doesn't need a frontier model: sorting a support inbox, pulling fields out of logs, summarising a long dump, watching a list for changes. Delegation lets an agent hand that work to a model running on your own hardware (via [Ollama](https://ollama.com)), so cloud-agent usage goes to the work that needs it. Contract: `memory_get_spec(name="interface:delegated-inference-v0", project="junto")`.
+
+### How it works
+
+```mermaid
+graph LR
+    A[Agent] -->|memory_delegate| S[junto-memory]
+    S -->|claim run + sealed secret| R[Runner on your GPU box]
+    R -->|fetch items| D[(Connection: imap / mcp / file / inline)]
+    R -->|one JSON result per item| O[Ollama]
+    R -->|results| S
+    S -->|routes: notify / digest / drop| A2[Agents]
+```
+
+1. **Connection (scope).** A typed data source: `inline` (text passed in the task), `imap` (read-only mailbox), `mcp` (read-only tools on another MCP server), `file` (allowed roots on the runner host), or `gmail` (read-only API; needs your own Google OAuth client). Each lists the agents granted it and the runner hosts allowed to use it. `memory_runners(action="scopes")` shows yours.
+2. **Task.** The agent owns it: `instructions`, an `output_schema` (JSON Schema for one item's result), `source_params`, `routes`, an optional `schedule` (`{"every": "15m"}` or `{"cron": "0 7 * * *"}`, minimum 5 minutes) and optional `canaries`. Every field can be edited later and edits are versioned. No schedule means it runs once now.
+3. **Run.** The server queues runs. A runner on the GPU box claims one, fetches the items, sends each to the model with the task's instructions, validates the reply against the schema, and reports back. One runner works one run at a time.
+4. **Routes.** The **server**, not the model, decides what happens to each result: `notify` an agent (with a template), add it to the owner's **daily digest**, or `drop` it. First matching rule wins; no match means digest. The local model can't take actions — anything it suggests reaches an agent as data.
+
+```python
+memory_delegate(
+    session_id=sid, name="ticket-sort", scope="myproject:inline",
+    instructions="Classify this support message.",
+    output_schema={"type": "object", "properties": {
+        "classification": {"type": "string", "enum": ["bug", "billing", "how_to", "spam"]},
+        "summary": {"type": "string"}}, "required": ["classification", "summary"]},
+    source_params={"items": ["text of message 1", "text of message 2"]},
+    routes=[{"if": {"field": "classification", "op": "in", "value": ["bug"]},
+             "then": "notify", "to": "myproject/backend", "category": "task",
+             "template": "{classification}: {summary}"},
+            {"if": {"field": "classification", "op": "eq", "value": "spam"}, "then": "drop"}],
+    run_now=True)
+# → a "Delegated job done" notice; then memory_job(run_id, action="result")
+```
+
+### Safety model
+
+- **Item content is untrusted data.** It reaches the model fenced, with the task restated after it. The default model, `gpt-oss:20b`, resisted every prompt-injection case in testing; `qwen3:14b` is faster but followed instructions planted in plausible mail, so use it only on trusted text.
+- **Canaries** are known items with expected outputs. They run daily (or every run) and after any edit to instructions, schema, model or source. A failed canary sends the owner a notice.
+- **Read-only sources.** IMAP opens with `EXAMINE` and `BODY.PEEK`. MCP tools are limited to the connection's `tools_allowed`, intersected with what the task asks for.
+- **Visibility.** Only the task owner reads run results. Schema fields marked `"x-sensitive": true` are stripped from notifications to agents outside the connection's `content_visible_to`.
+
+### Connections and the secret vault
+
+Agents never handle credentials. An agent **requests** a connection (`memory_runners(action="request_connection")`, or `connection=` on `memory_delegate`). The operator **activates** it in `/admin` → Connections by pasting the secret; that act is the approval. Tasks waiting on it then start.
+
+- Secrets are stored encrypted (Fernet) under `JUNTO_VAULT_KEY`. Each claim seals a fresh copy to that runner's X25519 key; the runner opens it in memory for that run only and never logs or caches it.
+- Revoking a connection deletes the ciphertext and cancels queued runs. A run already claimed finishes within its 10-minute lease.
+- Every request, activation, rotation and revocation is in the connection audit (`/admin` → Connections).
+- `JUNTO_VAULT_KEY` lives in `.env`, not in the Mongo backups. A backup holds ciphertext only; losing the key means re-entering the secrets.
+
+### Running a runner
+
+The runner (`contrib/runner/junto-runner.py`) is a single Python file that needs `cryptography` (plus `mcp` for MCP sources). It talks only to the junto server, the local Ollama, and the connection's own source.
+
+First, from an owner/admin agent session, create the runner's key (it is shown once):
+`memory_runners(session_id=sid, action="create_runner_key", runner_id="gpu-1", host="gpubox")`.
+
+```bash
+# On the GPU box
+cp contrib/runner/junto-runner.py ~/.local/bin/ && chmod 755 ~/.local/bin/junto-runner.py
+mkdir -p ~/.config/junto-runner && chmod 700 ~/.config/junto-runner
+# save that key to ~/.config/junto-runner/runner.key (mode 600)
+# config.json (mode 600): {"server": "http://<server>:8080", "runner_id": "gpu-1",
+#   "key_file": "~/.config/junto-runner/runner.key", "ollama": "http://localhost:11434"}
+cp contrib/runner/junto-runner.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now junto-runner
+loginctl enable-linger $USER
+```
+
+The runner creates its X25519 key pair on first start and registers its installed models. The runner API (`/runner/api/*`) is LAN-only.
+
+### Limits and gotchas
+
+| Limit | Value |
+|---|---|
+| Tasks per agent | 25 live (delete one-offs with `memory_schedule(action="delete")`) |
+| Items per run | 200 |
+| Instructions | 20,000 chars |
+| Inline item | 20,000 chars (imap `max_chars` defaults to 12,000) |
+| Model context | The runner doesn't set `num_ctx` yet, so Ollama's default applies (4,096 tokens on Ollama 0.12 unless `OLLAMA_CONTEXT_LENGTH` is set). That budget covers instructions + item + output, and longer prompts are truncated without an error. Keep item + instructions under ~10,000 chars for now. |
+| Schedule | every ≥ 5 minutes; daily digest at 07:00 in the task's timezone unless `digest_at` is set |
+
+A model too big for VRAM (e.g. a 72B model on 2×24 GB) runs partly on CPU and evicts every other loaded model. Keep big models out of batches.
+
+---
+
+## Admin Web UI
+
+The server serves an operator page at **`http://<server>:8080/admin`**. It is **LAN-only**: requests arriving through a tunnel get 403. Anyone on the LAN can view; every change needs an **owner API key** (pasted into the page, sent as a Bearer header).
+
+| Tab | What it shows / does |
+|---|---|
+| Overview | Headline counts, with links to `/dashboard` (activity feed) and `/health` |
+| Settings | Every tunable setting: code default vs. server value, editable server-wide or per project |
+| Agents | Registered agents, last activity, context-fill gauge |
+| Alerts | Push-control alerts (budget warnings and breaches); acknowledge them |
+| Local tasks | Delegated tasks (pause / resume / run now / approve), recent runs with evidence, canaries, routes and errors, and runner heartbeats |
+| Connections | Requested and active connections: paste a secret to activate or rotate, revoke, plus the connection audit |
+| Change log | Every settings change: who, when, before and after |
+
+To put it behind a hostname, proxy `/admin` from nginx or similar, and keep that vhost LAN-only too.
+
+---
+
+## Context Gauge and Idle-Park Nudge
+
+**Context gauge.** `contrib/context-report/junto-context-report.py` runs on each machine (systemd user timer). It finds local `claude` processes, reads each agent's context-fill metrics written by its status line, and calls `memory_report_context`. `memory_get_agent_status` and `/admin` → Agents then show every agent's context fill across all machines.
+
+**Idle-park nudge.** If an agent makes no real tool call for `idle_park_minutes` (default 50, just under the ~60-minute prompt-cache TTL), the server pushes it one notice suggesting it park at a clean stop. Only agents with at least `idle_park_min_context` (default 200K) of reported context are nudged. Agents listed in `idle_park_autoreset` go further: after a nudged park, the reporter checks the agent's tmux pane is safe to type into, then types `/clear` and `go`. Configure with `memory_admin push_control_set_config` or `/admin` → Settings.
 
 ---
 
@@ -419,6 +551,7 @@ All configuration is via environment variables. See `.env.example` for the compl
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MCP_AUTH_ENABLED` | `false` | Enable API key authentication. When true, `memory_start_session` requires a valid key — passed either as the `api_key` tool argument or via an `Authorization: Bearer <key>` HTTP header (see [Security](#security)). |
+| `JUNTO_VAULT_KEY` | -- | Fernet key for the connection-secret vault (local-model delegation). Needed only to store connection secrets. Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Keep it out of backups and git. |
 | `ANTHROPIC_API_KEY` | -- | Required only for the standalone librarian enrichment service. |
 | `LIBRARIAN_PROJECT_ROOTS` | -- | JSON map of project names to filesystem paths for librarian code analysis. |
 | `DB_<NAME>_TYPE` | -- | Register an external database. Supported: `mssql`, `mysql`. See `.env.example` for full pattern. |
@@ -449,6 +582,11 @@ mcp-shared-memory/
 │       ├── helpers.py            # Shared utility functions
 │       ├── auth.py               # API key auth, RBAC, tenant isolation
 │       ├── audit.py              # Audit logging to MongoDB
+│       ├── delegation.py         # Local-model tasks, scopes/connections, scheduling, routes
+│       ├── vault.py              # Encrypted connection secrets, sealed per runner
+│       ├── runner_api.py         # /runner/api/* (register, heartbeat, claim, complete, fail)
+│       ├── admin_ui.py           # /admin web UI + its JSON API
+│       ├── idle_park.py          # Idle→park nudge and auto-reset
 │       └── tools/
 │           ├── __init__.py       # Tool registration
 │           ├── sessions.py       # Session start/end
@@ -464,8 +602,11 @@ mcp-shared-memory/
 │           ├── checklists.py     # Shared checklists
 │           ├── database.py       # External database queries
 │           ├── lifecycle.py      # Document lifecycle and work status
+│           ├── delegation.py     # memory_delegate / schedule / job / runners
 │           └── admin.py          # API key management and audit logs
 ├── librarian.py                  # Standalone enrichment daemon (uses Haiku)
+├── contrib/runner/               # Local-model runner + systemd user unit
+├── contrib/context-report/       # Per-machine context-fill reporter
 ├── docker-compose.yml            # Full stack: server + MongoDB + ChromaDB
 ├── Dockerfile
 ├── requirements.txt
