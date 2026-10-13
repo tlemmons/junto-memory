@@ -147,6 +147,27 @@ def test_schedule_due_queues_one_run_and_skips_overlap(db):
     assert timedelta(minutes=14) < nxt - now < timedelta(minutes=16)
 
 
+def test_scheduled_runs_claim_before_older_one_offs(db):
+    _scope(db)
+    one_off = _task(db, name="batch", schedule=None, canaries=[], run_now=True)["run_id"]
+    sched = _task(db, name="live")["task_id"]
+    db.di_runs.update_one({"_id": one_off}, {"$set": {"queued_at": datetime.now(timezone.utc) - timedelta(minutes=30)}})
+    assert di.schedule_due(db, datetime.now(timezone.utc)) == 1
+    runner = _runner(db)
+    first = di.claim_run(db, runner)["run"]
+    assert first["task_id"] == sched
+    assert db.di_runs.find_one({"_id": first["run_id"]})["lane"] == di.LANE_SCHEDULED
+    assert di.claim_run(db, runner)["run"]["run_id"] == one_off
+
+
+def test_ensure_indexes_backfills_lane_on_queued_runs(db):
+    _scope(db)
+    run_id = _task(db, name="batch", schedule=None, canaries=[], run_now=True)["run_id"]
+    db.di_runs.update_one({"_id": run_id}, {"$unset": {"lane": ""}})
+    di.ensure_indexes(db)
+    assert db.di_runs.find_one({"_id": run_id})["lane"] == di.LANE_ONE_OFF
+
+
 def test_next_fire_honors_quiet_hours():
     after = datetime(2026, 10, 13, 5, 50, tzinfo=timezone.utc)  # 00:50 Chicago (CDT)
     nxt = di.next_fire({"every": "15m", "quiet_hours": "01:00-05:00"}, after)

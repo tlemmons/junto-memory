@@ -776,6 +776,16 @@ def task_history(db, task_id: str, limit: int = 20) -> List[Dict[str, Any]]:
 
 # ── runs ───────────────────────────────────────────────────────────────────
 
+# Claim order: runs of SCHEDULED tasks (lane 0) before one-offs (lane 1), then
+# oldest first. A scheduled task is an ongoing job (e.g. live support triage);
+# one-off batches must not delay it (nimbusSupport msg_e8373eadba52, 2026-10-13).
+LANE_SCHEDULED, LANE_ONE_OFF = 0, 1
+
+
+def run_lane(task: Dict[str, Any]) -> int:
+    return LANE_SCHEDULED if task.get("schedule") else LANE_ONE_OFF
+
+
 def queue_run(db, task: Dict[str, Any], reason: str, now: Optional[datetime] = None) -> str:
     now = now or _now()
     run_id = f"run_{uuid.uuid4().hex[:12]}"
@@ -784,7 +794,7 @@ def queue_run(db, task: Dict[str, Any], reason: str, now: Optional[datetime] = N
     db.di_runs.insert_one({
         "_id": run_id, "task_id": task["_id"], "task_version": task["version"], "owner": task["owner"],
         "scope": task["scope"], "status": "queued", "reason": reason, "queued_at": now,
-        "canary_due": canary_due, "expire_at": now + timedelta(days=RUN_TTL_DAYS),
+        "lane": run_lane(task), "canary_due": canary_due, "expire_at": now + timedelta(days=RUN_TTL_DAYS),
     })
     return run_id
 
@@ -902,7 +912,7 @@ def claim_run(db, key_doc: Dict[str, Any]) -> Dict[str, Any]:
         {"status": "queued", "scope": {"$in": allowed}},
         {"$set": {"status": "claimed", "runner_id": key_doc["_id"], "claimed_at": now,
                   "lease_until": now + timedelta(seconds=LEASE_SECONDS)}},
-        sort=[("queued_at", 1)],
+        sort=[("lane", 1), ("queued_at", 1)],
         return_document=True,
     )
     if not run:
@@ -1335,6 +1345,11 @@ def ensure_indexes(db) -> None:
     db.di_tasks.create_index([("status", 1), ("next_run_at", 1)])
     db.di_tasks.create_index([("owner", 1), ("name", 1)])
     db.di_runs.create_index([("status", 1), ("scope", 1), ("queued_at", 1)])
+    db.di_runs.create_index([("status", 1), ("lane", 1), ("queued_at", 1)])
+    # Runs queued before lanes existed: a missing lane sorts BEFORE 0, so give them one.
+    for run in db.di_runs.find({"status": "queued", "lane": {"$exists": False}}, {"task_id": 1}):
+        task = db.di_tasks.find_one({"_id": run["task_id"]}, {"schedule": 1}) or {}
+        db.di_runs.update_one({"_id": run["_id"]}, {"$set": {"lane": run_lane(task)}})
     db.di_runs.create_index([("task_id", 1), ("queued_at", -1)])
     db.di_runs.create_index("expire_at", expireAfterSeconds=0)
     db.di_task_versions.create_index([("task_id", 1), ("version", -1)])
