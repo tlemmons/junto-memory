@@ -1,0 +1,255 @@
+"""Delegated inference core (shared_memory.delegation) against a scratch Mongo DB.
+
+@pytest.mark.integration: skipped when mongodb or its password isn't available.
+Each test gets its own throwaway database, dropped afterwards.
+"""
+import os
+import uuid
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from shared_memory import delegation as di
+
+pytestmark = pytest.mark.integration
+
+OWNER = "nimbus/nimbusSupport"
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "classification": {"type": "string", "enum": ["customer_issue", "spam_scam", "ops", "other"]},
+        "confidence": {"type": "number"},
+        "snippet": {"type": "string", "maxLength": 300, "x-sensitive": True},
+    },
+    "required": ["classification", "confidence"],
+}
+ROUTES = [
+    {"if": {"field": "classification", "op": "eq", "value": "customer_issue"}, "then": "notify",
+     "to": OWNER, "category": "task", "template": "{item.subject}: {classification} ({confidence})"},
+    {"if": {"field": "classification", "op": "eq", "value": "spam_scam"}, "then": "drop"},
+]
+
+
+@pytest.fixture
+def db():
+    """A throwaway database on a TEST mongo (JUNTO_TEST_MONGO_URL), never production.
+
+    Scratch DBs on the live junto Mongo helped exhaust its file handles on
+    2026-10-13 (learning_09b7c0ca38d88f5a). Start one with:
+        docker run -d --rm --name junto-test-mongo -p 127.0.0.1:27099:27017 mongo:7.0
+        JUNTO_TEST_MONGO_URL=mongodb://127.0.0.1:27099 pytest tests/test_delegation.py
+    """
+    url = os.environ.get("JUNTO_TEST_MONGO_URL")
+    if not url:
+        pytest.skip("JUNTO_TEST_MONGO_URL not set (use a throwaway mongo, not production)")
+    from pymongo import MongoClient
+    client = MongoClient(url, serverSelectionTimeoutMS=3000)
+    try:
+        client.admin.command("ping")
+    except Exception:
+        pytest.skip("test mongo not reachable")
+    name = f"di_test_{uuid.uuid4().hex[:8]}"
+    database = client[name]
+    di.ensure_indexes(database)
+    try:
+        yield database
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
+def _scope(db, **over):
+    fields = {"adapter": "imap", "adapter_config": {"credential_ref": "/x"}, "runner_hosts_allowed": ["sage"],
+              "grants": [OWNER], "content_visible_to": [OWNER], "restricted": False, "approval": "none"}
+    fields.update(over)
+    assert di.define_scope(db, "cerebro/tom", "mail:support", fields)["status"] in ("created", "updated")
+
+
+def _task(db, **over):
+    fields = {"name": "triage", "scope": "mail:support", "instructions": "Classify the email.",
+              "output_schema": SCHEMA, "routes": ROUTES, "schedule": {"every": "15m"},
+              "canaries": [{"source_params": {"gm_raw": "from:x"}, "expect": {"classification": "customer_issue"}}]}
+    fields.update(over)
+    return di.create_task(db, OWNER, False, fields)
+
+
+def _runner(db):
+    key = di.create_runner_key(db, "cerebro/tom", "sage-1", "sage")["key"]
+    doc = di.authenticate_runner(db, key)
+    di.register_runner(db, doc, {"models": ["qwen3:14b"], "scopes_served": ["mail:support"]})
+    return doc
+
+
+# ── validation ──
+
+def test_create_requires_grant_and_valid_schema(db):
+    _scope(db, grants=["nimbus/someoneElse"])
+    assert "not granted" in _task(db)["error"]
+    _scope(db, grants=[OWNER])
+    bad = _task(db, output_schema={"type": "string"})
+    assert bad["error"] == "invalid task"
+    bad = _task(db, routes=[{"if": {"field": "nope", "op": "eq", "value": 1}, "then": "drop"}])
+    assert any("nope" in d for d in bad["details"])
+    assert _task(db)["status"] == "created"
+
+
+def test_restricted_scope_rejects_unconstrained_strings(db):
+    _scope(db, restricted=True)
+    schema = {"type": "object", "properties": {"where": {"type": "string"}, "kind": {"type": "string", "enum": ["a"]}}}
+    res = _task(db, output_schema=schema, routes=[], canaries=[])
+    assert res["error"] == "invalid task" and any("where" in d for d in res["details"])
+
+
+def test_schedule_validation(db):
+    _scope(db)
+    assert any("minimum" in d for d in _task(db, schedule={"every": "1m"})["details"])
+    assert any("exactly one" in d for d in _task(db, schedule={"every": "15m", "cron": "0 7 * * *"})["details"])
+    assert _task(db, schedule={"cron": "0 7 * * 1-5", "quiet_hours": "01:00-05:00"})["status"] == "created"
+
+
+# ── editing + versions ──
+
+def test_owner_edits_are_versioned_and_others_refused(db):
+    _scope(db)
+    tid = _task(db)["task_id"]
+    assert "only the owner" in di.edit_task(db, tid, "nimbus/other", False, {"instructions": "x"})["error"]
+    res = di.edit_task(db, tid, OWNER, False, {"instructions": "Classify carefully."})
+    assert res["version"] == 2
+    hist = di.task_history(db, tid)
+    assert [h["version"] for h in hist] == [2, 1]
+    assert hist[0]["definition"]["instructions"] == "Classify carefully."
+    assert "not editable" in di.edit_task(db, tid, OWNER, False, {"owner": "me"})["error"]
+
+
+def test_first_run_approval_gate(db):
+    _scope(db, approval="first_run")
+    res = _task(db)
+    assert res["task_status"] == "awaiting_approval"
+    tid = res["task_id"]
+    assert "approval" in di.set_task_status(db, tid, OWNER, False, "resume")["error"]
+    assert "owner/admin" in di.set_task_status(db, tid, OWNER, False, "approve")["error"]
+    assert di.set_task_status(db, tid, "cerebro/tom", True, "approve")["status"] == "approved"
+    res = di.edit_task(db, tid, OWNER, False, {"instructions": "changed"})
+    assert res["task_status"] == "awaiting_approval"
+
+
+# ── scheduling ──
+
+def test_schedule_due_queues_one_run_and_skips_overlap(db):
+    _scope(db)
+    tid = _task(db)["task_id"]
+    now = datetime.now(timezone.utc)
+    assert di.schedule_due(db, now) == 1
+    db.di_tasks.update_one({"_id": tid}, {"$set": {"next_run_at": now}})
+    assert di.schedule_due(db, now + timedelta(seconds=1)) == 0  # previous run still queued
+    nxt = di._aware(db.di_tasks.find_one({"_id": tid})["next_run_at"])
+    assert timedelta(minutes=14) < nxt - now < timedelta(minutes=16)
+
+
+def test_next_fire_honors_quiet_hours():
+    after = datetime(2026, 10, 13, 5, 50, tzinfo=timezone.utc)  # 00:50 Chicago (CDT)
+    nxt = di.next_fire({"every": "15m", "quiet_hours": "01:00-05:00"}, after)
+    assert nxt.astimezone(di.ZoneInfo("America/Chicago")).hour == 5
+
+
+# ── runner protocol ──
+
+def test_claim_complete_routes_and_canary(db):
+    _scope(db)
+    tid = _task(db, run_now=True)["task_id"]
+    runner = _runner(db)
+    claim = di.claim_run(db, runner)
+    assert claim["task"]["instructions"] == "Classify the email."
+    assert claim["scope"]["adapter_config"]["credential_ref"] == "/x"
+    assert claim["run"]["canary_due"] is True
+    run_id = claim["run"]["run_id"]
+    body = {"run_id": run_id, "items_examined": 3, "source_evidence": {"uidnext": 10}, "cursor_out": 9,
+            "items": [
+                {"item_ref": "uid:7", "meta": {"subject": "Frame dark"},
+                 "output": {"classification": "customer_issue", "confidence": 0.9, "snippet": "it goes dark"}},
+                {"item_ref": "uid:8", "meta": {"subject": "Buy art"},
+                 "output": {"classification": "spam_scam", "confidence": 0.95}},
+                {"item_ref": "uid:9", "meta": {"subject": "Order"}, "output": {"classification": "ops"}},
+                {"item_ref": "canary:0", "canary": 0,
+                 "output": {"classification": "customer_issue", "confidence": 0.8}},
+            ]}
+    res, notices = di.complete_run(db, runner, body)
+    assert res["routed"] == {"notify": 1, "drop": 1, "error": 1}  # uid:9 fails schema (no confidence)
+    assert res["canary"]["passed"] == 1 and not res["canary"]["failed"]
+    assert len(notices) == 1 and notices[0]["to"] == [OWNER] and notices[0]["category"] == "task"
+    assert "Frame dark: customer_issue (0.9)" in notices[0]["body"]
+    task = db.di_tasks.find_one({"_id": tid})
+    assert task["cursor"] == 9 and task["consecutive_failures"] == 0
+
+
+def test_zero_items_without_evidence_fails_and_autopauses(db):
+    _scope(db)
+    tid = _task(db, schedule={"every": "15m", "pause_after_failures": 2}, canaries=[])["task_id"]
+    runner = _runner(db)
+    for i in range(2):
+        di.queue_run(db, db.di_tasks.find_one({"_id": tid}), reason="test")
+        run_id = di.claim_run(db, runner)["run"]["run_id"]
+        res, notices = di.complete_run(db, runner, {"run_id": run_id, "items_examined": 0, "items": []})
+        assert res["status"] == "failed"
+    assert res["paused"] is True and "AUTO-PAUSED" in notices[0]["subject"]
+    assert db.di_tasks.find_one({"_id": tid})["status"] == "paused"
+
+
+def test_zero_items_with_evidence_is_a_real_zero(db):
+    _scope(db)
+    _task(db, run_now=True, canaries=[])
+    runner = _runner(db)
+    run_id = di.claim_run(db, runner)["run"]["run_id"]
+    res, _ = di.complete_run(db, runner, {"run_id": run_id, "items_examined": 0, "items": [],
+                                          "source_evidence": {"uidnext": 10, "last_uid": 9}})
+    assert res["status"] == "done"
+
+
+def test_canary_miss_notifies(db):
+    _scope(db)
+    _task(db, run_now=True)
+    runner = _runner(db)
+    run_id = di.claim_run(db, runner)["run"]["run_id"]
+    res, notices = di.complete_run(db, runner, {
+        "run_id": run_id, "items_examined": 1, "source_evidence": {"uidnext": 2},
+        "items": [{"item_ref": "canary:0", "canary": 0, "output": {"classification": "spam_scam", "confidence": 1}}]})
+    assert res["canary"]["failed"][0]["got"] == "spam_scam"
+    assert any("canary MISS" in n["subject"] for n in notices)
+
+
+def test_runner_only_claims_scopes_its_host_may_read(db):
+    _scope(db, runner_hosts_allowed=["madrox"])
+    _task(db, run_now=True)
+    assert di.claim_run(db, _runner(db)) == {}
+
+
+def test_expired_lease_fails_run(db):
+    _scope(db)
+    _task(db, run_now=True, canaries=[])
+    runner = _runner(db)
+    run_id = di.claim_run(db, runner)["run"]["run_id"]
+    db.di_runs.update_one({"_id": run_id}, {"$set": {"lease_until": datetime.now(timezone.utc) - timedelta(1)}})
+    notices = di.expire_leases(db)
+    assert db.di_runs.find_one({"_id": run_id})["status"] == "failed" and notices
+
+
+def test_visibility_strips_sensitive_fields_for_non_visible_targets(db):
+    scope = {"content_visible_to": [OWNER]}
+    out = {"classification": "customer_issue", "snippet": "secret text"}
+    meta = {"item_ref": "uid:1", "subject": "Hi"}
+    assert di.visible_payload(SCHEMA, out, meta, OWNER, scope)["output"]["snippet"] == "secret text"
+    other = di.visible_payload(SCHEMA, out, meta, "nimbus/coordinator", scope)
+    assert "snippet" not in other["output"] and other["item"] == {"item_ref": "uid:1"}
+
+
+def test_digest_reports_counts(db):
+    _scope(db)
+    tid = _task(db, run_now=True, canaries=[])["task_id"]
+    runner = _runner(db)
+    run_id = di.claim_run(db, runner)["run"]["run_id"]
+    di.complete_run(db, runner, {"run_id": run_id, "items_examined": 1, "source_evidence": {"uidnext": 3},
+                                 "items": [{"item_ref": "uid:2", "meta": {"subject": "Hello"},
+                                            "output": {"classification": "other", "confidence": 0.4}}]})
+    db.di_tasks.update_one({"_id": tid}, {"$set": {"digest_next_at": datetime.now(timezone.utc) - timedelta(1)}})
+    notices = di.digest_due(db)
+    assert len(notices) == 1 and "Items examined: 1" in notices[0]["body"] and "Hello" in notices[0]["body"]

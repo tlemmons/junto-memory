@@ -31,6 +31,8 @@ dependencies = [
     "uvicorn>=0.30.0",
     "starlette>=0.38.0",
     "pymongo>=4.0.0",
+    "croniter>=2.0.0",
+    "jsonschema>=4.0.0",
 ]
 
 [project.optional-dependencies]

@@ -546,6 +546,10 @@ def main():
     from shared_memory.admin_ui import register_admin_routes
     register_admin_routes(mcp, get_mongo)
 
+    # ── Delegated-inference runner API (runners are service principals) — runner_api.py ──
+    from shared_memory.runner_api import register_runner_routes
+    register_runner_routes(mcp, get_mongo)
+
     # ── Dashboard (read-only web UI) ──
 
     dashboard_html_path = Path(__file__).parent / "dashboard.html"

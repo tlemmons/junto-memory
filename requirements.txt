@@ -7,3 +7,5 @@ starlette>=0.38.0
 pymongo>=4.0.0
 pymssql>=2.2.0
 pymysql>=1.1.0
+croniter>=2.0.0
+jsonschema>=4.0.0
