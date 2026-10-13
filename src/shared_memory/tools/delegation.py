@@ -75,7 +75,7 @@ async def memory_delegate(
             anything you route on. Mark raw-content fields "x-sensitive": true.
         source_params: Adapter parameters (imap: folder, gm_raw, max_items, max_chars;
             file: glob; inline: items). See the spec §9.
-        model: Ollama model on the runner (default qwen3:14b).
+        model: Ollama model on the runner (default gpt-oss:20b; qwen3:14b is faster but obeys injected text in plausible mail).
         routes: Ordered rules, first match wins, no match = digest:
             [{"if": {"field": "classification", "op": "in", "value": ["customer_issue"]},
               "then": "notify", "to": "nimbus/nimbusSupport", "category": "task",

@@ -318,3 +318,17 @@ def test_claim_carries_intersected_tools_and_logs_calls(db):
     run = db.di_runs.find_one({"_id": claim["run"]["run_id"]})
     assert run["tool_calls_total"] == 1 and run["items"][0]["tool_calls"][0]["tool"] == "frame_lookup"
     assert "tools_allowed" in di.scopes_for(db, OWNER, False)[0]
+
+
+def test_edit_and_run_now_force_canaries(db):
+    _scope(db)
+    tid = _task(db)["task_id"]
+    today = datetime.now(timezone.utc).astimezone(di.ZoneInfo("America/Chicago")).date().isoformat()
+    db.di_tasks.update_one({"_id": tid}, {"$set": {"last_canary_local_date": today}})
+    task = db.di_tasks.find_one({"_id": tid})
+    assert db.di_runs.find_one({"_id": di.queue_run(db, task, reason="schedule")})["canary_due"] is False
+    assert db.di_runs.find_one({"_id": di.queue_run(db, task, reason="run_now by x")})["canary_due"] is True
+    di.edit_task(db, tid, OWNER, False, {"model": "gpt-oss:20b"})
+    task = db.di_tasks.find_one({"_id": tid})
+    assert task["last_canary_local_date"] is None
+    assert db.di_runs.find_one({"_id": di.queue_run(db, task, reason="schedule")})["canary_due"] is True

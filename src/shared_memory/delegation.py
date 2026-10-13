@@ -36,7 +36,7 @@ from zoneinfo import ZoneInfo
 log = logging.getLogger(__name__)
 
 DEFAULT_TZ = "America/Chicago"
-DEFAULT_MODEL = "qwen3:14b"
+DEFAULT_MODEL = "gpt-oss:20b"  # resisted every injection case; qwen3:14b did not (learning_12b17e9a94c49685)
 LEASE_SECONDS = 600
 LOOP_SECONDS = 30
 RUN_TTL_DAYS = 30
@@ -61,6 +61,8 @@ EDITABLE_FIELDS = {"instructions", "output_schema", "source_params", "model", "r
                    "max_tool_calls"}
 # Edits to these re-require Tom's approval on an approval=first_run scope.
 APPROVAL_FIELDS = {"instructions", "output_schema", "source_params"}
+# Edits to these invalidate today's canary pass: the next run re-checks canaries.
+CANARY_RESET_FIELDS = {"instructions", "output_schema", "model", "canaries", "tools", "source_params"}
 RUN_STATUSES = {"queued", "claimed", "done", "failed", "cancelled"}
 
 _EVERY_RE = re.compile(r"^(\d+)\s*([smhd])$")
@@ -533,6 +535,8 @@ def edit_task(db, task_id: str, who: str, admin: bool, changes: Dict[str, Any]) 
         return {"error": "invalid change", "details": errors}
     now = _now()
     update = {**changes, "version": task["version"] + 1, "updated_at": now, "updated_by": who}
+    if CANARY_RESET_FIELDS & set(changes):
+        update["last_canary_local_date"] = None
     if "schedule" in changes:
         sched = changes["schedule"]
         update["next_run_at"] = now if sched else None
@@ -593,7 +597,8 @@ def task_history(db, task_id: str, limit: int = 20) -> List[Dict[str, Any]]:
 def queue_run(db, task: Dict[str, Any], reason: str, now: Optional[datetime] = None) -> str:
     now = now or _now()
     run_id = f"run_{uuid.uuid4().hex[:12]}"
-    canary_due = _canary_due(task, now) and bool(task.get("canaries"))
+    forced = reason.startswith("run_now")
+    canary_due = (forced or _canary_due(task, now)) and bool(task.get("canaries"))
     db.di_runs.insert_one({
         "_id": run_id, "task_id": task["_id"], "task_version": task["version"], "owner": task["owner"],
         "scope": task["scope"], "status": "queued", "reason": reason, "queued_at": now,
