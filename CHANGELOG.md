@@ -56,6 +56,8 @@ version via `memory_health` (`server_version`).
   agent names) and `idle_park_min_context`, set via `memory_admin push_control_set_config`.
 
 ### Fixed
+- **Runner 0.4.2:** a gpt-oss reply cut at the cap is retried once at low reasoning effort
+  (a phishing canary reasoned past 8,192 tokens); `low_effort_retries` in run evidence.
 - **Runner 0.4.1:** 0.4.0's 2,048-token reply cap counted gpt-oss reasoning and cut
   replies before any JSON; now min(8,192, context/2), with a clear error on a cap hit.
 - **Failed items of scheduled tasks notify the owner** (action notice per run with each

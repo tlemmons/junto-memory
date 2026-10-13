@@ -499,7 +499,7 @@ The runner creates its X25519 key pair on first start and registers its installe
 | Instructions | 20,000 chars |
 | Inline item | 20,000 chars (imap `max_chars` defaults to 12,000) |
 | Model context | The runner picks `num_ctx` per run: the smallest of 8,192 / 16,384 tokens (config `num_ctx_buckets`) that fits the run's longest item, capped by the model's trained context, `num_ctx_max` per model, and 4,096 for models over 30 GB (they don't fit one 24 GB card). One value per run, because changing `num_ctx` reloads the model. An item that still doesn't fit is cut by the runner with a visible marker; run evidence shows `num_ctx` and `items_truncated`. With the reply budget reserved, 16K holds about 20,000 chars of item. |
-| Reply length | `num_predict` = min(8,192, context/2) tokens per model call, **including reasoning** (gpt-oss reasons even with `think: false`; 2,048 was too small). A reply cut at the cap fails as `reply cut at num_predict=…`. |
+| Reply length | `num_predict` = min(8,192, context/2) tokens per model call, **including reasoning** (gpt-oss reasons even with `think: false`; 2,048 was too small). A reply cut at the cap fails as `reply cut at num_predict=…`. For gpt-oss, a reply cut at the cap is retried once at `think: "low"` (counted as `low_effort_retries` in run evidence); default effort stays first because it resisted prompt injection better (0/16 vs 1/16 at low). |
 | Queue | One runner works one run at a time. Runs of scheduled tasks are claimed before one-off batches, oldest first within each group. |
 | Schedule | every ≥ 5 minutes; daily digest at 07:00 in the task's timezone unless `digest_at` is set |
 

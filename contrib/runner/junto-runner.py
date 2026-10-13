@@ -52,7 +52,7 @@ import urllib.error
 import urllib.request
 from html.parser import HTMLParser
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 log = logging.getLogger("junto-runner")
 
 
@@ -641,17 +641,32 @@ def classify(cfg, task, item):
                                     + REMINDER + task["instructions"]},
     ]
     last_err = None
-    for attempt in range(2):
+    model = task.get("model") or "qwen3:14b"
+    think = False
+    attempts = 0
+    while attempts < 2:
+        attempts += 1
         resp = _post(cfg["ollama"].rstrip("/") + "/api/chat", {
-            "model": task.get("model") or "qwen3:14b", "messages": messages, "stream": False,
-            "format": _strip_ext(schema), "think": False, "options": _options(cfg, task),
+            "model": model, "messages": messages, "stream": False,
+            "format": _strip_ext(schema), "think": think, "options": _options(cfg, task),
             "keep_alive": "30m",
         }, timeout=600)
         if resp.get("error"):
             raise RuntimeError(f"ollama: {resp['error']}")
         text = (resp.get("message") or {}).get("content", "")
         if resp.get("done_reason") == "length":
-            # Hit num_predict (reasoning included); a retry would hit it again.
+            # Hit num_predict (reasoning included). gpt-oss ignores think=false and can
+            # reason past any cap (seen on a phishing canary at 8192). Retry ONCE at low
+            # effort rather than fail: default effort stays first because it resisted
+            # injection better (0/16 vs 1/16 at low, 2026-10-13, learning_8ef7f99045e811c0).
+            if model.startswith("gpt-oss") and think is False:
+                think = "low"
+                attempts -= 1
+                stats = task.get("_stats")
+                if stats is not None:
+                    stats["low_effort_retries"] = stats.get("low_effort_retries", 0) + 1
+                log.info("reply hit num_predict; retrying item at low reasoning effort")
+                continue
             return None, f"reply cut at num_predict={_options(cfg, task)['num_predict']} tokens (model reasoning included)"
         try:
             out = json.loads(text)
@@ -780,7 +795,8 @@ def process(cfg, server, claim):
     try:
         items, evidence, cursor_out = adapter.fetch(task.get("source_params") or {}, claim.get("cursor"))
         num_ctx, fit["chars"], num_predict = run_context(cfg, task, items, use_tools)
-        task = dict(task, _num_ctx=num_ctx, _num_predict=num_predict)
+        stats = {}
+        task = dict(task, _num_ctx=num_ctx, _num_predict=num_predict, _stats=stats)
         results = []
         for it in items:
             try:
@@ -805,7 +821,7 @@ def process(cfg, server, claim):
                 except Exception as e:
                     results.append({"item_ref": f"canary:{idx}", "canary": idx, "error": str(e)[:300]})
         if items:  # never on an empty fetch: the server fails "0 items + no evidence" runs on purpose
-            evidence = dict(evidence or {}, num_ctx=num_ctx, items_truncated=fit["cut"])
+            evidence = dict(evidence or {}, num_ctx=num_ctx, items_truncated=fit["cut"], **stats)
         return {"run_id": run["run_id"], "items": results, "items_examined": len(items),
                 "source_evidence": evidence, "cursor_out": cursor_out, "model": task.get("model")}
     finally:
