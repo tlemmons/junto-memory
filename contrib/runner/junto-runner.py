@@ -392,8 +392,31 @@ class McpToolbox:
         self.loop.call_soon_threadsafe(self.loop.stop)
 
 
+def _pick(obj, fields):
+    """Top-level scalar fields of a source result to copy into run evidence (e.g. denominators)."""
+    if not isinstance(obj, dict):
+        return {}
+    return {f: obj.get(f) for f in (fields or []) if isinstance(obj.get(f), (str, int, float, bool))}
+
+
+def _degraded(obj, cond):
+    """cond {field, op: eq|lt|gt|eq_field, value}: true means the source read is untrustworthy."""
+    if not isinstance(obj, dict) or not isinstance(cond, dict):
+        return False
+    val, op, ref = obj.get(cond.get("field")), cond.get("op"), cond.get("value")
+    if op == "eq_field":
+        ref = obj.get(ref)
+    try:
+        return {"eq": val == ref, "eq_field": val == ref and val is not None,
+                "lt": val is not None and val < ref, "gt": val is not None and val > ref}.get(op, False)
+    except TypeError:
+        return False
+
+
 class McpSourceAdapter:
-    """Items from one provider tool call: source_params {tool, args, items_path?, id_field?}."""
+    """Items from one provider tool call: source_params {tool, args, items_path?, id_field?,
+    evidence_fields? (top-level counts copied into run evidence), degraded_if? (conditions on the
+    raw result that mean the read failed: the run FAILS instead of reporting a false zero)}."""
 
     def __init__(self, scope_name, adapter_config, local_scope, toolbox=None):
         self.toolbox = toolbox
@@ -408,6 +431,12 @@ class McpSourceAdapter:
             data = json.loads(text)
         except ValueError:
             raise AdapterError(f"source tool {params.get('tool')} did not return JSON")
+        root = data
+        degraded = [c for c in (params.get("degraded_if") or []) if _degraded(root, c)]
+        if degraded:
+            # e.g. offline_frames: noRedisSnapshot == checkedFrames means the read failed, not "none offline"
+            raise AdapterError(f"source DEGRADED ({params.get('tool')}): {json.dumps(degraded)[:300]} "
+                               f"evidence={json.dumps(_pick(root, params.get('evidence_fields')))[:300]}")
         for key in (params.get("items_path") or "").split(".") if params.get("items_path") else []:
             data = data.get(key) if isinstance(data, dict) else None
         if not isinstance(data, list):
@@ -420,7 +449,9 @@ class McpSourceAdapter:
             ref = el.get(id_field) if (id_field and isinstance(el, dict)) else i
             items.append({"item_ref": f"mcp:{params.get('tool')}:{ref}", "meta": meta,
                           "content": json.dumps(el)[:20000]})
-        return items, {"tool": params.get("tool"), "returned": len(data)}, None
+        evidence = {"tool": params.get("tool"), "returned": len(data)}
+        evidence.update(_pick(root, params.get("evidence_fields")))
+        return items, evidence, None
 
     def locate(self, params, max_chars=20000):
         return None
