@@ -175,7 +175,7 @@ async def memory_schedule(
     if action in ("pause", "resume", "delete", "approve"):
         return _out(di.set_task_status(db, task_id, who, admin, action))
     if action == "run_now":
-        if not readable:
+        if not (admin or task["owner"] == who):
             return _out({"error": "not your task"})
         if task["status"] not in ("active", "paused"):
             return _out({"error": f"task is {task['status']}"})
