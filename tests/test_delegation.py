@@ -473,3 +473,15 @@ def test_digest_line_uses_template_or_useful_default(db):
     assert line == "Frame 284: other"
     default = di.digest_line({"then": "digest"}, task, scope, out, meta)
     assert "mcp:offline_frames:284" in default and "classification=other" in default
+
+
+def test_list_all_tasks_scoped_by_role(db):
+    _scope(db)
+    mine = _task(db)["task_id"]
+    db.di_tasks.insert_one({"_id": "task_other", "name": "x", "owner": "otherproj/a", "scope": "s",
+                            "status": "active", "version": 1, "created_at": datetime.now(timezone.utc)})
+    project = OWNER.split("/")[0]
+    ids = lambda rows: {r["task_id"] for r in rows}
+    assert ids(di.list_tasks(db, f"{project}/coord", False, all_tasks=True)) == set()
+    assert ids(di.list_tasks(db, f"{project}/coord", False, True, project_admin=True)) == {mine}
+    assert ids(di.list_tasks(db, f"{project}/coord", True, all_tasks=True)) == {mine, "task_other"}

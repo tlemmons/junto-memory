@@ -12,6 +12,7 @@ from shared_memory import delegation as di
 from shared_memory.app import mcp
 from shared_memory.clients import get_mongo
 from shared_memory.helpers import normalize_project, require_session
+from shared_memory.tools.projects import _is_project_admin
 from shared_memory.state import active_sessions
 
 ADMIN_ROLES = {"admin", "owner"}
@@ -135,7 +136,7 @@ async def memory_schedule(
     Args:
         session_id: Your session ID.
         action: list | get | edit | pause | resume | run_now | delete | history | runs | approve
-            - list: your tasks (admins: all_tasks=True for everyone's)
+            - list: your tasks (all_tasks=True: admins see everyone's, project admins their project's)
             - get: full definition incl. instructions, schema, routes, cursor
             - edit: apply `changes` (any of instructions, output_schema, source_params, model,
               routes, schedule, canaries, description, per_item, expect_items, tools,
@@ -148,19 +149,25 @@ async def memory_schedule(
         task_id: Required for everything except list.
         changes: For edit.
         limit: For history / runs.
-        all_tasks: For list, admins only.
+        all_tasks: For list; admins (all) and project admins (own project, read-only) only.
     """
     err, who, admin, db = _caller(session_id)
     if err:
         return err
+    # Project admins (projects.admins) READ their project's tasks; edits stay owner/admin.
+    my_project, my_agent = who.split("/", 1)
+    proj_admin = not admin and _is_project_admin(db, my_project, my_agent)
     if action == "list":
-        return _out({"tasks": di.list_tasks(db, who, admin, all_tasks)})
+        out: Dict[str, Any] = {"tasks": di.list_tasks(db, who, admin, all_tasks, proj_admin)}
+        if all_tasks and not (admin or proj_admin):
+            out["all_tasks_ignored"] = "admins/project admins only; showing your own tasks"
+        return _out(out)
     if not task_id:
         return _out({"error": f"task_id required for {action}"})
     task = di.get_task(db, task_id)
     if not task:
         return _out({"error": f"task {task_id} not found"})
-    readable = admin or task["owner"] == who
+    readable = admin or task["owner"] == who or (proj_admin and task["owner"].startswith(f"{my_project}/"))
     if action == "get":
         return _out(di.task_public(task) if readable else {"error": "not your task"})
     if action == "edit":

@@ -680,9 +680,16 @@ def task_public(task: Dict[str, Any]) -> Dict[str, Any]:
     return _jsonable(out)
 
 
-def list_tasks(db, who: str, admin: bool, all_tasks: bool = False) -> List[Dict[str, Any]]:
-    query = {"deleted": {"$ne": True}}
-    if not (admin and all_tasks):
+def list_tasks(db, who: str, admin: bool, all_tasks: bool = False,
+               project_admin: bool = False) -> List[Dict[str, Any]]:
+    """Caller's own tasks; all_tasks widens to everyone's for an admin, or to
+    the caller's project for a project admin (projects.admins)."""
+    query: Dict[str, Any] = {"deleted": {"$ne": True}}
+    if all_tasks and admin:
+        pass
+    elif all_tasks and project_admin:
+        query["owner"] = {"$regex": f"^{re.escape(_split_ident(who)[0])}/"}
+    else:
         query["owner"] = who
     rows = []
     for t in db.di_tasks.find(query).sort("created_at", 1):
