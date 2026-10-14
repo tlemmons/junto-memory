@@ -12,8 +12,8 @@ from shared_memory import delegation as di
 from shared_memory.app import mcp
 from shared_memory.clients import get_mongo
 from shared_memory.helpers import normalize_project, require_session
-from shared_memory.tools.projects import _is_project_admin
 from shared_memory.state import active_sessions
+from shared_memory.tools.projects import _is_project_admin
 
 ADMIN_ROLES = {"admin", "owner"}
 
