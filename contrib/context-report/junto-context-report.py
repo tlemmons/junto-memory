@@ -265,7 +265,12 @@ def attempt_reset(reset):
     pane, session = found
     if human_present(session):
         return "deferred", "human keypress on %s within %ss" % (session, PRESENCE_SECONDS)
-    ok, why = analyze(capture(pane))
+    lines = capture(pane)
+    ok, why = analyze(lines)
+    if why == "input not empty":
+        # Keep the styled row in the journal so a stuck gate can be diagnosed later.
+        row = [l for l in lines if _plain(l).lstrip().startswith(PROMPT)][-1]
+        print("%s: input row %r" % (agent, row[:300]), file=sys.stderr)
     if not ok and why == "survey":
         send(pane, text="0")
         time.sleep(1)
