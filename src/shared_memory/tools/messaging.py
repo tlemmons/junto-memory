@@ -1864,7 +1864,9 @@ async def memory_report_context(
         reports: list of per-agent dicts:
             {instance, context_tokens, context_window,
              context_pct (optional; derived tokens*100//window if absent),
-             written_at (optional ISO capture time -> context_reported_at; default now)}
+             written_at (optional ISO capture time -> context_reported_at; default now.
+                 The statusline stamps it once per turn, so a newer one also resets the
+                 agent's idle-park timer: idle_park.note_turn)}
         reset_results: optional outcomes for idle-park auto-resets this reporter
             attempted (design:idle-park-autoreset-v0):
             [{reset_id, outcome: done|failed|deferred, detail}]
@@ -1885,6 +1887,7 @@ async def memory_report_context(
         return json.dumps({"error": "MongoDB unavailable"})
 
     from shared_memory.context_stamp import record_history as record_context_history
+    from shared_memory.idle_park import note_turn
 
     now = utc_now()
     now_iso = now.isoformat()
@@ -1915,6 +1918,7 @@ async def memory_report_context(
             upsert=True,
         )
         record_context_history(db, instance, tokens, window, now)
+        note_turn(instance, r.get("written_at"))
         written += 1
 
     from shared_memory.idle_park import apply_reset_results, pending_resets_for

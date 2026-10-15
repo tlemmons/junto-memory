@@ -58,6 +58,12 @@ version via `memory_health` (`server_version`).
 ### Fixed
 - **Runner 0.4.2:** a gpt-oss reply cut at the cap is retried once at low reasoning effort
   (a phishing canary reasoned past 8,192 tokens); `low_effort_retries` in run evidence.
+- **Idle-park nudge no longer fires mid-conversation.** The idle timer counted only junto
+  tool calls, so turns spent talking to the user (research, explanation) looked idle and
+  coordinator@nimbus was nudged into parking while Tom was working with it. The context
+  reporter's `written_at` (stamped by the statusline once per turn) now also resets an
+  agent's timer (`idle_park.note_turn`). It never arms a timer, and renders inside the
+  nudge's 10-min grace (the agent answering the nudge) don't count. No client change.
 - **Runner 0.5.0: parallel runs.** New config `workers` (default 1; sage runs 3): that
   many claim loops share one runner key, and the server's atomic claim keeps them apart.
   Ollama already served 3 requests per model, so the serial runner was the bottleneck

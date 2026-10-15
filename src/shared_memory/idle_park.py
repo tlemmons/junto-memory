@@ -13,7 +13,12 @@ Mechanics:
   2-3 sessions. In-memory only: a server restart clears every timer, and the
   agent's next real call re-arms it (a restart is not a reason to nudge).
 - Armed/reset by every REAL tool call, observed at the CallToolRequest
-  chokepoint (app.py). Background traffic does NOT count: the junto-inbox
+  chokepoint (app.py). Also reset (never armed) by the agent's TURNS: the
+  statusline stamps written_at on every render, renders happen only during
+  turns, and the box reporter forwards it via memory_report_context
+  (note_turn). Without this a turn spent talking to the user (no junto
+  calls) looked idle and got nudged mid-conversation (coordinator@nimbus
+  msg_00be0936015b, 2026-10-15). Background traffic does NOT count: the junto-inbox
   plugin's heartbeat / health / emission-stats / start_session (reconnects)
   and the per-box context reporter (memory_report_context, every 60s). A call
   with no resolvable session is ignored.
@@ -128,6 +133,42 @@ def note_tool_call(tool_name: str, session_id, now: Optional[float] = None) -> N
     timer["last_real"] = now
     timer["nudged_at"] = None
     timer["nudged_wall"] = None
+
+
+def note_turn(agent: str, written_at, now: Optional[float] = None, now_wall=None) -> bool:
+    """Reset `agent`'s idle timer from a statusline render time (memory_report_context).
+
+    Only existing timers move: agent_status carries no project, so a render can't
+    arm a new one, and it resets every project's timer for that name (a name clash
+    only means fewer nudges). Renders inside the nudge's re-arm grace are the
+    agent answering the nudge and don't count. Returns True if a timer moved.
+    """
+    from datetime import datetime, timezone
+
+    if not agent or not isinstance(written_at, str):
+        return False
+    try:
+        at_wall = datetime.fromisoformat(written_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if at_wall.tzinfo is None:
+        at_wall = at_wall.replace(tzinfo=timezone.utc)
+    now = time.monotonic() if now is None else now
+    now_wall = datetime.now(timezone.utc) if now_wall is None else now_wall
+    at = now - max(0.0, (now_wall - at_wall).total_seconds())  # future stamps (clock skew) = now
+    moved = False
+    for (_project, name), timer in _timers.items():
+        if name != agent or at <= timer["last_real"]:
+            continue
+        nudged_at = timer.get("nudged_at")
+        if nudged_at is not None:
+            if at < nudged_at + REARM_GRACE_SECONDS:
+                continue
+            timer["nudged_at"] = None
+            timer["nudged_wall"] = None
+        timer["last_real"] = at
+        moved = True
+    return moved
 
 
 def due_agents(minutes_for, now: Optional[float] = None):

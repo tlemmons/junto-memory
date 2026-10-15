@@ -325,3 +325,55 @@ def test_old_pending_reset_expires(monkeypatch, scratch_db):
         {"_id": rid}, {"$set": {"requested_at": utc_now() - timedelta(hours=idle_park.RESET_EXPIRY_HOURS + 1)}})
     assert idle_park.pending_resets_for(scratch_db, ["memory"]) == []
     assert scratch_db.idle_park_resets.find_one({"_id": rid})["status"] == "expired"
+
+
+# ── turns reported by the statusline (note_turn) ──
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from shared_memory.idle_park import note_turn  # noqa: E402
+
+WALL = datetime(2026, 10, 15, 14, 0, tzinfo=timezone.utc)
+
+
+def _stamp(seconds_before_now):
+    return (WALL - timedelta(seconds=seconds_before_now)).isoformat().replace("+00:00", "Z")
+
+
+def test_turn_without_junto_calls_keeps_agent_from_going_idle():
+    # The coordinator case: last junto call at 0, then 40 min of conversation turns.
+    note_tool_call("memory_define_spec", "s_agent", now=0)
+    assert note_turn("memory", _stamp(60), now=3000, now_wall=WALL) is True
+    assert idle_park._timers[KEY]["last_real"] == 2940
+    assert due_agents(_fifty, now=3000 + 10) == []
+    assert due_agents(_fifty, now=2940 + 50 * 60) == [("junto", "memory", 50)]
+
+
+def test_turn_never_arms_a_timer():
+    assert note_turn("memory", _stamp(0), now=100, now_wall=WALL) is False
+    assert idle_park._timers == {}
+
+
+def test_repeated_or_older_stamp_is_a_no_op():
+    note_tool_call("memory_query", "s_agent", now=1000)
+    assert note_turn("memory", _stamp(500), now=1000, now_wall=WALL) is False
+    assert idle_park._timers[KEY]["last_real"] == 1000
+
+
+def test_turn_answering_the_nudge_does_not_rearm():
+    note_tool_call("memory_query", "s_agent", now=0)
+    mark_nudged("junto", "memory", now=3000)
+    assert note_turn("memory", _stamp(0), now=3060, now_wall=WALL) is False
+    assert idle_park._timers[KEY]["nudged_at"] == 3000
+    later = 3000 + REARM_GRACE_SECONDS + 60
+    assert note_turn("memory", _stamp(0), now=later, now_wall=WALL) is True
+    assert idle_park._timers[KEY]["nudged_at"] is None
+
+
+def test_future_stamp_counts_as_now_and_bad_stamps_are_ignored():
+    note_tool_call("memory_query", "s_agent", now=0)
+    assert note_turn("memory", _stamp(-300), now=500, now_wall=WALL) is True
+    assert idle_park._timers[KEY]["last_real"] == 500
+    assert note_turn("memory", "not a date", now=900, now_wall=WALL) is False
+    assert note_turn("memory", None, now=900, now_wall=WALL) is False
+    assert note_turn("other-agent", _stamp(0), now=900, now_wall=WALL) is False
