@@ -52,6 +52,9 @@ BUSY_MARKERS = ("esc to interrupt", "queued messages")
 DIALOG_MARKERS = ("Do you want", "No, exit")
 SURVEY_MARKER = "0: Dismiss"
 OPTION_RE = re.compile(r"^\s*\u276f\s*\d+\.")
+SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+GAP_RE = re.compile(r"\s{8,}")  # right-aligned hint text sharing the input row
 
 
 _pids = {}  # agent -> every local pid carrying JUNTO_AGENT (for the tmux pane lookup)
@@ -137,11 +140,67 @@ def find_pane(pid):
 
 
 def capture(pane):
-    return _tmux("capture-pane", "-p", "-t", pane, "-S", "-80").stdout.splitlines()
+    # -e keeps SGR styling so _after_prompt can tell grey ghost text from typed input.
+    return _tmux("capture-pane", "-p", "-e", "-t", pane, "-S", "-80").stdout.splitlines()
 
 
-def _after_prompt(line):
-    return line.split(PROMPT, 1)[1].replace("\u00a0", " ").strip()
+def _plain(line):
+    return ANSI_RE.sub("", line)
+
+
+def _grey(params, grey):
+    """Fold one SGR parameter list into the running is-grey state."""
+    codes = [int(c) if c.isdigit() else 0 for c in params.split(";")] if params else [0]
+    i = 0
+    while i < len(codes):
+        c = codes[i]
+        if c in (0, 22, 39):
+            grey = False
+        elif c in (2, 90):
+            grey = True
+        elif c == 38 and i + 2 < len(codes) and codes[i + 1] == 5:
+            n = codes[i + 2]
+            grey = n == 8 or 232 <= n <= 255
+            i += 2
+        elif c == 38 and i + 4 < len(codes) and codes[i + 1] == 2:
+            grey = codes[i + 2] == codes[i + 3] == codes[i + 4]
+            i += 4
+        elif 30 <= c <= 37 or 91 <= c <= 97:
+            grey = False
+        i += 1
+    return grey
+
+
+def _fold(text, grey=False):
+    """Split styled text into (non-grey text, grey state at its end). CC draws prompt
+    suggestions and hints grey; tmux -e carries SGR state across lines."""
+    out, pos = [], 0
+    for m in SGR_RE.finditer(text):
+        if not grey:
+            out.append(text[pos:m.start()])
+        grey = _grey(m.group(1), grey)
+        pos = m.end()
+    if not grey:
+        out.append(text[pos:])
+    return _plain("".join(out)), grey
+
+
+def _line_states(raw):
+    """Grey state at the start of each captured line."""
+    states, grey = [], False
+    for line in raw:
+        states.append(grey)
+        grey = _fold(line, grey)[1]
+    return states
+
+
+def _after_prompt(line, grey=False):
+    """Text a human typed after the ❯ glyph on the live input row. Typed text renders in
+    the default colour (checked 2026-10-15, CC 2.1.281); grey ghost text and anything after
+    a wide gap (right-aligned hints sharing the row) don't count."""
+    head, rest = line.split(PROMPT, 1)
+    typed = _fold(rest, _fold(head, grey)[1])[0]
+    return GAP_RE.split(typed.replace("\u00a0", " "), 1)[0].strip()
 
 
 def _is_anchor(line):
@@ -149,13 +208,17 @@ def _is_anchor(line):
 
 
 def analyze(lines):
-    """Gate facts from a pane capture. Returns (ok, reason)."""
+    """Gate facts from a pane capture (SGR escapes allowed). Returns (ok, reason)."""
+    raw = lines
+    lines = [_plain(l) for l in raw]
+    grey = _line_states(raw)
     prompt_idx = [i for i, l in enumerate(lines) if l.lstrip().startswith(PROMPT)]
     if not prompt_idx:
         return False, "no input line"
     input_idx = prompt_idx[-1]
-    if _after_prompt(lines[input_idx]):
+    if _after_prompt(raw[input_idx], grey[input_idx]):
         return False, "input not empty"
+    # Submitted prompts are drawn grey on a grey background, so judge them as plain text.
     last_user = max([i for i in prompt_idx[:-1] if _after_prompt(lines[i])] or [-1])
     anchors = [i for i, l in enumerate(lines[:input_idx]) if _is_anchor(l)]
     if not anchors or anchors[-1] < last_user:
@@ -218,10 +281,11 @@ def attempt_reset(reset):
     send(pane, key="Enter")
     time.sleep(2.5)
     after = capture(pane)
-    if any(_is_anchor(l) for l in after):
+    if any(_is_anchor(_plain(l)) for l in after):
         return "failed", "park banner/nudge still on screen after /clear (pane %s)" % pane
-    inputs = [l for l in after if l.lstrip().startswith(PROMPT)]
-    if not inputs or _after_prompt(inputs[-1]):
+    states = _line_states(after)
+    inputs = [i for i, l in enumerate(after) if _plain(l).lstrip().startswith(PROMPT)]
+    if not inputs or _after_prompt(after[inputs[-1]], states[inputs[-1]]):
         return "failed", "input line not empty/absent after /clear (pane %s)" % pane
     send(pane, text="go")
     time.sleep(0.5)

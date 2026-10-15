@@ -39,3 +39,44 @@ def test_no_anchor_blocks():
 def test_busy_after_nudge_blocks():
     lines = [NUDGE, "✽ Working… (esc to interrupt)", P + " "]
     assert report.analyze(lines) == (False, "busy")
+
+
+GREY = "\x1b[38;5;246m"
+RESET = "\x1b[39m"
+
+
+def test_grey_ghost_text_on_input_line_is_empty():
+    lines = [NUDGE, "● parked", RESET + P + " " + GREY + "run the tests" + RESET]
+    assert report.analyze(lines) == (True, "ok")
+
+
+def test_typed_text_on_input_line_blocks():
+    lines = [NUDGE, "● parked", RESET + P + " hello world"]
+    assert report.analyze(lines) == (False, "input not empty")
+
+
+def test_typed_text_then_ghost_completion_blocks():
+    lines = [NUDGE, "● parked", RESET + P + " /cle" + GREY + "ar" + RESET]
+    assert report.analyze(lines) == (False, "input not empty")
+
+
+def test_right_aligned_hint_on_input_row_is_empty():
+    lines = [NUDGE, "● parked", P + " " + " " * 60 + "/rc"]
+    assert report.analyze(lines) == (True, "ok")
+
+
+def test_grey_carried_from_previous_line():
+    lines = [NUDGE, "● parked", GREY + "──────", P + " leftover hint"]
+    assert report.analyze(lines) == (True, "ok")
+
+
+def test_grey_submitted_prompt_still_counts_as_user_prompt():
+    sub = "\x1b[38;5;239m\x1b[48;5;237m" + P + " go" + RESET
+    lines = [NUDGE, "● parked", sub, "● sure", RESET + P + " "]
+    assert report.analyze(lines) == (False, "no park banner or nudge after last prompt")
+
+
+def test_real_idle_capture_is_empty():
+    lines = ["\x1b[38;5;244m" + "─" * 20, RESET + P + " ", "\x1b[38;5;244m" + "─" * 20,
+             RESET + "  " + GREY + "HA | opus | 12%" + RESET]
+    assert report.analyze([NUDGE] + lines) == (True, "ok")
