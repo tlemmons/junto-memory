@@ -94,3 +94,17 @@ async def test_non_state_spec_not_guarded(monkeypatch):
         session_id="s1", name="design:x", content="short", spec_type="design",
         project="nimbus"))
     assert "dropped_standing" not in res
+
+
+def test_edit_to_fact_sentence_keeps_rule_on_same_line():
+    from shared_memory.state_guard import dropped_standing
+    old = "## Key Context\n- What's live: run `live.sh`. Never write a SHA here.\n"
+    new = "## Key Context\n- What's live: run `bash live.sh --prod`. Never write a SHA here.\n"
+    assert dropped_standing(old, new) == []
+
+
+def test_reworded_rule_is_kept_but_removed_rule_is_reported():
+    from shared_memory.state_guard import dropped_standing
+    old = "## Key Context\n- NEVER run the mid-period sweep manually on prod.\n- Never put the customer email on the ship-to.\n"
+    new = "## Key Context\n- Never run the mid-period sweep manually on prod (Tom only).\n"
+    assert dropped_standing(old, new) == ["Never put the customer email on the ship-to."]

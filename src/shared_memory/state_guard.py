@@ -33,6 +33,16 @@ MAX_REPORTED = 25
 _HEADING = re.compile(r"^(#{1,4})\s+(.*)$")
 _LEAD = re.compile(r"^(?:[-*•>]|\d+[.)]|⚠️|\s)+")
 _SPLIT = re.compile(r" · |; ")
+# Sentence boundary inside a fragment. A Key Context line often carries a
+# fact AND a rule ("What's live: run X. Never write a SHA here."); editing the
+# fact must not report the untouched rule as dropped.
+_SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-Z`(⚠🚦])")
+_WORD = re.compile(r"[\w@./:-]+")
+# A rule counts as KEPT when this share of its words appear in one sentence of
+# the new content — a reword, not a loss. Replay over 171 fleet state writes
+# 10-13→10-15: exact line matching flagged 43, sentence split + this overlap 17,
+# and every remaining hit is a rule actually missing from the new version.
+REWORD_OVERLAP = 0.7
 
 
 def _norm(text: str) -> str:
@@ -65,22 +75,34 @@ def standing_fragments(content: str) -> List[str]:
     return out
 
 
-def dropped_standing(old_content: str, new_content: str) -> List[str]:
-    """Rule-shaped standing fragments of old_content found nowhere in new_content.
+def _words(text: str) -> set:
+    return {w.casefold() for w in _WORD.findall(text) if len(w) > 2}
 
-    Matching is case/whitespace-insensitive substring against the WHOLE new
-    content, so a fragment moved to another section does not count as dropped.
+
+def dropped_standing(old_content: str, new_content: str) -> List[str]:
+    """Rule-shaped standing sentences of old_content missing from new_content.
+
+    A sentence counts as kept when it appears (case/whitespace-insensitive)
+    anywhere in the new content — so a rule moved to another section is not
+    dropped — or when REWORD_OVERLAP of its words appear in one new sentence.
     """
     new_norm = _norm("\n".join(_LEAD.sub("", ln) for ln in new_content.splitlines()))
+    new_sentences = [_words(s) for s in _SENTENCE.split(new_norm)]
     seen = set()
     dropped: List[str] = []
     for frag in standing_fragments(old_content):
-        if not RULE_SHAPED.search(frag):
-            continue
-        key = _norm(frag)
-        if key in seen:
-            continue
-        seen.add(key)
-        if key not in new_norm:
-            dropped.append(frag)
+        for sentence in _SENTENCE.split(frag):
+            sentence = sentence.strip()
+            if len(sentence) < MIN_FRAGMENT_CHARS or not RULE_SHAPED.search(sentence):
+                continue
+            key = _norm(sentence)
+            if key in seen:
+                continue
+            seen.add(key)
+            if key in new_norm:
+                continue
+            words = _words(sentence)
+            if words and any(len(words & n) / len(words) >= REWORD_OVERLAP for n in new_sentences):
+                continue
+            dropped.append(sentence)
     return dropped
