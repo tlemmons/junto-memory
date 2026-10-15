@@ -103,6 +103,21 @@ def _active_component_peers(db, project, instance, subscribed_components,
     return peers
 
 
+# Task strings a CLIENT passes on every session (not a description of this
+# session's work). In a park-summary title the facet model reads them as the
+# doc's subject: 52 claims credited "the junto-inbox channel plugin" with
+# other agents' work (librarian nightly 2026-10-15).
+_BOILERPLATE_TASKS = {"junto-inbox channel plugin"}
+
+
+def park_title_task_hint(task) -> str:
+    """Task suffix for a park-summary title; empty for client boilerplate."""
+    hint = (task or "").strip()
+    if hint.lower() in _BOILERPLATE_TASKS:
+        return ""
+    return hint[:60]
+
+
 @mcp.tool()
 async def memory_start_session(
     project: str,
@@ -967,7 +982,7 @@ async def memory_end_session(
     # findability gap is part of why orphaned content stayed orphaned.
     if learnings:
         learning_id = generate_doc_id(learnings, "learning")
-        _task_hint = (session_info.get("task") or "").strip()[:60]
+        _task_hint = park_title_task_hint(session_info.get("task"))
         await proj_collection.add(
             ids=[learning_id],
             documents=[learnings],
