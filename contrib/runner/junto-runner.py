@@ -24,6 +24,8 @@ Config (JSON, mode 600), default ~/.config/junto-runner/config.json:
   "num_ctx_buckets": [8192, 16384],      (optional; see run_context)
   "num_ctx_max": {"qwen2.5:72b": 4096},  (optional per-model cap)
   "num_predict": 8192,                   (optional reply-token cap, reasoning included)
+  "workers": 3,                          (optional; runs at once, default 1; see RunGate)
+  "exclusive_model_gb": 24,              (optional; bigger models run alone, default 24)
   "scopes": {
     "mail:support": {"credential_files": ["/path/.support-imap-app-password.secret"]},
     "files:notes":  {"file_roots": ["/home/me/notes"]}
@@ -52,7 +54,7 @@ import urllib.error
 import urllib.request
 from html.parser import HTMLParser
 
-VERSION = "0.4.2"
+VERSION = "0.5.0"
 log = logging.getLogger("junto-runner")
 
 
@@ -66,6 +68,8 @@ def load_config(path):
     cfg.setdefault("ollama", "http://localhost:11434")
     cfg.setdefault("poll_seconds", 20)
     cfg.setdefault("scopes", {})
+    cfg.setdefault("workers", 1)
+    cfg.setdefault("exclusive_model_gb", 24)
     with open(os.path.expanduser(cfg["key_file"])) as fh:
         cfg["_key"] = fh.read().strip()
     return cfg
@@ -753,7 +757,7 @@ def _structured(cfg, task, messages):
 
 # ── one run ────────────────────────────────────────────────────────────────
 
-def process(cfg, server, claim):
+def process(cfg, server, claim, gate):
     run, task, scope = claim["run"], claim["task"], claim["scope"]
     local_scope = cfg["scopes"].get(scope["name"]) or {}
     scope_secret = open_sealed(cfg, scope.get("secret_sealed"))
@@ -793,37 +797,39 @@ def process(cfg, server, claim):
 
     threading.Thread(target=beat, daemon=True).start()
     try:
-        items, evidence, cursor_out = adapter.fetch(task.get("source_params") or {}, claim.get("cursor"))
-        num_ctx, fit["chars"], num_predict = run_context(cfg, task, items, use_tools)
-        stats = {}
-        task = dict(task, _num_ctx=num_ctx, _num_predict=num_predict, _stats=stats)
-        results = []
-        for it in items:
-            try:
-                out, err, calls = run_model(it)
-            except Exception as e:
-                out, err, calls = None, f"model call failed: {e}", []
-            results.append({"item_ref": it["item_ref"], "meta": it["meta"], "output": out, "error": err,
-                            "tool_calls": calls})
-        if run.get("canary_due"):
-            for idx, canary in enumerate(task.get("canaries") or []):
+        # Heartbeats run while a run waits here, so a queued run keeps its lease.
+        with gate.hold(exclusive_model(cfg, task.get("model") or "qwen3:14b")):
+            items, evidence, cursor_out = adapter.fetch(task.get("source_params") or {}, claim.get("cursor"))
+            num_ctx, fit["chars"], num_predict = run_context(cfg, task, items, use_tools)
+            stats = {}
+            task = dict(task, _num_ctx=num_ctx, _num_predict=num_predict, _stats=stats)
+            results = []
+            for it in items:
                 try:
-                    if canary.get("content"):  # synthetic canary, e.g. a prompt-injection probe
-                        it = {"item_ref": f"canary:{idx}", "meta": {}, "content": str(canary["content"])[:20000]}
-                    else:
-                        it = adapter.locate(canary.get("source_params") or {})
-                    if it is None:
-                        results.append({"item_ref": f"canary:{idx}", "canary": idx, "error": "locator found nothing"})
-                        continue
                     out, err, calls = run_model(it)
-                    results.append({"item_ref": f"canary:{idx}", "canary": idx, "output": out, "error": err,
-                                    "tool_calls": calls})
                 except Exception as e:
-                    results.append({"item_ref": f"canary:{idx}", "canary": idx, "error": str(e)[:300]})
-        if items:  # never on an empty fetch: the server fails "0 items + no evidence" runs on purpose
-            evidence = dict(evidence or {}, num_ctx=num_ctx, items_truncated=fit["cut"], **stats)
-        return {"run_id": run["run_id"], "items": results, "items_examined": len(items),
-                "source_evidence": evidence, "cursor_out": cursor_out, "model": task.get("model")}
+                    out, err, calls = None, f"model call failed: {e}", []
+                results.append({"item_ref": it["item_ref"], "meta": it["meta"], "output": out, "error": err,
+                                "tool_calls": calls})
+            if run.get("canary_due"):
+                for idx, canary in enumerate(task.get("canaries") or []):
+                    try:
+                        if canary.get("content"):  # synthetic canary, e.g. a prompt-injection probe
+                            it = {"item_ref": f"canary:{idx}", "meta": {}, "content": str(canary["content"])[:20000]}
+                        else:
+                            it = adapter.locate(canary.get("source_params") or {})
+                        if it is None:
+                            results.append({"item_ref": f"canary:{idx}", "canary": idx, "error": "locator found nothing"})
+                            continue
+                        out, err, calls = run_model(it)
+                        results.append({"item_ref": f"canary:{idx}", "canary": idx, "output": out, "error": err,
+                                        "tool_calls": calls})
+                    except Exception as e:
+                        results.append({"item_ref": f"canary:{idx}", "canary": idx, "error": str(e)[:300]})
+            if items:  # never on an empty fetch: the server fails "0 items + no evidence" runs on purpose
+                evidence = dict(evidence or {}, num_ctx=num_ctx, items_truncated=fit["cut"], **stats)
+            return {"run_id": run["run_id"], "items": results, "items_examined": len(items),
+                    "source_evidence": evidence, "cursor_out": cursor_out, "model": task.get("model")}
     finally:
         stop.set()
         adapter.close()
@@ -832,10 +838,87 @@ def process(cfg, server, claim):
 
 
 def ollama_models(cfg):
+    """Installed models -> on-disk size in bytes (empty if Ollama is unreachable)."""
     try:
-        return [m["name"] for m in _get(cfg["ollama"].rstrip("/") + "/api/tags").get("models", [])]
+        tags = _get(cfg["ollama"].rstrip("/") + "/api/tags").get("models", [])
     except Exception:
-        return []
+        return {}
+    return {m["name"]: m.get("size") or 0 for m in tags}
+
+
+def exclusive_model(cfg, model):
+    """A model too big to share the GPUs (qwen2.5:72b, ~47 GB) runs alone: next to other
+    runs it evicts the resident models and every run thrashes. Unknown models share."""
+    sizes = cfg.setdefault("_model_sizes", {})
+    if model not in sizes:  # pulled after startup
+        sizes.update(ollama_models(cfg))
+    return sizes.get(model, 0) > float(cfg["exclusive_model_gb"]) * 1e9
+
+
+class RunGate:
+    """Lets worker threads run side by side, except exclusive runs, which wait for the
+    others to finish and run alone. A waiting exclusive run stops new shared runs from
+    starting, so it can't starve while the queue stays busy."""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.shared = 0
+        self.exclusive = False
+        self.waiting = 0
+
+    @contextlib.contextmanager
+    def hold(self, exclusive):
+        with self.cond:
+            if exclusive:
+                self.waiting += 1
+                self.cond.wait_for(lambda: not self.exclusive and self.shared == 0)
+                self.waiting -= 1
+                self.exclusive = True
+            else:
+                self.cond.wait_for(lambda: not self.exclusive and self.waiting == 0)
+                self.shared += 1
+        try:
+            yield
+        finally:
+            with self.cond:
+                if exclusive:
+                    self.exclusive = False
+                else:
+                    self.shared -= 1
+                self.cond.notify_all()
+
+
+def work(cfg, server, gate, once=False):
+    """One claim loop. With workers > 1 several of these share the runner key; the
+    server's claim is atomic, so two loops never get the same run."""
+    while True:
+        try:
+            claim = server.call("claim")
+        except Exception as e:  # server down: keep the loop (and the thread) alive
+            log.error("claim failed: %s: %s", type(e).__name__, e)
+            claim = {}
+        if claim.get("error"):
+            log.error("claim failed: %s", claim)
+        elif claim.get("run"):
+            run_id = claim["run"]["run_id"]
+            log.info("claimed %s (task %s)", run_id, claim["task"].get("name"))
+            try:
+                body = process(cfg, server, claim, gate)
+                res = server.call("complete", body, timeout=120)
+                log.info("completed %s: examined=%s routed=%s", run_id, body["items_examined"], res.get("routed"))
+            except Exception as e:
+                # Never send item content in the error: just the exception type + message.
+                log.error("run %s failed: %s", run_id, e)
+                try:
+                    server.call("fail", {"run_id": run_id, "error": f"{type(e).__name__}: {str(e)[:400]}"})
+                except Exception as e2:
+                    log.error("reporting %s failed: %s", run_id, e2)
+            if once:
+                return
+            continue
+        if once:
+            return
+        time.sleep(cfg["poll_seconds"])
 
 
 def main():
@@ -843,37 +926,28 @@ def main():
     ap.add_argument("--config", default="~/.config/junto-runner/config.json")
     ap.add_argument("--once", action="store_true", help="claim at most one run, then exit")
     args = ap.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(threadName)s] %(message)s")
     cfg = load_config(args.config)
+    cfg["_model_sizes"] = ollama_models(cfg)
     server = Server(cfg)
-    reg = server.call("register", {"models": ollama_models(cfg), "scopes_served": sorted(cfg["scopes"]),
+    reg = server.call("register", {"models": sorted(cfg["_model_sizes"]), "scopes_served": sorted(cfg["scopes"]),
                                    "adapters": sorted(ADAPTERS) + ["none"], "public_key": load_keypair(cfg),
                                    "version": VERSION, "host": socket.gethostname()})
     if reg.get("error"):
         log.error("register failed: %s", reg)
         sys.exit(2)
-    log.info("registered as %s; scopes %s", reg.get("runner_id"), sorted(cfg["scopes"]))
-    while True:
-        claim = server.call("claim")
-        if claim.get("error"):
-            log.error("claim failed: %s", claim)
-        elif claim.get("run"):
-            run_id = claim["run"]["run_id"]
-            log.info("claimed %s (task %s)", run_id, claim["task"].get("name"))
-            try:
-                body = process(cfg, server, claim)
-                res = server.call("complete", body, timeout=120)
-                log.info("completed %s: examined=%s routed=%s", run_id, body["items_examined"], res.get("routed"))
-            except Exception as e:
-                # Never send item content in the error: just the exception type + message.
-                log.error("run %s failed: %s", run_id, e)
-                server.call("fail", {"run_id": run_id, "error": f"{type(e).__name__}: {str(e)[:400]}"})
-            if args.once:
-                return
-            continue
-        if args.once:
-            return
-        time.sleep(cfg["poll_seconds"])
+    workers = 1 if args.once else max(1, int(cfg["workers"]))
+    log.info("registered as %s; scopes %s; %d worker(s)", reg.get("runner_id"), sorted(cfg["scopes"]), workers)
+    gate = RunGate()
+    threads = []
+    for n in range(workers):
+        t = threading.Thread(target=work, args=(cfg, server, gate, args.once), name=f"w{n + 1}")
+        t.start()
+        threads.append(t)
+        if n + 1 < workers:
+            time.sleep(cfg["poll_seconds"] / workers)  # stagger the idle polls
+    for t in threads:
+        t.join()
 
 
 if __name__ == "__main__":

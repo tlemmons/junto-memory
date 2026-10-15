@@ -58,6 +58,14 @@ version via `memory_health` (`server_version`).
 ### Fixed
 - **Runner 0.4.2:** a gpt-oss reply cut at the cap is retried once at low reasoning effort
   (a phishing canary reasoned past 8,192 tokens); `low_effort_retries` in run evidence.
+- **Runner 0.5.0: parallel runs.** New config `workers` (default 1; sage runs 3): that
+  many claim loops share one runner key, and the server's atomic claim keeps them apart.
+  Ollama already served 3 requests per model, so the serial runner was the bottleneck
+  (measured 1.5x same-model, 2.5x across models on sage's two GPUs). Models bigger than
+  `exclusive_model_gb` (default 24, by Ollama's on-disk size, e.g. qwen2.5:72b) run alone,
+  so they don't evict the resident models; a waiting exclusive run holds back new runs
+  so it can't starve. A server outage no longer kills the runner process; each loop
+  logs and retries.
 - **Runner 0.4.1:** 0.4.0's 2,048-token reply cap counted gpt-oss reasoning and cut
   replies before any JSON; now min(8,192, context/2), with a clear error on a cap hit.
 - **Failed items of scheduled tasks notify the owner** (action notice per run with each
