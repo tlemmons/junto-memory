@@ -38,6 +38,10 @@ Mechanics:
 - Opt-out: push_control config `idle_park_minutes=0` (per project or server
   default) disables; `idle_park_optout` is a comma-separated agent list for
   always-on agents.
+- Policy text: the default body advises parking at a clean stop. A project
+  with an active project-scoped guideline `park_on_idle_nudge` gets that
+  guideline's live text in the body instead (nudge_text), so its own idle
+  policy (e.g. nimbus keep-alive) wins without agents overriding the nudge.
 
 Delivery: an is_system_notice message (kind idle_park_nudge) → INJECT push via
 the normal inbox path, so the full body reaches the agent's channel.
@@ -75,13 +79,23 @@ REARM_GRACE_SECONDS = 600
 RESET_EXPIRY_HOURS = 6
 RESET_OUTCOMES = frozenset({"done", "failed", "deferred"})
 
-NUDGE_SUBJECT = "Idle — park now if at a clean stop (cache expires soon)"
+NUDGE_SUBJECT = "Idle {minutes} min — prompt cache expires at ~60 min idle"
+# Default advice, used when the project has no idle-policy guideline.
 NUDGE_BODY = (
-    "Idle {minutes} min: park now (memory_get_skill('parking')) if you're at a "
+    "Idle {minutes} min: park (memory_get_skill('parking')) if you're at a "
     "clean stopping point — your prompt cache expires at ~60 min idle, and "
     "parking while it's warm is cheap. If you're mid-task or the user is "
     "actively working with you, ignore this. (One nudge per idle period; "
     "opt out via push_control config idle_park_optout.)"
+)
+# A project sets its own idle policy with a project-scoped guideline of this
+# name. The nudge carries that guideline's LIVE text instead of the default
+# advice, so agents act on the current rule even when the copy cached at
+# session start / plugin bind is stale (coordinator@nimbus, msg_9f1cf850e7d6).
+POLICY_GUIDELINE = "park_on_idle_nudge"
+NUDGE_POLICY_BODY = (
+    "Idle {minutes} min. Your project's idle policy (guideline "
+    "{guideline}, live text — it supersedes any cached copy):\n\n{rule}"
 )
 
 # (project, agent) -> {"last_real": monotonic, "nudged_at": monotonic|None}
@@ -324,11 +338,34 @@ def apply_reset_results(db, results) -> Dict[str, list]:
     return {"applied": applied, "rejected": rejected}
 
 
+def _project_idle_policy(db, project: str) -> Optional[str]:
+    """Live text of the project's park_on_idle_nudge guideline, or None."""
+    scope = project.lower().replace("-", "_").replace(" ", "_")
+    try:
+        doc = db.guidelines.find_one(
+            {"name": POLICY_GUIDELINE, "scope": scope, "active": True}, {"rule": 1})
+    except Exception:
+        return None
+    rule = (doc or {}).get("rule")
+    return rule.strip() if isinstance(rule, str) and rule.strip() else None
+
+
+def nudge_text(db, project: str, minutes: int) -> Tuple[str, str]:
+    """(subject, body) for an idle nudge to an agent in `project`."""
+    subject = NUDGE_SUBJECT.format(minutes=minutes)
+    rule = _project_idle_policy(db, project)
+    if rule:
+        return subject, NUDGE_POLICY_BODY.format(
+            minutes=minutes, guideline=POLICY_GUIDELINE, rule=rule)
+    return subject, NUDGE_BODY.format(minutes=minutes)
+
+
 async def _send_nudge(db, project: str, agent: str, minutes: int) -> Optional[str]:
     from shared_memory.helpers import utc_now
     from shared_memory.tools.messaging import _build_announce_packet, _notify_inbox_for_send
 
     message_id = f"msg_{uuid.uuid4().hex[:12]}"
+    subject, body = nudge_text(db, project, minutes)
     doc = {
         "_id": message_id,
         "to_instance": agent,
@@ -336,8 +373,8 @@ async def _send_nudge(db, project: str, agent: str, minutes: int) -> Optional[st
         "from_instance": "system",
         "from_project": project,
         "from_session": None,
-        "subject": NUDGE_SUBJECT,
-        "message": NUDGE_BODY.format(minutes=minutes),
+        "subject": subject,
+        "message": body,
         "priority": "normal",
         "category": "info",
         "reply_to": None,

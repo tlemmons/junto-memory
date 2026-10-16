@@ -6,6 +6,14 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+### Changed
+- **Idle-park nudge follows the project's idle policy.** The nudge no longer says
+  "park now". Its subject is neutral, and a project with an active project-scoped
+  guideline `park_on_idle_nudge` gets that guideline's live text in the body
+  instead of the default park-at-a-clean-stop advice. Agents with a stale cached
+  copy of the guideline still act on the current rule (coordinator@nimbus,
+  msg_9f1cf850e7d6).
+
 ### Added
 - **Local-model delegation** (interface:delegated-inference-v0 1.5.1; README →
   "Local-Model Delegation"). Agents own tasks that run on a local Ollama model:

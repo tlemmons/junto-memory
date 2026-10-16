@@ -377,3 +377,57 @@ def test_future_stamp_counts_as_now_and_bad_stamps_are_ignored():
     assert note_turn("memory", "not a date", now=900, now_wall=WALL) is False
     assert note_turn("memory", None, now=900, now_wall=WALL) is False
     assert note_turn("other-agent", _stamp(0), now=900, now_wall=WALL) is False
+
+
+# --- nudge text: project idle-policy guideline (msg_9f1cf850e7d6) -------------
+
+class _FakeGuidelines:
+    def __init__(self, docs):
+        self.docs = docs
+
+    def find_one(self, query, projection=None):
+        for d in self.docs:
+            if all(d.get(k) == v for k, v in query.items()):
+                return d
+        return None
+
+
+class _PolicyDb:
+    def __init__(self, docs):
+        self.guidelines = _FakeGuidelines(docs)
+
+
+def test_nudge_text_default_has_no_park_now_and_names_minutes():
+    subject, body = idle_park.nudge_text(_PolicyDb([]), "junto", 50)
+    assert "park now" not in subject.lower() and "park now" not in body.lower()
+    assert "50 min" in subject and body.startswith("Idle 50 min: park")
+
+
+def test_nudge_text_carries_live_project_policy():
+    db = _PolicyDb([{"name": "park_on_idle_nudge", "scope": "nimbus", "active": True,
+                     "rule": "  KEEP-ALIVE OR PARK: check context first.  "}])
+    _, body = idle_park.nudge_text(db, "nimbus", 50)
+    assert "park_on_idle_nudge" in body
+    assert body.endswith("KEEP-ALIVE OR PARK: check context first.")
+    assert "clean stopping point" not in body
+
+
+@pytest.mark.parametrize("doc", [
+    {"name": "park_on_idle_nudge", "scope": "nimbus", "active": False, "rule": "x"},
+    {"name": "park_on_idle_nudge", "scope": "other", "active": True, "rule": "x"},
+    {"name": "park_on_idle_nudge", "scope": "nimbus", "active": True, "rule": "   "},
+])
+def test_nudge_text_falls_back_when_policy_inactive_other_project_or_blank(doc):
+    _, body = idle_park.nudge_text(_PolicyDb([doc]), "nimbus", 50)
+    assert "clean stopping point" in body
+
+
+def test_nudge_text_normalizes_project_scope():
+    db = _PolicyDb([{"name": "park_on_idle_nudge", "scope": "my_proj", "active": True,
+                     "rule": "policy"}])
+    assert idle_park.nudge_text(db, "My-Proj", 50)[1].endswith("policy")
+
+
+def test_nudge_text_survives_db_without_guidelines():
+    _, body = idle_park.nudge_text(_FakeDb(), "nimbus", 50)
+    assert "clean stopping point" in body
