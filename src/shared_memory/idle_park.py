@@ -42,6 +42,9 @@ Mechanics:
   with an active project-scoped guideline `park_on_idle_nudge` gets that
   guideline's live text in the body instead (nudge_text), so its own idle
   policy (e.g. nimbus keep-alive) wins without agents overriding the nudge.
+- Self-wake skip: no nudge while the agent has its own pending reminder due
+  within SELF_WAKE_WINDOW_SECONDS (it has already armed a wake). The timer is
+  still marked nudged, so the reminder's turn re-arms it as usual.
 
 Delivery: an is_system_notice message (kind idle_park_nudge) → INJECT push via
 the normal inbox path, so the full body reaches the agent's channel.
@@ -78,6 +81,11 @@ SWEEP_INTERVAL_SECONDS = 60
 REARM_GRACE_SECONDS = 600
 RESET_EXPIRY_HOURS = 6
 RESET_OUTCOMES = frozenset({"done", "failed", "deferred"})
+# An agent with its own reminder due within this window has already armed a
+# wake (e.g. a nimbus keep-alive), so the nudge is skipped. Without this the
+# 50-min nudge always lands before a +55m keep-alive and resets its count, so
+# the chain never times out (learning_222e630bf8b35d24).
+SELF_WAKE_WINDOW_SECONDS = 3600
 
 NUDGE_SUBJECT = "Idle {minutes} min — prompt cache expires at ~60 min idle"
 # Default advice, used when the project has no idle-policy guideline.
@@ -360,6 +368,23 @@ def nudge_text(db, project: str, minutes: int) -> Tuple[str, str]:
     return subject, NUDGE_BODY.format(minutes=minutes)
 
 
+def _has_pending_self_wake(db, project: str, agent: str, now_wall=None) -> bool:
+    """True if the agent has a pending reminder due within SELF_WAKE_WINDOW_SECONDS."""
+    from datetime import datetime, timedelta, timezone
+
+    now_wall = now_wall or datetime.now(timezone.utc)
+    try:
+        doc = db.scheduled_messages.find_one({
+            "agent_instance": agent,
+            "agent_project": project,
+            "status": "pending",
+            "deliver_at": {"$lte": now_wall + timedelta(seconds=SELF_WAKE_WINDOW_SECONDS)},
+        }, {"_id": 1})
+    except Exception:
+        return False
+    return doc is not None
+
+
 async def _send_nudge(db, project: str, agent: str, minutes: int) -> Optional[str]:
     from shared_memory.helpers import utc_now
     from shared_memory.tools.messaging import _build_announce_packet, _notify_inbox_for_send
@@ -414,6 +439,10 @@ async def sweep_once(db) -> int:
     for project, agent, minutes in due_agents(lambda p, a: _threshold_from_config(db, p, a)):
         # Mark first: a failed insert must not turn into a nudge every minute.
         mark_nudged(project, agent)
+        if _has_pending_self_wake(db, project, agent):
+            log.info("idle-park: skipped %s/%s, own reminder due within %ss",
+                     agent, project, SELF_WAKE_WINDOW_SECONDS)
+            continue
         try:
             msg_id = await _send_nudge(db, project, agent, minutes)
             sent += 1

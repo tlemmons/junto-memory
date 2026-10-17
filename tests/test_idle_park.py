@@ -431,3 +431,68 @@ def test_nudge_text_normalizes_project_scope():
 def test_nudge_text_survives_db_without_guidelines():
     _, body = idle_park.nudge_text(_FakeDb(), "nimbus", 50)
     assert "clean stopping point" in body
+
+
+# --- self-wake skip: own reminder due soon suppresses the nudge (learning_222e630bf8b35d24)
+
+@pytest.fixture
+def wake_db():
+    import os
+    import uuid as _uuid
+
+    url = os.environ.get("JUNTO_TEST_MONGO_URL")
+    if not url:
+        pytest.skip("JUNTO_TEST_MONGO_URL not set (use a throwaway mongo, not production)")
+    from pymongo import MongoClient
+    client = MongoClient(url, serverSelectionTimeoutMS=3000)
+    try:
+        client.admin.command("ping")
+    except Exception:
+        pytest.skip("test mongo unreachable")
+    name = f"test_idle_wake_{_uuid.uuid4().hex[:8]}"
+    yield client[name]
+    client.drop_database(name)
+    client.close()
+
+
+def _reminder(db, minutes_from_now, status="pending", agent="memory", project="junto"):
+    from datetime import datetime, timedelta, timezone
+    db.scheduled_messages.insert_one({
+        "agent_instance": agent, "agent_project": project, "status": status,
+        "deliver_at": datetime.now(timezone.utc) + timedelta(minutes=minutes_from_now),
+    })
+
+
+@pytest.mark.parametrize("minutes,status,agent,expected", [
+    (55, "pending", "memory", True),     # keep-alive armed: skip
+    (59, "pending", "memory", True),
+    (61, "pending", "memory", False),    # beyond the window
+    (60 * 24, "pending", "memory", False),
+    (30, "delivered", "memory", False),  # already fired
+    (30, "pending", "other", False),     # someone else's reminder
+])
+def test_has_pending_self_wake(wake_db, minutes, status, agent, expected):
+    _reminder(wake_db, minutes, status=status, agent=agent)
+    assert idle_park._has_pending_self_wake(wake_db, "junto", "memory") is expected
+
+
+def test_has_pending_self_wake_survives_db_without_collection():
+    assert idle_park._has_pending_self_wake(_FakeDb(), "junto", "memory") is False
+
+
+async def test_sweep_skips_agent_with_armed_keepalive(monkeypatch):
+    from shared_memory.tools import messaging
+
+    async def fake_notify(project, agent, packet=None):
+        raise AssertionError("must not push")
+
+    monkeypatch.setattr(messaging, "_notify_inbox_for_send", fake_notify)
+    monkeypatch.setattr(idle_park, "_threshold_from_config", lambda db, p, a: 50)
+    monkeypatch.setattr(idle_park, "_has_pending_self_wake", lambda db, p, a: True)
+    note_tool_call("memory_query", "s_agent", now=0)
+    idle_park._timers[KEY]["last_real"] -= 10_000_000
+
+    db = _FakeDb()
+    assert await idle_park.sweep_once(db) == 0
+    assert db.messages.docs == []
+    assert idle_park._timers[KEY]["nudged_at"] is not None  # marked: no retry every minute

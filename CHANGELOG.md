@@ -7,6 +7,11 @@ version via `memory_health` (`server_version`).
 ## [Unreleased]
 
 ### Changed
+- **Idle-park nudge skips agents that already armed a wake.** No nudge while the
+  agent has its own pending reminder due within 60 min (e.g. a nimbus keep-alive).
+  Before this the 50-min nudge always landed ahead of a +55m keep-alive and reset
+  its count, so the chain never timed out and idle agents kept themselves awake for
+  hours (learning_222e630bf8b35d24).
 - **Idle-park nudge follows the project's idle policy.** The nudge no longer says
   "park now". Its subject is neutral, and a project with an active project-scoped
   guideline `park_on_idle_nudge` gets that guideline's live text in the body
