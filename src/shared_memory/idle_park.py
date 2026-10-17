@@ -45,6 +45,9 @@ Mechanics:
 - Parked agents: after memory_end_session the agent's calls don't arm a timer
   until it starts a new session itself (note_session_start; a plugin rebind
   doesn't count), so a parked agent is never nudged.
+- Auto-reset agents (idle_park_autoreset) get a direct "park now, you'll be
+  /clear+go'd" body with their reported context size; it overrides the
+  project policy text (Tom 2026-10-17).
 - Self-wake skip: no nudge while the agent has its own pending reminder due
   within SELF_WAKE_WINDOW_SECONDS (it has already armed a wake). The timer is
   still marked nudged, so the reminder's turn re-arms it as usual.
@@ -99,6 +102,20 @@ NUDGE_BODY = (
     "actively working with you, ignore this. (One nudge per idle period; "
     "opt out via push_control config idle_park_optout.)"
 )
+# Agents on idle_park_autoreset get a direct "park now" instead: the box will
+# /clear + go them after they park, and that only happens if they park while
+# the nudge is fresh. It overrides the project's keep-alive policy (Tom,
+# 2026-10-17). Must start with "Idle": the reset gate anchors on
+# "[SYSTEM NOTICE] Idle" (contrib/context-report NUDGE_MARKER).
+NUDGE_AUTORESET_BODY = (
+    "Idle {minutes} min{context}. You're on auto-reset: PARK NOW "
+    "(memory_get_skill('parking')): refresh your state spec, then "
+    "memory_end_session. Once you've parked, this box will /clear and `go` you "
+    "automatically, so you come back with a fresh context and your state spec. "
+    "This overrides any keep-alive rule for you. Skip it only if the user is "
+    "actively working with you or you're mid-way through an irreversible step."
+)
+
 # A project sets its own idle policy with a project-scoped guideline of this
 # name. The nudge carries that guideline's LIVE text instead of the default
 # advice, so agents act on the current rule even when the copy cached at
@@ -385,9 +402,23 @@ def _project_idle_policy(db, project: str) -> Optional[str]:
     return rule.strip() if isinstance(rule, str) and rule.strip() else None
 
 
-def nudge_text(db, project: str, minutes: int) -> Tuple[str, str]:
-    """(subject, body) for an idle nudge to an agent in `project`."""
+def _on_autoreset(db, project: str, agent: Optional[str]) -> bool:
+    if not agent:
+        return False
+    try:
+        from shared_memory.push_control import get_effective_config
+        return agent in _csv(get_effective_config(db, project).get("idle_park_autoreset"))
+    except Exception:
+        return False
+
+
+def nudge_text(db, project: str, minutes: int, agent: Optional[str] = None) -> Tuple[str, str]:
+    """(subject, body) for an idle nudge to `agent` in `project`."""
     subject = NUDGE_SUBJECT.format(minutes=minutes)
+    if _on_autoreset(db, project, agent):
+        tokens = _reported_context_tokens(db, agent)
+        context = f" (your context: ~{tokens // 1000}K tokens)" if tokens else ""
+        return subject, NUDGE_AUTORESET_BODY.format(minutes=minutes, context=context)
     rule = _project_idle_policy(db, project)
     if rule:
         return subject, NUDGE_POLICY_BODY.format(
@@ -417,7 +448,7 @@ async def _send_nudge(db, project: str, agent: str, minutes: int) -> Optional[st
     from shared_memory.tools.messaging import _build_announce_packet, _notify_inbox_for_send
 
     message_id = f"msg_{uuid.uuid4().hex[:12]}"
-    subject, body = nudge_text(db, project, minutes)
+    subject, body = nudge_text(db, project, minutes, agent)
     doc = {
         "_id": message_id,
         "to_instance": agent,

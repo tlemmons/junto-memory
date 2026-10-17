@@ -534,3 +534,44 @@ def test_park_only_affects_that_project_and_agent():
         assert ("nimbus", "memory") in idle_park._timers
     finally:
         active_sessions.pop("s_other", None)
+
+
+# --- auto-reset agents get a direct park-now nudge (Tom 2026-10-17) ----------
+
+class _AutoresetDb(_PolicyDb):
+    def __init__(self, docs=(), tokens=None):
+        super().__init__(list(docs))
+        self._tokens = tokens
+
+        class _Status:
+            def find_one(_s, q, proj=None):
+                return {"context_tokens": tokens} if tokens else None
+        self.agent_status = _Status()
+
+
+def _autoreset_cfg(monkeypatch, agents):
+    from shared_memory import push_control
+    monkeypatch.setattr(push_control, "get_effective_config",
+                        lambda db, p: {"idle_park_autoreset": agents})
+
+
+def test_autoreset_agent_gets_park_now_with_context(monkeypatch):
+    _autoreset_cfg(monkeypatch, "nimbusSupport, other")
+    policy = {"name": "park_on_idle_nudge", "scope": "nimbus", "active": True, "rule": "KEEP-ALIVE"}
+    _, body = idle_park.nudge_text(_AutoresetDb([policy], tokens=285_708), "nimbus", 50, "nimbusSupport")
+    assert body.startswith("Idle 50 min (your context: ~285K tokens).")
+    assert "PARK NOW" in body and "/clear" in body and "KEEP-ALIVE" not in body
+
+
+def test_autoreset_body_keeps_reset_gate_anchor(monkeypatch):
+    _autoreset_cfg(monkeypatch, "nimbusSupport")
+    _, body = idle_park.nudge_text(_AutoresetDb(), "nimbus", 50, "nimbusSupport")
+    assert ("[SYSTEM NOTICE] " + body).startswith("[SYSTEM NOTICE] Idle")
+    assert body.startswith("Idle 50 min. You're on auto-reset")  # no context reported
+
+
+def test_non_autoreset_agent_still_gets_project_policy(monkeypatch):
+    _autoreset_cfg(monkeypatch, "nimbusSupport")
+    policy = {"name": "park_on_idle_nudge", "scope": "nimbus", "active": True, "rule": "KEEP-ALIVE"}
+    _, body = idle_park.nudge_text(_AutoresetDb([policy]), "nimbus", 50, "coordinator")
+    assert body.endswith("KEEP-ALIVE")

@@ -7,6 +7,12 @@ version via `memory_health` (`server_version`).
 ## [Unreleased]
 
 ### Changed
+- **Auto-reset agents get a direct "park now" nudge.** An agent listed in
+  `idle_park_autoreset` is told to park now, shown its reported context size, and
+  told the box will /clear + go it after it parks. This overrides the project's
+  idle-policy text (e.g. nimbus keep-alive), because the reset only fires on a
+  park that follows the nudge. The body still starts with "Idle" for the reset
+  gate's anchor (Tom, 2026-10-17).
 - **Parked agents are no longer nudged.** After `memory_end_session`, the agent's
   tool calls (including its still-attached inbox plugin's) don't arm an idle timer
   until the agent starts a new session itself; a plugin rebind doesn't count.
