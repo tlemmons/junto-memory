@@ -579,6 +579,12 @@ async def memory_start_session(
         "is_principal": principal,
     }
 
+    try:
+        from shared_memory import idle_park
+        idle_park.note_session_start(project, claude_instance, task_description)
+    except Exception:
+        pass  # best-effort: idle-park bookkeeping must never fail a session start
+
     # Phase C2 inbox auth: bind this app-session to the underlying MCP
     # transport so resource handlers can resolve the caller's identity from
     # mcp._mcp_server.request_context.session.

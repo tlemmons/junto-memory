@@ -19,11 +19,13 @@ KEY = ("junto", "memory")
 @pytest.fixture(autouse=True)
 def _sessions():
     idle_park._timers.clear()
+    idle_park._parked.clear()
     active_sessions["s_agent"] = {"project": "junto", "claude_instance": "memory"}
     active_sessions["s_plugin"] = {"project": "junto", "claude_instance": "memory",
                                    "task_description": "junto-inbox channel plugin"}
     yield
     idle_park._timers.clear()
+    idle_park._parked.clear()
     active_sessions.pop("s_agent", None)
     active_sessions.pop("s_plugin", None)
 
@@ -496,3 +498,39 @@ async def test_sweep_skips_agent_with_armed_keepalive(monkeypatch):
     assert await idle_park.sweep_once(db) == 0
     assert db.messages.docs == []
     assert idle_park._timers[KEY]["nudged_at"] is not None  # marked: no retry every minute
+
+
+# --- parked agents are not re-armed (msg_9684a5d90e59) ------------------------
+
+def test_parked_agent_calls_do_not_arm_a_timer():
+    note_tool_call("memory_query", "s_agent", now=0)
+    note_tool_call("memory_end_session", "s_agent", now=100)
+    note_tool_call("memory_get_messages", "s_plugin", now=200)  # plugin still attached
+    note_tool_call("memory_query", "s_agent", now=300)
+    assert KEY not in idle_park._timers
+    assert list(due_agents(lambda p, a: 1, now=1_000_000)) == []
+
+
+def test_plugin_rebind_does_not_unpark():
+    note_tool_call("memory_end_session", "s_agent", now=100)
+    idle_park.note_session_start("junto", "memory", "junto-inbox channel plugin")
+    note_tool_call("memory_get_messages", "s_plugin", now=200)
+    assert KEY not in idle_park._timers
+
+
+@pytest.mark.parametrize("task", ["", None, "Resume session (go)"])
+def test_agent_session_start_unparks(task):
+    note_tool_call("memory_end_session", "s_agent", now=100)
+    idle_park.note_session_start("junto", "memory", task)
+    note_tool_call("memory_query", "s_agent", now=200)
+    assert idle_park._timers[KEY]["last_real"] == 200
+
+
+def test_park_only_affects_that_project_and_agent():
+    active_sessions["s_other"] = {"project": "nimbus", "claude_instance": "memory"}
+    try:
+        note_tool_call("memory_end_session", "s_agent", now=100)
+        note_tool_call("memory_query", "s_other", now=200)
+        assert ("nimbus", "memory") in idle_park._timers
+    finally:
+        active_sessions.pop("s_other", None)

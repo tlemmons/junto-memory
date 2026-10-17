@@ -7,6 +7,12 @@ version via `memory_health` (`server_version`).
 ## [Unreleased]
 
 ### Changed
+- **Parked agents are no longer nudged.** After `memory_end_session`, the agent's
+  tool calls (including its still-attached inbox plugin's) don't arm an idle timer
+  until the agent starts a new session itself; a plugin rebind doesn't count.
+  Before this a parked agent was re-armed by its plugin and nudged every ~2h onto
+  an expired cache, rebuilding its whole context to reply "still parked"
+  (coordinator@nimbus, msg_9684a5d90e59).
 - **Idle-park nudge skips agents that already armed a wake.** No nudge while the
   agent has its own pending reminder due within 60 min (e.g. a nimbus keep-alive).
   Before this the 50-min nudge always landed ahead of a +55m keep-alive and reset

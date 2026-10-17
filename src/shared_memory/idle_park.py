@@ -42,6 +42,9 @@ Mechanics:
   with an active project-scoped guideline `park_on_idle_nudge` gets that
   guideline's live text in the body instead (nudge_text), so its own idle
   policy (e.g. nimbus keep-alive) wins without agents overriding the nudge.
+- Parked agents: after memory_end_session the agent's calls don't arm a timer
+  until it starts a new session itself (note_session_start; a plugin rebind
+  doesn't count), so a parked agent is never nudged.
 - Self-wake skip: no nudge while the agent has its own pending reminder due
   within SELF_WAKE_WINDOW_SECONDS (it has already armed a wake). The timer is
   still marked nudged, so the reminder's turn re-arms it as usual.
@@ -111,6 +114,17 @@ _timers: Dict[Tuple[str, str], Dict[str, Optional[float]]] = {}
 
 _sweep_task: Optional[asyncio.Task] = None
 
+# (project, agent) pairs that parked (memory_end_session). Their tool calls
+# don't arm a timer until the agent itself starts a new session: a parked
+# agent's plugin stays attached, and its calls used to re-arm the timer, so
+# parked agents were nudged every ~2h onto an expired cache — a full context
+# rebuild to reply "still parked" (coordinator@nimbus, msg_9684a5d90e59).
+_parked: set = set()
+
+# Session task strings that belong to a client, not an agent turn. A start
+# from one of these doesn't count as the agent coming back.
+CLIENT_TASKS = frozenset({"junto-inbox channel plugin"})
+
 # (project, agent, nudged_at ISO) for agents that ended their session while
 # nudged. Drained into idle_park_resets by drain_parked() (sweep or report).
 _parked_after_nudge: Deque[Tuple[str, str, Optional[str]]] = deque()
@@ -140,9 +154,12 @@ def note_tool_call(tool_name: str, session_id, now: Optional[float] = None) -> N
         return
     now = time.monotonic() if now is None else now
     if tool_name == "memory_end_session":
+        _parked.add(ident)
         timer = _timers.pop(ident, None)
         if timer is not None and timer.get("nudged_at") is not None:
             _parked_after_nudge.append((ident[0], ident[1], timer.get("nudged_wall")))
+        return
+    if ident in _parked:
         return
     timer = _timers.get(ident)
     if timer is None:
@@ -155,6 +172,16 @@ def note_tool_call(tool_name: str, session_id, now: Optional[float] = None) -> N
     timer["last_real"] = now
     timer["nudged_at"] = None
     timer["nudged_wall"] = None
+
+
+def note_session_start(project: str, agent: str, task) -> None:
+    """The agent started a session itself: a parked agent can be nudged again.
+
+    A client start (the inbox plugin rebinding) doesn't unpark.
+    """
+    if (task or "").strip().lower() in CLIENT_TASKS:
+        return
+    _parked.discard((project, agent))
 
 
 def note_turn(agent: str, written_at, now: Optional[float] = None, now_wall=None) -> bool:
