@@ -219,6 +219,47 @@ async def memory_query(
                     # Track access (fire-and-forget)
                     if doc_id:
                         await update_access_stats(proj_collection, doc_id)
+
+            # Exact identifier hits (lexical.py) — kept even below the
+            # relevance threshold, flagged match="exact", capped by config.
+            try:
+                _lex_max = int(_qcfg.get("lexical_max", 0))
+            except Exception:
+                _lex_max = 0
+            if _lex_max > 0 and _qvec is not None:
+                from shared_memory.lexical import lexical_scan
+                for h in await lexical_scan(proj_collection, query, _qvec, where_clause,
+                                            min(_lex_max, limit),
+                                            exclude_ids={r["id"] for r in results}):
+                    meta = h["meta"]
+                    if is_expired(meta):
+                        continue
+                    if recency_cutoff is not None:
+                        ts = parse_timestamp(meta.get("updated") or meta.get("created"))
+                        if ts is None or ts < recency_cutoff:
+                            continue
+                    status = meta.get("status", "active")
+                    staleness = format_staleness_warning(meta)
+                    warning = format_status_warning(status, meta.get("superseded_by"))
+                    if staleness:
+                        warning = (warning + " " + staleness).strip() if warning else staleness
+                    results.append({
+                        "source": f"project:{project}",
+                        "id": h["id"],
+                        "title": meta.get("title", "Untitled"),
+                        "type": meta.get("type"),
+                        "status": status,
+                        "relevance": f"{calculate_relevance(h['dist']):.0%}",
+                        "match": "exact",
+                        "created": meta.get("created", ""),
+                        "updated": meta.get("updated", ""),
+                        "age": format_age(meta.get("updated") or meta.get("created")),
+                        "content": h["doc"],
+                        "access_count": meta.get("access_count", 0),
+                        "authored_by": meta.get("claude_instance"),
+                        "warning": warning if warning else None
+                    })
+                    await update_access_stats(proj_collection, h["id"])
         except Exception:
             pass
 
@@ -305,6 +346,12 @@ async def memory_query(
         return (band, -epoch)
 
     results.sort(key=_sort_key)
+    # Exact identifier hits keep their slots; the vector rows fill the rest.
+    _exact = [r for r in results if r.get("match") == "exact"]
+    if _exact:
+        _rest = [r for r in results if r.get("match") != "exact"]
+        results = _rest[:max(0, limit - len(_exact))] + _exact
+        results.sort(key=_sort_key)
     results = results[:limit]
 
     # ── Facets inline delivery (design:memory-facets-v0 §consumer) ──

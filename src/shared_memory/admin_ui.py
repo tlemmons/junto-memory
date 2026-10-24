@@ -52,6 +52,7 @@ DESCRIPTIONS = {
     "default_expand_top": "memory_query: top N results get full bodies.",
     "default_snippet_length": "memory_query snippet length when not expanded.",
     "recall_floor": "Minimum similarity (0-1) for the per-turn recall hook to inject a memory.",
+    "lexical_max": "Max exact identifier matches (function names, ids, paths) added to memory_query / recall results, even below the similarity floor. 0 = off.",
 }
 
 SECRET_KEYS = {"webhook_token"}

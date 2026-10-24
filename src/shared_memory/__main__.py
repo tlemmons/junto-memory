@@ -385,9 +385,35 @@ async def _recall_payload(body, api_key, via_tunnel=False):
                 "_source": source,
             })
 
+    lexical_max = 0
     try:
-        await _scan(await get_project_collection(chroma, project),
-                    f"project:{project}", k)
+        lexical_max = int(query_config.get_effective_config(
+            mongo, project).get("lexical_max", 0))
+    except Exception:
+        pass
+    lexical = []
+
+    try:
+        proj_col = await get_project_collection(chroma, project)
+        await _scan(proj_col, f"project:{project}", k)
+        # Exact identifier hits (lexical.py) — kept even below the floor.
+        if lexical_max > 0 and qvec is not None:
+            from shared_memory.lexical import lexical_scan
+            for h in await lexical_scan(proj_col, qtext, qvec, where, min(lexical_max, k),
+                                        exclude_ids={c["id"] for c in candidates}):
+                if is_expired(h["meta"]) or _recall_excluded(h["id"], h["meta"], agent):
+                    continue
+                lexical.append({
+                    "id": h["id"],
+                    "type": h["meta"].get("type"),
+                    "title": h["meta"].get("title", "Untitled"),
+                    "score": round(calculate_relevance(h["dist"]), 3),
+                    "match": "exact",
+                    "updated": h["meta"].get("updated") or h["meta"].get("created", ""),
+                    "authored_by": h["meta"].get("claude_instance"),
+                    "_content": h["doc"],
+                    "_source": f"project:{project}",
+                })
         # Shared collections ride along exactly as memory_query's do (max 2
         # each), at the SAME floor — 0.6 already sits above memory_query's
         # shared bump (0.4).
@@ -398,7 +424,7 @@ async def _recall_payload(body, api_key, via_tunnel=False):
         return 500, {"error": f"recall query failed: {e}"}
 
     candidates.sort(key=lambda c: -c["score"])
-    candidates = candidates[:k]
+    candidates = candidates[:max(0, k - len(lexical))] + lexical
 
     # one_line: claim facet when present (mongo best-effort), else content head.
     claims = {}
