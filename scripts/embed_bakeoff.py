@@ -42,6 +42,14 @@ CANDIDATES = {
     "qwen3-0.6b": {"model": "qwen3-embedding:0.6b", "ctx": 8192, "doc": "", "query": QWEN_INSTRUCT},
     "gemma-300m": {"model": "embeddinggemma:300m", "ctx": 2048,
                    "doc": "title: none | text: ", "query": "task: search result | query: "},
+    "qwen3-4b": {"model": "qwen3-embedding:4b", "ctx": 8192, "doc": "", "query": QWEN_INSTRUCT},
+    "qwen3-8b": {"model": "qwen3-embedding:8b", "ctx": 8192, "doc": "", "query": QWEN_INSTRUCT},
+    "bge-m3": {"model": "bge-m3", "ctx": 8192, "doc": "", "query": ""},
+    "arctic2": {"model": "snowflake-arctic-embed2", "ctx": 8192, "doc": "", "query": "query: "},
+    "mxbai": {"model": "mxbai-embed-large", "ctx": 512, "doc": "",
+              "query": "Represent this sentence for searching relevant passages: "},
+    "gemma2-740m": {"model": "embeddinggemma-2:740m", "ctx": 8192,
+                    "doc": "title: none | text: ", "query": "task: search result | query: "},
 }
 
 
@@ -51,6 +59,14 @@ def _ollama_embed(model, texts, ctx):
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=600) as resp:
         return json.loads(resp.read())["embeddings"]
+
+
+def _ollama_version():
+    try:
+        with urllib.request.urlopen(OLLAMA + "/api/version", timeout=5) as r:
+            return json.loads(r.read()).get("version")
+    except Exception:
+        return None
 
 
 class _OllamaEF:
@@ -164,6 +180,7 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--candidates", default="minilm,minilm-chunk,nomic,qwen3-0.6b,gemma-300m")
     ap.add_argument("--set", default="v0")
+    ap.add_argument("--prefix", default="", help="scratch collection name prefix (re-index after an Ollama upgrade)")
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--scratch", required=True, help="dir for the scratch Chroma (never prod)")
     a = ap.parse_args()
@@ -178,10 +195,10 @@ async def main():
         chunked = name.endswith("-chunk")
         base = name[:-len("-chunk")] if chunked else name
         ef = _MiniLMEF() if base == "minilm" else _OllamaEF(CANDIDATES[base])
-        cols = _index(client, name, docs, ef, chunk_tok=tok if chunked else None)
+        cols = _index(client, a.prefix + name, docs, ef, chunk_tok=tok if chunked else None)
         t0 = time.time()
         report, detail = _score(qs, _ranker(cols, ef, a.k, chunked), a.k)
-        db[RUNS].insert_one({"set": a.set, "retriever": f"bakeoff:{name}", "embedder": name, "k": a.k,
+        db[RUNS].insert_one({"set": a.set, "retriever": f"bakeoff:{name}", "embedder": name, "ollama": _ollama_version(), "k": a.k,
                              "ts": time.time(), "report": report, "detail": detail,
                              "query_s": round(time.time() - t0, 1)})
         print(json.dumps({"candidate": name, "report": report}), flush=True)

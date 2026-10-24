@@ -73,7 +73,7 @@ def _tok():
 
 def _ask(passage, ident_rule):
     from li import call
-    out = call(OLLAMA, GEN_MODEL, GEN_INSTRUCTIONS.format(ident_rule=ident_rule), passage, QSCHEMA, 120)
+    out = call(OLLAMA, GEN_MODEL, GEN_INSTRUCTIONS.format(ident_rule=ident_rule), passage, QSCHEMA, 180)
     q = (out or {}).get("question", "").strip()
     return q if 6 <= len(q.split()) <= 40 else None
 
@@ -102,6 +102,8 @@ async def _load_docs(chroma):
 
 
 async def build(args):
+    global GEN_MODEL
+    GEN_MODEL = args.gen_model
     random.seed(args.seed)
     db = _mongo()
     if db[QUERIES].count_documents({"set": args.set}) and not args.replace:
@@ -247,6 +249,7 @@ def main():
     b.add_argument("--per-slice", type=int, default=40)
     b.add_argument("--seed", type=int, default=1024)
     b.add_argument("--replace", action="store_true")
+    b.add_argument("--gen-model", default=GEN_MODEL, help="question writer (use a non-Qwen model to check family bias)")
     r = sub.add_parser("run")
     r.add_argument("--set", default="v0")
     r.add_argument("--retriever", default="vector", choices=["vector", "vector+lexical"])
