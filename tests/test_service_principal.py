@@ -227,3 +227,22 @@ def test_session_title_falls_back_to_summary_for_boilerplate():
     assert session_title("junto-inbox channel plugin", "## Shipped X\nmore", 50) == "Shipped X"
     assert session_title("real task", "summary", 50) == "real task"
     assert session_title("", "", 50) == ""
+
+
+async def test_guidelines_held_returns_stub_when_hash_matches(_wired, _auth_on, monkeypatch):
+    from shared_memory.tools import guidelines as g_mod
+    monkeypatch.setattr(g_mod, "get_guidelines_for_session",
+                        lambda project: [{"rule": "R1"}, {"rule": "R2"}])
+    monkeypatch.setattr(g_mod, "get_guidelines_version", lambda db=None: 2)
+    full = await _start(claude_instance="g", api_key="smk_valid")
+    block = full["guidelines"]
+    assert block["rules"] == ["R1", "R2"] and len(block["hash"]) == 16
+
+    again = await _start(claude_instance="g", api_key="smk_valid",
+                         guidelines_held=block["hash"])
+    assert again["guidelines"]["unchanged"] is True
+    assert "rules" not in again["guidelines"]
+
+    stale = await _start(claude_instance="g", api_key="smk_valid",
+                         guidelines_held="0000000000000000")
+    assert stale["guidelines"]["rules"] == ["R1", "R2"]

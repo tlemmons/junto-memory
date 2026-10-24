@@ -282,7 +282,9 @@ def require_session(session_id: Optional[str]) -> str:
     if not session_id:
         return "ERROR: No session_id provided. You must call memory_start_session first and include the returned session_id in all subsequent calls."
     if not check_session(session_id):
-        return f"ERROR: Session '{session_id}' not found. Call memory_start_session first to register your session."
+        return (f"ERROR: Session '{session_id}' not found. Call memory_start_session first to register your session."
+                " If your earlier start_session response is still in your context, pass"
+                " guidelines_held=<its guidelines.hash> to skip re-receiving the rules.")
     active_sessions[session_id]["last_activity"] = utc_now_iso()
     return ""
 

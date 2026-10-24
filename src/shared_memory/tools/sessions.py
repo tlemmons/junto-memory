@@ -129,6 +129,13 @@ def session_title(task, summary, limit: int) -> str:
     return hint[:limit]
 
 
+def guidelines_hash(rules) -> str:
+    """Short content hash of a served guideline block (the corpus `version`
+    counter is not bumped on rule edits, so it can't key a cache)."""
+    import hashlib
+    return hashlib.sha256("\n".join(rules).encode("utf-8")).hexdigest()[:16]
+
+
 def _display_task(task) -> str:
     hint = (task or "").strip()
     return "" if hint.lower() in _BOILERPLATE_TASKS else hint
@@ -147,6 +154,7 @@ async def memory_start_session(
     subscribed_components: List[str] = None,
     aliases: List[str] = None,
     principal: bool = False,
+    guidelines_held: str = None,
     ctx: Context = None
 ) -> str:
     """
@@ -198,6 +206,11 @@ async def memory_start_session(
             from active-work / other-claudes enumeration. A principal can never
             be a message RECIPIENT (send-validation is roster-based, and there
             is no roster row). Lifecycle = key lifecycle (revoke to kill).
+        guidelines_held: The `guidelines.hash` from an earlier start_session
+            response that is STILL IN YOUR CONTEXT (reconnect after "Session
+            not found"). If it matches, `guidelines` comes back as a short
+            unchanged stub instead of the full rules. Never pass it after
+            /clear. (interface:start-session-guidelines-held-v0)
     """
     # Cleanup stale sessions on each new session start
     cleanup_stale_sessions()
@@ -737,11 +750,25 @@ async def memory_start_session(
         guidelines = get_guidelines_for_session(project)
         if guidelines:
             _gv = get_guidelines_version()
-            _guidelines_block = {
-                "instructions": "MANDATORY: Follow these rules for the entire session. They are authoritative.",
-                "version": _gv,
-                "rules": [g["rule"] for g in guidelines],
-            }
+            _rules = [g["rule"] for g in guidelines]
+            _gh = guidelines_hash(_rules)
+            _g_unchanged = bool(guidelines_held) and guidelines_held.strip() == _gh
+            if _g_unchanged:
+                _guidelines_block = {
+                    "instructions": (
+                        "UNCHANGED — keep following the guideline rules you already "
+                        f"hold from your earlier memory_start_session (hash {_gh})."),
+                    "version": _gv,
+                    "hash": _gh,
+                    "unchanged": True,
+                }
+            else:
+                _guidelines_block = {
+                    "instructions": "MANDATORY: Follow these rules for the entire session. They are authoritative.",
+                    "version": _gv,
+                    "hash": _gh,
+                    "rules": _rules,
+                }
             # Stamp the corpus version the agent actually received. Sessions
             # are otherwise in-process only, so this is a small append-only
             # mongo log (TTL 30d) — the join surface for compliance canaries:
@@ -759,6 +786,8 @@ async def memory_start_session(
                         "instance": claude_instance,
                         "ts": utc_now(),
                         "guidelines_version": _gv,
+                        "guidelines_hash": _gh,
+                        "guidelines_unchanged": _g_unchanged,
                     })
             except Exception:
                 pass
