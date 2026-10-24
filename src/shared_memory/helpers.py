@@ -497,6 +497,22 @@ def _sids_with_live_subscription() -> set:
     return subscribed
 
 
+def _identities_with_live_subscription(subscribed_sids: set) -> set:
+    """(project, claude_instance) pairs that own a live inbox subscription.
+
+    An always-on agent has two sessions: the junto-inbox plugin's (holds the
+    SSE subscription) and its own memory_start_session one (makes the tool
+    calls, never subscribes). The second must not idle-expire while the
+    first is live — msg_0a08d37ec788 (nimbusSupport, 10-23).
+    """
+    identities = set()
+    for sid in subscribed_sids:
+        info = active_sessions.get(sid) or {}
+        if info.get("project") and info.get("claude_instance"):
+            identities.add((info["project"], info["claude_instance"]))
+    return identities
+
+
 # Identities that open a throwaway session per run (the per-box context reporters run
 # every ~40-60 s and never end their sessions). A new session for one of these
 # replaces its previous ones, so they don't pile up for the 6 h idle window.
@@ -544,7 +560,8 @@ def cleanup_stale_sessions():
     1. Hard TTL: no activity for SESSION_TTL_DAYS (14d) — unconditional.
     2. Idle expiry: no tool call for SESSION_IDLE_HOURS (default 6h, env
        JUNTO_SESSION_IDLE_HOURS, 0 disables) AND no live inbox SSE
-       subscription. A subscribed-but-quiet plugin session is healthy and is
+       subscription held by this session OR by another session of the same
+       project + claude_instance (the agent's plugin). A subscribed-but-quiet plugin session is healthy and is
        never idle-expired; a session whose process died (or whose socket
        half-opened and got keepalive-pruned) has no subscription and goes.
        require_session touches last_activity on every tool call, so tier 2
@@ -556,6 +573,7 @@ def cleanup_stale_sessions():
         if SESSION_IDLE_HOURS > 0 else None
     )
     subscribed_sids = _sids_with_live_subscription() if idle_cutoff else set()
+    subscribed_identities = _identities_with_live_subscription(subscribed_sids)
     to_remove = []
     for sid, info in active_sessions.items():
         last_activity = parse_timestamp(info.get("last_activity", ""))
@@ -565,7 +583,9 @@ def cleanup_stale_sessions():
             to_remove.append(sid)
         elif (idle_cutoff is not None
                 and last_activity < idle_cutoff
-                and sid not in subscribed_sids):
+                and sid not in subscribed_sids
+                and (info.get("project"), info.get("claude_instance"))
+                not in subscribed_identities):
             to_remove.append(sid)
     for sid in to_remove:
         drop_session(sid)
