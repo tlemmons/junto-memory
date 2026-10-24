@@ -576,6 +576,17 @@ def cleanup_stale_sessions():
     )
     subscribed_sids = _sids_with_live_subscription() if idle_cutoff else set()
     subscribed_identities = _identities_with_live_subscription(subscribed_sids)
+    # Per subscribed identity, only its NEWEST unsubscribed session is the
+    # agent's own working session; older ones are dead predecessors (e.g. a
+    # pre-restart plugin session) and expire normally.
+    newest_own = {}
+    for sid, info in active_sessions.items():
+        key = (info.get("project"), info.get("claude_instance"))
+        if key in subscribed_identities and sid not in subscribed_sids:
+            if key not in newest_own or (info.get("last_activity", "")
+                                         > active_sessions[newest_own[key]].get("last_activity", "")):
+                newest_own[key] = sid
+    exempt_own = set(newest_own.values())
     to_remove = []
     for sid, info in active_sessions.items():
         last_activity = parse_timestamp(info.get("last_activity", ""))
@@ -586,8 +597,7 @@ def cleanup_stale_sessions():
         elif (idle_cutoff is not None
                 and last_activity < idle_cutoff
                 and sid not in subscribed_sids
-                and (info.get("project"), info.get("claude_instance"))
-                not in subscribed_identities):
+                and sid not in exempt_own):
             to_remove.append(sid)
     for sid in to_remove:
         drop_session(sid)

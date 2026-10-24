@@ -125,6 +125,14 @@ async def app_lifespan(app):
         import logging
         logging.getLogger(__name__).error("lifespan: action-lapse startup failed: %s", e)
 
+    # Restore persisted sessions + start the snapshot loop (session_persist.py).
+    try:
+        from shared_memory.session_persist import start_session_persist
+        start_session_persist()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error("lifespan: session-persist startup failed: %s", e)
+
     # Start the delegated-inference scheduler (delegation.py).
     try:
         from shared_memory.delegation import start_delegation
