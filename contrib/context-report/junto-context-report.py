@@ -27,6 +27,7 @@ import sys
 import socket
 import asyncio
 import re
+import signal
 import subprocess
 import time
 
@@ -349,5 +350,14 @@ async def run():
                 print("reset results: %s" % _text(ack)[:200])
 
 
+# Hard ceiling on one run. A run that hung on a blocked syscall (madrox,
+# 2026-10-13) kept the oneshot unit "activating" for 11 days, and an
+# OnUnitActiveSec timer never re-arms while its unit is still starting, so the
+# reporter was silently dead. SIGALRM's default action kills the process even
+# inside a blocking call. Pair with TimeoutStartSec=45 on the .service.
+RUN_DEADLINE_SECONDS = int(os.environ.get("JUNTO_CTX_REPORT_DEADLINE", "40"))
+
+
 if __name__ == "__main__":
+    signal.alarm(RUN_DEADLINE_SECONDS)
     asyncio.run(run())
