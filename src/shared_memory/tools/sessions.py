@@ -118,6 +118,22 @@ def park_title_task_hint(task) -> str:
     return hint[:60]
 
 
+def session_title(task, summary, limit: int) -> str:
+    """Handoff/work-item title: the session's task, or the summary's first line
+    when the task is empty or client boilerplate (librarian 10-23/24: 1,664
+    docs titled "Handoff: junto-inbox channel plugin")."""
+    hint = park_title_task_hint(task)
+    if not hint:
+        hint = next((ln.strip(" #*-") for ln in (summary or "").splitlines()
+                     if ln.strip(" #*-")), "")
+    return hint[:limit]
+
+
+def _display_task(task) -> str:
+    hint = (task or "").strip()
+    return "" if hint.lower() in _BOILERPLATE_TASKS else hint
+
+
 @mcp.tool()
 async def memory_start_session(
     project: str,
@@ -681,12 +697,22 @@ async def memory_start_session(
     # the 4th enumeration surface alongside list_agents/standup/get_active_work
     # (the spec's code map listed three; this one is session-keyed like
     # get_active_work).
-    _other_active = []
+    # One line per identity: an agent's own session and its inbox plugin's
+    # session are the same agent. Prefer the task that isn't plugin boilerplate.
+    _by_identity = {}
     for sid, info in active_sessions.items():
-        if sid != session_id and not info.get("is_principal"):
-            _other_active.append(f"{info['claude_instance']}@{info['project']}: {info['task'][:50]}")
-            if len(_other_active) >= 20:
-                break
+        if sid == session_id or info.get("is_principal"):
+            continue
+        key = (info["claude_instance"], info["project"])
+        if key == (claude_instance, project):
+            continue
+        task = _display_task(info.get("task"))
+        if key not in _by_identity or (task and not _by_identity[key]):
+            _by_identity[key] = task
+    _other_active = [
+        f"{inst}@{proj}: {task[:50]}" if task else f"{inst}@{proj}"
+        for (inst, proj), task in list(_by_identity.items())[:20]
+    ]
 
     # Component peers (design:unified-messaging-v0 Stage 1 — ADDRESSING):
     # who else is recently active in any of MY subscribed components?
@@ -971,7 +997,7 @@ async def memory_end_session(
         ids=[handoff_id],
         documents=[handoff_content],
         metadatas=[{
-            "title": f"Handoff: {session_info['task'][:50]}",
+            "title": f"Handoff: {session_title(session_info['task'], summary, 50)}",
             "type": "handoff",
             "status": "active",
             "session_id": session_id,
@@ -1014,7 +1040,7 @@ async def memory_end_session(
         ids=[work_id],
         documents=[summary],
         metadatas=[{
-            "title": session_info["task"][:100],
+            "title": session_title(session_info["task"], summary, 100),
             "status": "completed",
             "session_id": session_id,
             "claude_instance": session_info["claude_instance"],
