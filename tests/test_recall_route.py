@@ -292,7 +292,7 @@ def test_recall_event_logged_on_hits_only(stub, monkeypatch):
     import shared_memory.recall_metrics as rm
     logged = []
     monkeypatch.setattr(rm, "log_recall_event",
-                        lambda db, project, agent, ids, floor, scores=None: logged.append((project, agent, ids, scores)))
+                        lambda db, project, agent, ids, floor, scores=None, **kw: logged.append((project, agent, ids, scores)))
     _run(m._recall_payload({"project": "junto", "query": "x", "agent": "coord"}, None))
     assert logged and logged[0][1] == "coord" and logged[0][2] == ["learning_aaaaaaaaaaaaaaaa"]
     assert logged[0][3] and len(logged[0][3]) == 1  # scores parallel to ids

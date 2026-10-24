@@ -64,3 +64,30 @@ def test_lexical_scan_excludes_ids_and_noops_on_prose(col):
     assert asyncio.run(lexical_scan(col, q, _vec(col, q), None, 2, exclude_ids={"d1"})) == []
     p = "how do sessions expire"
     assert asyncio.run(lexical_scan(col, p, _vec(col, p), None, 2)) == []
+
+
+def test_ttl_change_uses_collmod():
+    import os
+    url = os.environ.get("JUNTO_TEST_MONGO_URL")
+    if not url:
+        pytest.skip("JUNTO_TEST_MONGO_URL not set")
+    from pymongo import MongoClient
+
+    from shared_memory import recall_metrics as rm
+    client = MongoClient(url, serverSelectionTimeoutMS=3000)
+    db = client[f"rm_{uuid.uuid4().hex[:8]}"]
+    try:
+        db.recall_events.create_index("ts", expireAfterSeconds=7 * 24 * 3600)   # the old 7d index
+        rm._ensure_ttl(db, "recall_events")
+        ttl = [i for i in db.recall_events.list_indexes() if i["key"] == {"ts": 1}][0]
+        assert ttl["expireAfterSeconds"] == rm.TTL_SECONDS
+        rm._indexed = False
+        rm.log_recall_event(db, "junto", "a", ["d1"], 0.6, scores=[0.7], query="q" * 5000, matches=[None])
+        row = db.recall_events.find_one()
+        assert len(row["query"]) == rm.QUERY_LOG_CHARS and row["matches"] == [None]
+        rm.log_query_event(db, "junto", "a", "find x", ["d1"], scores=[0.5])
+        assert db.query_events.count_documents({}) == 1
+    finally:
+        rm._indexed = False
+        client.drop_database(db.name)
+        client.close()

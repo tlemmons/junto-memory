@@ -354,6 +354,17 @@ async def memory_query(
         results.sort(key=_sort_key)
     results = results[:limit]
 
+    # Eval-set seeding (recall_metrics.query_events; scripts/retrieval_eval.py).
+    try:
+        from shared_memory.recall_metrics import log_query_event
+        log_query_event(
+            get_mongo(), project, active_sessions.get(session_id, {}).get("claude_instance"),
+            query, [r["id"] for r in results],
+            scores=[int(r["relevance"].rstrip("%")) / 100 for r in results],
+            matches=[r.get("match") for r in results])
+    except Exception:
+        pass
+
     # ── Facets inline delivery (design:memory-facets-v0 §consumer) ──
     # Contract guarantee: when a result row's learning has facets, they ride
     # the row itself — consumers (sub's rater) must never need a per-candidate

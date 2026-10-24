@@ -455,7 +455,8 @@ async def _recall_payload(body, api_key, via_tunnel=False):
     if snippets:
         from shared_memory.recall_metrics import log_recall_event
         log_recall_event(mongo, project, agent, [s["id"] for s in snippets], floor,
-                         scores=[s["score"] for s in snippets])
+                         scores=[s["score"] for s in snippets], query=qtext,
+                         matches=[s.get("match") for s in snippets])
 
     return 200, {
         "project": project,
