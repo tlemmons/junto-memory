@@ -327,3 +327,18 @@ def test_recall_explicit_threshold_beats_chunk_floor(recall, monkeypatch):
     monkeypatch.setattr(ci, "scan", lambda col, v, n, w: _async_return(_chunk_hit(0.55))())
     status, p = _run(m._recall_payload({"project": "junto", "query": "q", "threshold": 0.7}, None))
     assert status == 200 and p["count"] == 0
+
+
+# --- chunker 3 (title-prefixed) ---------------------------------------------------
+def test_chunker3_prefixes_title_and_hashes_it(monkeypatch):
+    body = " ".join(f"word{i}" for i in range(600))
+    meta = {"title": "Mizar box weights"}
+    monkeypatch.setattr(ci, "CHUNKER", 2)
+    plain, h2 = ci.doc_texts(body, meta), ci.doc_hash(body, meta)
+    assert h2 == ci.body_hash(body)                 # chunker 2 hashes unchanged
+    monkeypatch.setattr(ci, "CHUNKER", 3)
+    titled = ci.doc_texts(body, meta)
+    assert len(titled) == len(plain)
+    assert all(t == f"Mizar box weights\n\n{p}" for t, p in zip(titled, plain))
+    assert ci.doc_hash(body, meta) != ci.doc_hash(body, {"title": "renamed"})
+    assert ci.doc_texts(body, {}) == plain           # no title → no prefix

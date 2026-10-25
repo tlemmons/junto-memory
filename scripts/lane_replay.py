@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Replay REAL logged queries through both retrieval lanes and judge the results.
 
-    .venv/bin/python scripts/lane_replay.py run    [--model gpt-oss:20b] [--workers 4]
+    .venv/bin/python scripts/lane_replay.py run    [--model gpt-oss:20b] [--workers 4] [--chunk-db junto_chunks_exp --chunker 3]
     .venv/bin/python scripts/lane_replay.py report [--run RUN_ID]
 
 Why: interface:chunk-index-v0 rollout step 4 asks for evidence on real traffic
@@ -168,6 +168,7 @@ def _judge_one(model, qtext, row):
 async def run(a):
     from shared_memory import chunk_index as ci
     from shared_memory.helpers import get_project_collection, get_shared_collection
+    sfx = "" if ci.CHUNKER == 2 else str(ci.CHUNKER)
     ci.EMBED_URL = OLLAMA
     ci.EMBED_TIMEOUT_S = 30.0
     db, chroma = _mongo(), await _chroma()
@@ -186,8 +187,8 @@ async def run(a):
     for n, q in enumerate(qs):
         res = {}
         for lane in ("minilm", "chunk"):
-            res[lane] = await _lane(lane, q, chroma, ci, cols_for)
-        res["fused"] = await _fused(q, chroma, ci, cols_for)
+            res[lane if lane == "minilm" else lane + sfx] = await _lane(lane, q, chroma, ci, cols_for)
+        res["fused" + sfx] = await _fused(q, chroma, ci, cols_for)
         rows.append({**q, "qhash": _qhash(q["query"]), "lanes": res})
         if n % 25 == 0:
             print(f"  retrieved {n}/{len(qs)}", flush=True)
@@ -254,10 +255,17 @@ def main():
     r = sub.add_parser("run")
     r.add_argument("--model", default="gpt-oss:20b")
     r.add_argument("--workers", type=int, default=4)
+    r.add_argument("--chunk-db", default=None, help="read an experimental chunk database (JUNTO_CHUNK_DB)")
+    r.add_argument("--chunker", default=None, help="its CHUNKER version (JUNTO_CHUNKER); lanes get it as a suffix")
     p = sub.add_parser("report")
     p.add_argument("--run", default=None)
     a = ap.parse_args()
     if a.cmd == "run":
+        import os
+        if a.chunk_db:
+            os.environ["JUNTO_CHUNK_DB"] = a.chunk_db
+        if a.chunker:
+            os.environ["JUNTO_CHUNKER"] = a.chunker
         asyncio.run(run(a))
     else:
         report_run(_mongo(), a.run)

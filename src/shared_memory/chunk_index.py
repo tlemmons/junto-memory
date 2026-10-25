@@ -29,7 +29,9 @@ from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
 
-DATABASE = "junto_chunks"
+# Overridable so an experimental chunker can be built side by side without
+# touching the live index (the server and the host script must agree).
+DATABASE = os.environ.get("JUNTO_CHUNK_DB", "junto_chunks")
 PREFIX = "c__"
 NEXT_SUFFIX = "__next"
 MODEL = "snowflake-arctic-embed2"
@@ -39,7 +41,9 @@ CHUNK_SIZE = 256
 STRIDE = 224
 # Bump on ANY change to chunk_text output: it is part of the stamp, so a bump
 # makes every chunk collection stale and the sweep rebuilds it.
-CHUNKER = 2
+#   2 = 256-token body windows
+#   3 = same windows, each prefixed with the doc title ("contextual" chunks)
+CHUNKER = int(os.environ.get("JUNTO_CHUNKER", "2"))
 EMBED_BATCH = 32
 KEEP_ALIVE = "24h"
 # n_results multiplier: several chunks of one doc can crowd the top, so ask for
@@ -102,6 +106,21 @@ def chunk_text(text: str, size: int = CHUNK_SIZE, stride: int = STRIDE) -> List[
         if end == len(offs):
             break
     return out
+
+
+def doc_texts(body: str, meta: Optional[dict]) -> List[str]:
+    """The texts to embed for one doc under the active CHUNKER."""
+    parts = chunk_text(body)
+    title = ((meta or {}).get("title") or "").strip()
+    if CHUNKER >= 3 and title:
+        parts = [f"{title}\n\n{p}" for p in parts]
+    return parts
+
+
+def doc_hash(body: str, meta: Optional[dict]) -> str:
+    """Change detector for the sweep: the body, plus the title when chunks embed it."""
+    title = ((meta or {}).get("title") or "") if CHUNKER >= 3 else ""
+    return body_hash(title + "\0" + (body or "") if title else body)
 
 
 def body_hash(text: str) -> str:
@@ -347,8 +366,8 @@ async def _add_docs(ccol, rows: List[tuple]) -> int:
     """rows = [(doc_id, body, meta)]. Chunk, embed, add. Returns chunk count."""
     ids, texts, metas = [], [], []
     for doc_id, body, meta in rows:
-        h = body_hash(body)
-        parts = await asyncio.to_thread(chunk_text, body)
+        h = doc_hash(body, meta)
+        parts = await asyncio.to_thread(doc_texts, body, meta)
         for j, p in enumerate(parts):
             ids.append(f"{doc_id}#{j}")
             texts.append(p)
@@ -415,7 +434,7 @@ async def sync_source(chroma, source: str, version: str, log_fn=None) -> Dict[st
                 if h:
                     gone += h["ids"]
                 continue
-            if h is None or h["hash"] != body_hash(body):
+            if h is None or h["hash"] != doc_hash(body, meta):
                 if h:
                     gone += h["ids"]
                     stats["changed"] += 1
@@ -429,7 +448,7 @@ async def sync_source(chroma, source: str, version: str, log_fn=None) -> Dict[st
         for b in range(0, len(redo), 64):
             stats["chunks"] += await _add_docs(live, redo[b:b + 64])
         for did, body, meta, cids in meta_only:
-            h = body_hash(body)
+            h = doc_hash(body, meta)
             await live.update(ids=cids, metadatas=[
                 _chunk_meta(did, int(c.rsplit("#", 1)[1]), h, meta) for c in cids])
         stats["meta"] = len(meta_only)
