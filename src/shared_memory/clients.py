@@ -133,6 +133,14 @@ async def app_lifespan(app):
         import logging
         logging.getLogger(__name__).error("lifespan: session-persist startup failed: %s", e)
 
+    # Start the chunk-index freshness sweep (chunk_index.py, interface:chunk-index-v0).
+    try:
+        from shared_memory.chunk_index import start_chunk_sweep
+        start_chunk_sweep()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error("lifespan: chunk-index sweep startup failed: %s", e)
+
     # Start the delegated-inference scheduler (delegation.py).
     try:
         from shared_memory.delegation import start_delegation

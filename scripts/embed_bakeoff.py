@@ -100,7 +100,7 @@ class _MiniLMEF:
 
 
 def _chunks(tok, doc, size=256, stride=224):
-    enc = tok.encode(doc)
+    enc = tok.encode(doc, add_special_tokens=False)
     offs = enc.offsets
     if len(offs) <= size:
         return [doc]

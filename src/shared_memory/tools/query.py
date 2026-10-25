@@ -6,7 +6,7 @@ from typing import List
 
 from mcp.server.fastmcp import Context
 
-from shared_memory import query_config
+from shared_memory import chunk_index, query_config
 from shared_memory.app import mcp
 from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import OVERLAP_WINDOW_HOURS, PROJECT_PREFIX, SHARED_PREFIX
@@ -155,16 +155,27 @@ async def memory_query(
     # function lives on the collection object); every later scan reuses it.
     _qvec = None
 
+    # Chunked arctic2 lane (interface:chunk-index-v0), per-project flag, default
+    # OFF. Fails open per collection: _vscan falls back to the MiniLM query when
+    # the lane is unusable. Its scores are chunk cosine — own floor.
+    _cvec = await chunk_index.embed_query(query) if chunk_index.enabled_for(_qcfg) else None
+    _chunk_min = float(_qcfg.get("chunk_min_relevance", MIN_RELEVANCE_THRESHOLD))
+
+    async def _vscan(col, n):
+        """(results, chunked): chunk lane when usable, else the MiniLM query."""
+        if _cvec is not None:
+            got = await chunk_index.scan(col, _cvec, n, where_clause)
+            if got is not None:
+                return got, True
+        return await col.query(**query_kwargs(query, _qvec), n_results=n, where=where_clause), False
+
     # Search project collection if specified
     if project:
         try:
             proj_collection = await get_project_collection(chroma, project)
             _qvec = await embed_query_once(proj_collection, query)
-            proj_results = await proj_collection.query(
-                **query_kwargs(query, _qvec),
-                n_results=limit,
-                where=where_clause
-            )
+            proj_results, _chunked = await _vscan(proj_collection, limit)
+            _proj_min = _chunk_min if _chunked else MIN_RELEVANCE_THRESHOLD
 
             if proj_results["documents"] and proj_results["documents"][0]:
                 for i, (doc, meta, dist) in enumerate(zip(
@@ -178,7 +189,7 @@ async def memory_query(
 
                     # Calculate relevance and skip if below threshold
                     relevance = calculate_relevance(dist)
-                    if relevance < MIN_RELEVANCE_THRESHOLD:
+                    if relevance < _proj_min:
                         continue
 
                     # Recency filter (optional)
@@ -275,11 +286,9 @@ async def memory_query(
                     # No project scan happened, so this is the first collection
                     # we hold — embed here and the second shared scan reuses it.
                     _qvec = await embed_query_once(shared, query)
-                shared_results = await shared.query(
-                    **query_kwargs(query, _qvec),
-                    n_results=min(2, limit),  # Max 2 from each shared collection
-                    where=where_clause
-                )
+                # Max 2 from each shared collection
+                shared_results, _chunked = await _vscan(shared, min(2, limit))
+                _shared_min = (_chunk_min + 0.1) if _chunked else shared_threshold
 
                 if shared_results["documents"] and shared_results["documents"][0]:
                     for i, (doc, meta, dist) in enumerate(zip(
@@ -293,7 +302,7 @@ async def memory_query(
 
                         # Calculate relevance and skip if below threshold
                         relevance = calculate_relevance(dist)
-                        if relevance < shared_threshold:
+                        if relevance < _shared_min:
                             continue
 
                         # Recency filter (optional)

@@ -324,9 +324,16 @@ async def _recall_payload(body, api_key, via_tunnel=False):
     # Floor: explicit request threshold wins; else the three-layer config
     # merge (code default 0.6 → server doc → project override).
     floor = threshold
+    _qcfg = query_config.get_effective_config(mongo, project)
     if floor is None:
-        floor = float(query_config.get_effective_config(
-            mongo, project)["recall_floor"])
+        floor = float(_qcfg["recall_floor"])
+    # Chunked arctic2 lane (interface:chunk-index-v0): own floor (chunk cosine
+    # is not the MiniLM scale); an explicit request threshold still wins.
+    from shared_memory import chunk_index
+    chunk_floor = threshold if threshold is not None else float(
+        _qcfg.get("chunk_recall_floor", floor))
+    cvec = await chunk_index.embed_query(qtext) if chunk_index.enabled_for(_qcfg) else None
+    retriever = "minilm"
 
     # Chroma is load-bearing — fail loud, never mask an outage as count:0.
     try:
@@ -343,7 +350,7 @@ async def _recall_payload(body, api_key, via_tunnel=False):
     qvec = None
 
     async def _scan(collection, source, n):
-        nonlocal embed_ms, qvec
+        nonlocal embed_ms, qvec, retriever
         # ONE embedding per request, computed off the event loop, reused by
         # every later scan (backlog_c5dba6d13707). The previous comment here
         # claimed "subsequent calls reuse chroma's per-call embed" — THAT WAS
@@ -356,9 +363,14 @@ async def _recall_payload(body, api_key, via_tunnel=False):
             if qvec is not None:
                 embed_ms = int((_time.monotonic() - t_e) * 1000)
         t_q = _time.monotonic()
-        got = await collection.query(
-            **query_kwargs(qtext, qvec), n_results=n, where=where
-        )
+        got = await chunk_index.scan(collection, cvec, n, where) if cvec is not None else None
+        use_floor = floor
+        if got is not None:
+            use_floor, retriever = chunk_floor, "chunk"
+        else:
+            got = await collection.query(
+                **query_kwargs(qtext, qvec), n_results=n, where=where
+            )
         if embed_ms is None:
             # Fallback path only (embed_query_once failed → query_texts): the
             # first query still carries the embedding, so time it as before.
@@ -372,7 +384,7 @@ async def _recall_payload(body, api_key, via_tunnel=False):
             if _recall_excluded(got["ids"][0][i], meta, agent):
                 continue
             score = calculate_relevance(dist)
-            if score < floor:
+            if score < use_floor:
                 continue
             candidates.append({
                 "id": got["ids"][0][i],
@@ -387,8 +399,7 @@ async def _recall_payload(body, api_key, via_tunnel=False):
 
     lexical_max = 0
     try:
-        lexical_max = int(query_config.get_effective_config(
-            mongo, project).get("lexical_max", 0))
+        lexical_max = int(_qcfg.get("lexical_max", 0))
     except Exception:
         pass
     lexical = []
@@ -456,7 +467,8 @@ async def _recall_payload(body, api_key, via_tunnel=False):
         from shared_memory.recall_metrics import log_recall_event
         log_recall_event(mongo, project, agent, [s["id"] for s in snippets], floor,
                          scores=[s["score"] for s in snippets], query=qtext,
-                         matches=[s.get("match") for s in snippets])
+                         matches=[s.get("match") for s in snippets],
+                         retriever=retriever)
 
     return 200, {
         "project": project,

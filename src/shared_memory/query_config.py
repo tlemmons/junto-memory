@@ -33,6 +33,13 @@ DEFAULT_RECALL_FLOOR = 0.6
 # memory_query / recall request. 0 disables the lane.
 DEFAULT_LEXICAL_MAX = 2
 
+# Chunked arctic2 lane (chunk_index.py, interface:chunk-index-v0). OFF by
+# default; its scores are cosine of the best chunk — NOT the MiniLM scale —
+# so it carries its own floors (calibrated on eval v0+v1).
+DEFAULT_CHUNK_INDEX = False
+DEFAULT_CHUNK_MIN_RELEVANCE = 0.3
+DEFAULT_CHUNK_RECALL_FLOOR = 0.6
+
 # Allowed config keys + their types (used by set_config_value).
 CONFIG_KEYS = {
     "default_expand": bool,
@@ -40,6 +47,9 @@ CONFIG_KEYS = {
     "default_snippet_length": int,
     "recall_floor": float,
     "lexical_max": int,
+    "chunk_index": bool,
+    "chunk_min_relevance": float,
+    "chunk_recall_floor": float,
 }
 
 DEFAULT_SCOPE = "__default__"
@@ -61,6 +71,9 @@ def _default_config_dict() -> Dict[str, Any]:
         "default_snippet_length": DEFAULT_SNIPPET_LENGTH,
         "recall_floor": DEFAULT_RECALL_FLOOR,
         "lexical_max": DEFAULT_LEXICAL_MAX,
+        "chunk_index": DEFAULT_CHUNK_INDEX,
+        "chunk_min_relevance": DEFAULT_CHUNK_MIN_RELEVANCE,
+        "chunk_recall_floor": DEFAULT_CHUNK_RECALL_FLOOR,
     }
 
 
@@ -124,9 +137,9 @@ def set_config_value(db, project: Optional[str], key: str, value: Any, actor: st
     if key == "default_expand_top" and isinstance(value, int):
         if value < 0 or value > 50:
             return {"error": "default_expand_top must be between 0 and 50"}
-    if key == "recall_floor" and isinstance(value, float):
+    if key in ("recall_floor", "chunk_min_relevance", "chunk_recall_floor") and isinstance(value, float):
         if value < 0.0 or value > 1.0:
-            return {"error": "recall_floor must be between 0.0 and 1.0"}
+            return {"error": f"{key} must be between 0.0 and 1.0"}
     if key == "lexical_max" and isinstance(value, int):
         if value < 0 or value > 5:
             return {"error": "lexical_max must be between 0 and 5"}

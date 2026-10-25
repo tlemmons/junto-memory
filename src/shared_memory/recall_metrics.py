@@ -75,7 +75,8 @@ def _ensure_ttl(db, coll):
         db.command("collMod", coll, index={"keyPattern": {"ts": 1}, "expireAfterSeconds": TTL_SECONDS})
 
 
-def log_recall_event(db, project, agent, ids, floor, scores=None, query=None, matches=None):
+def log_recall_event(db, project, agent, ids, floor, scores=None, query=None, matches=None,
+                     retriever=None):
     """Record a served injection set. Call only when count>0. `scores`
     (parallel to ids) lets a floor change be simulated from history
     instead of guessed; `matches` (parallel, "exact" or None) marks lexical
@@ -93,6 +94,7 @@ def log_recall_event(db, project, agent, ids, floor, scores=None, query=None, ma
             "scores": list(scores) if scores is not None else None,
             "matches": list(matches) if matches is not None else None,
             "query": (query or "")[:QUERY_LOG_CHARS] or None,
+            "retriever": retriever,
         })
     except Exception as e:  # noqa: BLE001
         logger.warning("recall_metrics: event log failed (%s)", e)

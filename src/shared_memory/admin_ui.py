@@ -53,6 +53,9 @@ DESCRIPTIONS = {
     "default_snippet_length": "memory_query snippet length when not expanded.",
     "recall_floor": "Minimum similarity (0-1) for the per-turn recall hook to inject a memory.",
     "lexical_max": "Max exact identifier matches (function names, ids, paths) added to memory_query / recall results, even below the similarity floor. 0 = off.",
+    "chunk_index": "Search the chunked arctic-embed2 index instead of MiniLM (sees whole docs, not just the first 256 tokens). Falls back to MiniLM automatically when the index is stale or the embedder is down.",
+    "chunk_min_relevance": "memory_query similarity floor when the chunk index is on. Chunk scores use a different scale from MiniLM, so this is separate from the 0.3 default.",
+    "chunk_recall_floor": "Recall similarity floor when the chunk index is on (separate from recall_floor because the score scale differs).",
 }
 
 SECRET_KEYS = {"webhook_token"}
