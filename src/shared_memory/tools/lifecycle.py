@@ -374,12 +374,13 @@ async def memory_archive_by_tag(
                 if meta.get("status") == "archived":
                     continue
 
-                # Archive it
+                # Archive it. previous_status is read BEFORE status is
+                # overwritten, or restore_by_tag would restore to "archived".
+                meta["previous_status"] = meta.get("status", "active")
                 meta["status"] = "archived"
                 meta["archived_at"] = now
                 meta["archived_by"] = session_id
                 meta["archive_reason"] = reason or f"Bulk archive by tag: {tag}"
-                meta["previous_status"] = meta.get("status", "active")
 
                 await col.update(ids=[doc_id], metadatas=[meta])
 
