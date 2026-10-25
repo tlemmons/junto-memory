@@ -793,6 +793,23 @@ async def memory_get_active_work(
     except Exception:
         recent_work = []
 
+    # Plugin sessions carry the client's boilerplate task ("junto-inbox
+    # channel plugin") on every agent (backlog_df486507318c). Show the
+    # identity's real task instead: its other session's, else its newest
+    # work-item title in the window, else "".
+    from shared_memory.tools.sessions import _display_task
+    real_task = {}
+    for info in active_sessions.values():
+        t = _display_task(info.get("task"))
+        if t:
+            real_task.setdefault((info["claude_instance"], info["project"]), t)
+    for w in sorted(recent_work, key=lambda w: w.get("updated") or "", reverse=True):
+        if w.get("title"):
+            real_task.setdefault((w.get("claude"), w.get("project")), w["title"])
+    for row in active_work:
+        if not _display_task(row["task"]):
+            row["task"] = real_task.get((row["claude_instance"], row["project"]), "")
+
     # NEW: Include blocked agents info
     blocked_agents = []
     for sid, info in active_sessions.items():
