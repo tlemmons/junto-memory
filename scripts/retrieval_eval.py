@@ -2,7 +2,10 @@
 """Retrieval eval harness (retrieval-upgrade plan step 0).
 
     .venv/bin/python scripts/retrieval_eval.py build [--per-slice 40] [--set v0]
-    .venv/bin/python scripts/retrieval_eval.py run   [--set v0] [--retriever vector|vector+lexical] [--k 10]
+    .venv/bin/python scripts/retrieval_eval.py run   [--set v0] [--retriever vector|vector+lexical|chunk|chunk+lexical] [--k 10]
+
+`chunk*` retrievers query the LIVE chunk index (interface:chunk-index-v0)
+through chunk_index.scan — the same code path memory_query and /recall use.
 
 The eval set lives in Mongo (`retrieval_eval_queries`), NOT in this public repo:
 the queries quote private corpus content. `run` results go to
@@ -189,20 +192,37 @@ async def build(args):
     print(f"built set {args.set!r}: {len(rows)} queries -> mongo {QUERIES}")
 
 
-async def _rank(col, qtext, qvec, k, where, lexical):
+async def _rank(col, qtext, qvec, k, where, lexical, cvec=None):
+    """Ranked doc ids + {id: score}. cvec set → the PROD chunk-lane code path
+    (chunk_index.scan against the live junto_chunks index)."""
     from shared_memory.helpers import query_kwargs
-    r = await col.query(**query_kwargs(qtext, qvec), n_results=k, where=where)
+    from shared_memory.tools.query import calculate_relevance
+    r = None
+    if cvec is not None:
+        from shared_memory import chunk_index
+        r = await chunk_index.scan(col, cvec, k, where)
+        if r is None:
+            sys.exit(f"chunk index not usable for {col.name} (missing/stale) — build it first")
+    if r is None:
+        r = await col.query(**query_kwargs(qtext, qvec), n_results=k, where=where)
     ranked = list(r["ids"][0]) if r["ids"] else []
+    scores = {i: round(calculate_relevance(d), 4) for i, d in zip(ranked, r["distances"][0])} if ranked else {}
     if lexical:
         from shared_memory.lexical import lexical_scan
         hits = await lexical_scan(col, qtext, qvec, where, 2, exclude_ids=set(ranked))
         if hits:
             ranked = ranked[:max(0, k - len(hits))] + [h["id"] for h in hits]
-    return ranked
+    return ranked, scores
 
 
 async def run(args):
+    from shared_memory import chunk_index
     from shared_memory.helpers import embed_query_once
+    chunk_index.EMBED_URL = OLLAMA
+    chunk_index.EMBED_TIMEOUT_S = 30.0
+    chunked = args.retriever.startswith("chunk")
+    if chunked:
+        await chunk_index.get_chunk_client("localhost", 8001)
     db = _mongo()
     qs = list(db[QUERIES].find({"set": args.set}))
     if not qs:
@@ -216,7 +236,11 @@ async def run(args):
         cols[q["collection"]] = col
         qvec = await embed_query_once(col, q["query"])
         where = None if q["slice"] == "stale" else {"status": "active"}
-        ranked = await _rank(col, q["query"], qvec, args.k, where, args.retriever == "vector+lexical")
+        cvec = await chunk_index.embed_query(q["query"]) if chunked else None
+        if chunked and cvec is None:
+            sys.exit("chunk embed failed")
+        ranked, scores = await _rank(col, q["query"], qvec, args.k, where,
+                                     args.retriever.endswith("+lexical"), cvec)
         pos = set(q["positives"])
         first = next((i + 1 for i, d in enumerate(ranked) if d in pos), None)
         s = per.setdefault(q["slice"], {"n": 0, "r1": 0, "r5": 0, "r10": 0, "mrr": 0.0, "stale_above": 0})
@@ -228,7 +252,9 @@ async def run(args):
         if q.get("stale"):
             sr = ranked.index(q["stale"]) + 1 if q["stale"] in ranked else None
             s["stale_above"] += bool(sr and (first is None or sr < first))
-        detail.append({"qid": str(q["_id"]), "slice": q["slice"], "rank": first})
+        detail.append({"qid": str(q["_id"]), "slice": q["slice"], "rank": first,
+                       "pos_score": scores.get(ranked[first - 1]) if first else None,
+                       "top_score": scores.get(ranked[0]) if ranked else None})
     report = {}
     for name, s in per.items():
         n = s["n"]
@@ -236,7 +262,9 @@ async def run(args):
                         "recall@10": round(s["r10"] / n, 3), "mrr": round(s["mrr"] / n, 3)}
         if name == "stale":
             report[name]["stale_outranks_current"] = round(s["stale_above"] / n, 3)
-    db[RUNS].insert_one({"set": args.set, "retriever": args.retriever, "embedder": "minilm-l6-v2 (chroma default)",
+    embedder = (f"{chunk_index.MODEL} chunked (prod index, chunker {chunk_index.CHUNKER})" if chunked
+                else "minilm-l6-v2 (chroma default)")
+    db[RUNS].insert_one({"set": args.set, "retriever": args.retriever, "embedder": embedder,
                          "k": args.k, "ts": time.time(), "report": report, "detail": detail})
     print(json.dumps({"set": args.set, "retriever": args.retriever, "report": report}, indent=1))
 
@@ -252,7 +280,7 @@ def main():
     b.add_argument("--gen-model", default=GEN_MODEL, help="question writer (use a non-Qwen model to check family bias)")
     r = sub.add_parser("run")
     r.add_argument("--set", default="v0")
-    r.add_argument("--retriever", default="vector", choices=["vector", "vector+lexical"])
+    r.add_argument("--retriever", default="vector", choices=["vector", "vector+lexical", "chunk", "chunk+lexical"])
     r.add_argument("--k", type=int, default=10)
     a = ap.parse_args()
     asyncio.run(build(a) if a.cmd == "build" else run(a))

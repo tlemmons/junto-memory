@@ -35,10 +35,13 @@ DEFAULT_LEXICAL_MAX = 2
 
 # Chunked arctic2 lane (chunk_index.py, interface:chunk-index-v0). OFF by
 # default; its scores are cosine of the best chunk — NOT the MiniLM scale —
-# so it carries its own floors (calibrated on eval v0+v1).
+# so it carries its own floors. Calibrated 2026-10-25 on eval v0+v1 to pass
+# the SAME share of null queries (question vs a collection without the
+# answer) as MiniLM's 0.3 / 0.6: 87% / 2% null pass, while true positives
+# pass 100% / 50% (MiniLM: 99% / 38%). interface:chunk-index-v0 0.2.0.
 DEFAULT_CHUNK_INDEX = False
-DEFAULT_CHUNK_MIN_RELEVANCE = 0.3
-DEFAULT_CHUNK_RECALL_FLOOR = 0.6
+DEFAULT_CHUNK_MIN_RELEVANCE = 0.37
+DEFAULT_CHUNK_RECALL_FLOOR = 0.63
 
 # Allowed config keys + their types (used by set_config_value).
 CONFIG_KEYS = {
