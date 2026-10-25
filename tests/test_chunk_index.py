@@ -59,10 +59,14 @@ class FakeChunkCol:
 
     async def query(self, query_embeddings, n_results, where=None, include=None):
         self.seen = {"n": n_results, "where": where}
-        rows = self.rows[:n_results]
+        rows = [r for r in self.rows if ci._matches(self._meta(r), where)][:n_results]
         return {"ids": [[r[0] for r in rows]],
-                "metadatas": [[{"doc_id": r[1]} for r in rows]],
+                "metadatas": [[self._meta(r) for r in rows]],
                 "distances": [[r[2] for r in rows]]}
+
+    @staticmethod
+    def _meta(r):
+        return {"doc_id": r[1], "status": r[3] if len(r) > 3 else "active", "type": "learning"}
 
 
 class FakeSource:
@@ -99,14 +103,45 @@ def test_scan_collapses_chunks_to_docs_and_reads_source(lane):
     col = FakeChunkCol([("a#2", "a", 0.10), ("a#0", "a", 0.20), ("b#0", "b", 0.30),
                         ("gone#0", "gone", 0.35), ("c#1", "c", 0.40)])
     lane(col)
-    src = FakeSource({"a": ("A body", {"status": "active"}), "b": ("B body", {}),
-                      "c": ("C body", {})})
+    src = FakeSource({"a": ("A body", {"status": "active"}), "b": ("B body", {"status": "active"}),
+                      "c": ("C body", {"status": "active"})})
     got = _run(ci.scan(src, [0.1], 2, {"status": "active"}))
-    assert col.seen == {"n": 2 * ci.OVERFETCH, "where": {"status": "active"}}
+    # unfiltered, deep over-fetch first (Chroma's where pre-filter is slow)
+    assert col.seen == {"n": 2 * ci.OVERFETCH * ci.UNFILTERED_FACTOR, "where": None}
     assert got["ids"][0] == ["a", "b"]                 # best chunk per doc, top n
     assert got["documents"][0] == ["A body", "B body"]  # SOURCE body, not the chunk
     # synthetic distance → calculate_relevance gives the chunk cosine
     assert calculate_relevance(got["distances"][0][0]) == pytest.approx(0.90)
+
+
+def test_scan_filters_on_chunk_meta_then_rechecks_source(lane):
+    col = FakeChunkCol([("old#0", "old", 0.05, "superseded"), ("a#0", "a", 0.1),
+                        ("lag#0", "lag", 0.15), ("b#0", "b", 0.2)])
+    lane(col)
+    # "lag" was superseded at the source after the last sweep
+    src = FakeSource({"a": ("A", {"status": "active"}), "lag": ("L", {"status": "superseded"}),
+                      "b": ("B", {"status": "active"}), "old": ("O", {"status": "superseded"})})
+    got = _run(ci.scan(src, [0.1], 5, {"status": "active"}))
+    assert got["ids"][0] == ["a", "b"]
+
+
+def test_scan_requeries_with_where_when_filter_starves(lane, monkeypatch):
+    monkeypatch.setattr(ci, "UNFILTERED_FACTOR", 1)
+    monkeypatch.setattr(ci, "OVERFETCH", 1)
+    rows = [(f"x{i}#0", f"x{i}", 0.01 * i, "superseded") for i in range(3)] + [("a#0", "a", 0.5)]
+    col = FakeChunkCol(rows)
+    lane(col)
+    got = _run(ci.scan(FakeSource({"a": ("A", {"status": "active"})}), [0.1], 1, {"status": "active"}))
+    assert got["ids"][0] == ["a"] and col.seen["where"] == {"status": "active"}
+
+
+def test_matches_handles_the_shapes_callers_build():
+    meta = {"status": "active", "type": "learning"}
+    assert ci._matches(meta, {"$and": [{"status": "active"}, {"type": {"$in": ["learning"]}}]})
+    assert ci._matches(meta, {"status": "active", "type": {"$in": ["learning", "spec"]}})
+    assert not ci._matches(meta, {"type": {"$in": ["spec"]}})
+    with pytest.raises(ci._Unsupported):
+        ci._matches(meta, {"n": {"$gt": 1}})
 
 
 def test_scan_drops_docs_deleted_since_the_sweep(lane):

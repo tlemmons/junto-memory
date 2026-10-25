@@ -45,6 +45,8 @@ KEEP_ALIVE = "24h"
 # n_results multiplier: several chunks of one doc can crowd the top, so ask for
 # more and collapse to doc ids (the bake-off used k*6).
 OVERFETCH = 6
+# Extra depth for the unfiltered first query (scan's PERF note).
+UNFILTERED_FACTOR = 4
 VERSION_TTL_S = 300
 
 SWEEP_SECONDS = int(os.environ.get("JUNTO_CHUNK_SWEEP_SECONDS", "900"))
@@ -200,13 +202,68 @@ async def _get_current(cclient, source: str):
 
 # ── query path ─────────────────────────────────────────────────────────────
 
+class _Unsupported(Exception):
+    pass
+
+
+def _matches(meta: dict, where: Optional[dict]) -> bool:
+    """Evaluate the Chroma `where` shapes memory_query / /recall build
+    ({k: v}, {k: {"$in"|"$eq"|"$ne": ...}}, {"$and"|"$or": [...]}) against a
+    metadata dict. Raises _Unsupported for anything else."""
+    if not where:
+        return True
+    ok = True
+    for k, v in where.items():
+        if k == "$and":
+            ok = ok and all(_matches(meta, w) for w in v)
+        elif k == "$or":
+            ok = ok and any(_matches(meta, w) for w in v)
+        elif k.startswith("$"):
+            raise _Unsupported(k)
+        elif isinstance(v, dict):
+            if len(v) != 1:
+                raise _Unsupported(str(v))
+            op, arg = next(iter(v.items()))
+            have = meta.get(k)
+            if op == "$in":
+                ok = ok and have in arg
+            elif op == "$eq":
+                ok = ok and have == arg
+            elif op == "$ne":
+                ok = ok and have != arg
+            else:
+                raise _Unsupported(op)
+        else:
+            ok = ok and meta.get(k) == v
+    return ok
+
+
+def _best_per_doc(got, where, python_filter: bool) -> Dict[str, float]:
+    best: Dict[str, float] = {}
+    for m, d in zip(got["metadatas"][0], got["distances"][0]):
+        m = m or {}
+        did = m.get("doc_id")
+        if not did or did in best:
+            continue
+        if python_filter and not _matches(m, where):
+            continue
+        best[did] = d
+    return best
+
+
 async def scan(source_col, qvec: List[float], n: int, where: Optional[dict]) -> Optional[dict]:
     """Chunk-lane replacement for `source_col.query(...)`.
 
     Returns a Chroma-query-shaped dict (ids/documents/metadatas/distances, one
     row) of SOURCE docs ranked by best chunk, or None when the lane is not
     usable (caller scans MiniLM). Documents and metadatas are re-read from the
-    source collection — the source is authoritative for status/expiry/type.
+    source collection, and `where` is re-checked against the SOURCE metadata —
+    a chunk's copied status can lag the source by up to one sweep.
+
+    PERF: Chroma's `where` pre-filter costs 20-60 ms per query on the big
+    collections vs ~3 ms without it (measured 2026-10-25). So the chunk query
+    runs unfiltered with a deeper over-fetch, filters on the copied chunk
+    metadata here, and only re-queries WITH `where` when too few docs survive.
 
     ⚠️ DISTANCES ARE SYNTHETIC: 2*(1-cos), so the existing
     calculate_relevance(d) = 1 - d/2 returns the chunk's cosine similarity.
@@ -217,13 +274,21 @@ async def scan(source_col, qvec: List[float], n: int, where: Optional[dict]) -> 
         ccol = await _get_current(cclient, source_col.name)
         if ccol is None:
             return None
-        got = await ccol.query(query_embeddings=[qvec], n_results=max(1, n * OVERFETCH),
-                               where=where, include=["metadatas", "distances"])
-        best: Dict[str, float] = {}
-        for m, d in zip(got["metadatas"][0], got["distances"][0]):
-            did = (m or {}).get("doc_id")
-            if did and did not in best:
-                best[did] = d
+        include = ["metadatas", "distances"]
+        best = None
+        try:
+            _matches({}, where)
+            fetch = max(1, n * OVERFETCH * UNFILTERED_FACTOR)
+            got = await ccol.query(query_embeddings=[qvec], n_results=fetch, include=include)
+            best = _best_per_doc(got, where, True)
+            if len(best) < n and len(got["ids"][0]) >= fetch:
+                best = None             # filter too selective here — let Chroma do it
+        except _Unsupported:
+            best = None
+        if best is None:
+            got = await ccol.query(query_embeddings=[qvec], n_results=max(1, n * OVERFETCH),
+                                   where=where, include=include)
+            best = _best_per_doc(got, where, False)
         ids = list(best)[:n]
         if not ids:
             return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
@@ -234,9 +299,15 @@ async def scan(source_col, qvec: List[float], n: int, where: Optional[dict]) -> 
             if did not in by_id:        # deleted since the last sweep
                 continue
             doc, meta = by_id[did]
+            meta = meta or {}
+            try:
+                if not _matches(meta, where):   # status/type changed since the sweep
+                    continue
+            except _Unsupported:
+                pass
             out_ids.append(did)
             docs.append(doc)
-            metas.append(meta or {})
+            metas.append(meta)
             dists.append(2.0 * best[did])   # cosine distance (1-cos) → 2*(1-cos)
         return {"ids": [out_ids], "documents": [docs], "metadatas": [metas], "distances": [dists]}
     except Exception as e:
