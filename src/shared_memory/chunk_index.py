@@ -74,6 +74,9 @@ def _get_tokenizer():
     if _tokenizer is None:
         from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_V2
         from tokenizers import Tokenizer
+        # Chroma downloads the MiniLM bundle lazily on the first embed, so in
+        # a fresh container the tokenizer file may not exist yet.
+        ONNXMiniLM_L6_V2()._download_model_if_not_exists()
         path = os.path.join(ONNXMiniLM_L6_V2.DOWNLOAD_PATH, ONNXMiniLM_L6_V2.EXTRACTED_FOLDER_NAME,
                             "tokenizer.json")
         tok = Tokenizer.from_file(str(path))
