@@ -43,6 +43,10 @@ DEFAULT_CHUNK_INDEX = False
 DEFAULT_CHUNK_MIN_RELEVANCE = 0.37
 DEFAULT_CHUNK_RECALL_FLOOR = 0.63
 
+# Cross-encoder rerank for memory_query (rerank.py, interface:rerank-v0).
+DEFAULT_RERANK = False
+DEFAULT_RERANK_MIN = 0.5
+
 # Allowed config keys + their types (used by set_config_value).
 CONFIG_KEYS = {
     "default_expand": bool,
@@ -53,6 +57,8 @@ CONFIG_KEYS = {
     "chunk_index": bool,
     "chunk_min_relevance": float,
     "chunk_recall_floor": float,
+    "rerank": bool,
+    "rerank_min": float,
 }
 
 DEFAULT_SCOPE = "__default__"
@@ -77,6 +83,8 @@ def _default_config_dict() -> Dict[str, Any]:
         "chunk_index": DEFAULT_CHUNK_INDEX,
         "chunk_min_relevance": DEFAULT_CHUNK_MIN_RELEVANCE,
         "chunk_recall_floor": DEFAULT_CHUNK_RECALL_FLOOR,
+        "rerank": DEFAULT_RERANK,
+        "rerank_min": DEFAULT_RERANK_MIN,
     }
 
 
@@ -140,7 +148,7 @@ def set_config_value(db, project: Optional[str], key: str, value: Any, actor: st
     if key == "default_expand_top" and isinstance(value, int):
         if value < 0 or value > 50:
             return {"error": "default_expand_top must be between 0 and 50"}
-    if key in ("recall_floor", "chunk_min_relevance", "chunk_recall_floor") and isinstance(value, float):
+    if key in ("recall_floor", "chunk_min_relevance", "chunk_recall_floor", "rerank_min") and isinstance(value, float):
         if value < 0.0 or value > 1.0:
             return {"error": f"{key} must be between 0.0 and 1.0"}
     if key == "lexical_max" and isinstance(value, int):

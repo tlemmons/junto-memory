@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Local cross-encoder rerank service (retrieval experiment, 2026-10-25).
 
-    /usr/bin/python3 contrib/reranker/rerank_server.py [--port 8091] [--model BAAI/bge-reranker-v2-m3]
+    /usr/bin/python3 contrib/reranker/rerank_server.py [--host 172.17.0.1] [--port 8091] [--model BAAI/bge-reranker-v2-m3]
 
 POST /rerank {"query": str, "documents": [str, ...]} -> {"scores": [float, ...]}
 (sigmoid relevance in [0,1], same order as documents). GET /health -> {"ok": true, "model": ...}.
 
-Runs on sage's system python (torch + sentence-transformers, CUDA). Binds
-127.0.0.1 only. Stdlib HTTP server, one request at a time: a GPU cross-encoder
+Runs on sage's system python (torch + sentence-transformers, CUDA). Prod binds
+the docker0 bridge address (172.17.0.1) so the junto container reaches it as
+host.docker.internal while the LAN cannot (interface:rerank-v0). Unit file:
+contrib/reranker/junto-reranker.service. Stdlib HTTP server, one request at a time: a GPU cross-encoder
 scores ~150 pairs/s, so serialising is fine for an experiment.
 """
 import argparse
@@ -53,14 +55,15 @@ class H(BaseHTTPRequestHandler):
 def main():
     global MODEL, NAME
     ap = argparse.ArgumentParser()
+    ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8091)
     ap.add_argument("--model", default="BAAI/bge-reranker-v2-m3")
     a = ap.parse_args()
     from sentence_transformers import CrossEncoder
     NAME = a.model
     MODEL = CrossEncoder(a.model, max_length=1024, device="cuda", model_kwargs={"dtype": "float16"})
-    print(f"rerank service on 127.0.0.1:{a.port} model={a.model}", flush=True)
-    HTTPServer(("127.0.0.1", a.port), H).serve_forever()
+    print(f"rerank service on {a.host}:{a.port} model={a.model}", flush=True)
+    HTTPServer((a.host, a.port), H).serve_forever()
 
 
 if __name__ == "__main__":

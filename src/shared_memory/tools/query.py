@@ -6,7 +6,7 @@ from typing import List
 
 from mcp.server.fastmcp import Context
 
-from shared_memory import chunk_index, query_config
+from shared_memory import chunk_index, query_config, rerank
 from shared_memory.app import mcp
 from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import OVERLAP_WINDOW_HOURS, PROJECT_PREFIX, SHARED_PREFIX
@@ -161,6 +161,12 @@ async def memory_query(
     _cvec = await chunk_index.embed_query(query) if chunk_index.enabled_for(_qcfg) else None
     _chunk_min = float(_qcfg.get("chunk_min_relevance", MIN_RELEVANCE_THRESHOLD))
 
+    # Cross-encoder rerank (interface:rerank-v0), per-project flag, default OFF.
+    # On: each scan returns a wider pool with NO similarity floor and no
+    # access-stat bumps; the rerank step below selects (or, if the service is
+    # down, re-applies today's floors and per-collection caps).
+    _rr = rerank.enabled_for(_qcfg)
+
     async def _vscan(col, n):
         """(results, chunked): chunk lane when usable, else the MiniLM query."""
         if _cvec is not None:
@@ -174,7 +180,8 @@ async def memory_query(
         try:
             proj_collection = await get_project_collection(chroma, project)
             _qvec = await embed_query_once(proj_collection, query)
-            proj_results, _chunked = await _vscan(proj_collection, limit)
+            proj_results, _chunked = await _vscan(
+                proj_collection, rerank.pool_size(limit) if _rr else limit)
             _proj_min = _chunk_min if _chunked else MIN_RELEVANCE_THRESHOLD
 
             if proj_results["documents"] and proj_results["documents"][0]:
@@ -189,7 +196,7 @@ async def memory_query(
 
                     # Calculate relevance and skip if below threshold
                     relevance = calculate_relevance(dist)
-                    if relevance < _proj_min:
+                    if relevance < _proj_min and not _rr:
                         continue
 
                     # Recency filter (optional)
@@ -226,9 +233,13 @@ async def memory_query(
                         "authored_by": meta.get("claude_instance"),
                         "warning": warning if warning else None
                     })
+                    if _rr:
+                        results[-1].update(_sim=relevance, _min=_proj_min, _cap_key="project",
+                                           _text=rerank.doc_text(meta.get("title", ""), doc),
+                                           _col=proj_collection)
 
-                    # Track access (fire-and-forget)
-                    if doc_id:
+                    # Track access (fire-and-forget); rerank mode counts only the served rows
+                    if doc_id and not _rr:
                         await update_access_stats(proj_collection, doc_id)
 
             # Exact identifier hits (lexical.py) — kept even below the
@@ -287,7 +298,8 @@ async def memory_query(
                     # we hold — embed here and the second shared scan reuses it.
                     _qvec = await embed_query_once(shared, query)
                 # Max 2 from each shared collection
-                shared_results, _chunked = await _vscan(shared, min(2, limit))
+                shared_results, _chunked = await _vscan(
+                    shared, rerank.POOL_SHARED if _rr else min(2, limit))
                 _shared_min = (_chunk_min + 0.1) if _chunked else shared_threshold
 
                 if shared_results["documents"] and shared_results["documents"][0]:
@@ -302,7 +314,7 @@ async def memory_query(
 
                         # Calculate relevance and skip if below threshold
                         relevance = calculate_relevance(dist)
-                        if relevance < _shared_min:
+                        if relevance < _shared_min and not _rr:
                             continue
 
                         # Recency filter (optional)
@@ -329,12 +341,28 @@ async def memory_query(
                             "authored_by": meta.get("claude_instance"),
                             "warning": staleness if staleness else None
                         })
+                        if _rr:
+                            results[-1].update(_sim=relevance, _min=_shared_min, _cap_key=shared_name,
+                                               _text=rerank.doc_text(meta.get("title", ""), doc),
+                                               _col=shared)
 
-                        # Track access (fire-and-forget)
-                        if doc_id:
+                        # Track access (fire-and-forget); rerank mode counts only the served rows
+                        if doc_id and not _rr:
                             await update_access_stats(shared, doc_id)
             except Exception:
                 pass
+
+    if _rr and results:
+        _pool = [r for r in results if r.get("match") != "exact"]
+        _exact_rows = [r for r in results if r.get("match") == "exact"]
+        _scores = await rerank.score(query, [r["_text"] for r in _pool])
+        _caps = {"project": limit, "patterns": min(2, limit), "context": min(2, limit)}
+        _kept = rerank.apply(_pool, _scores, float(_qcfg.get("rerank_min", 0.5)), _caps)
+        for r in _kept:
+            if r.get("id") and r.get("_col") is not None:
+                await update_access_stats(r["_col"], r["id"])
+        results = _kept + _exact_rows
+        rerank.strip_private(results)
 
     if not results:
         return json.dumps({

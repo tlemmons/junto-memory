@@ -56,6 +56,8 @@ DESCRIPTIONS = {
     "chunk_index": "Search the chunked arctic-embed2 index instead of MiniLM (sees whole docs, not just the first 256 tokens). Falls back to MiniLM automatically when the index is stale or the embedder is down.",
     "chunk_min_relevance": "memory_query similarity floor when the chunk index is on. Chunk scores use a different scale from MiniLM, so this is separate from the 0.3 default.",
     "chunk_recall_floor": "Recall similarity floor when the chunk index is on (separate from recall_floor because the score scale differs).",
+    "rerank": "Re-rank memory_query results with the local cross-encoder (sharper results, ~0.2 s extra). Falls back to the normal ranking if the reranker is down. Does not affect recall.",
+    "rerank_min": "Minimum reranker score (0-1) for a memory_query result to be returned when rerank is on.",
 }
 
 SECRET_KEYS = {"webhook_token"}
