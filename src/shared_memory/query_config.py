@@ -45,7 +45,7 @@ DEFAULT_CHUNK_RECALL_FLOOR = 0.63
 
 # Cross-encoder rerank for memory_query (rerank.py, interface:rerank-v0).
 DEFAULT_RERANK = False
-DEFAULT_RERANK_MIN = 0.5
+DEFAULT_RERANK_MIN = 0.05  # top-3 rows scoring 0.02-0.5 were still mostly useful (Claude-graded, 10-25); see interface:rerank-v0
 
 # Allowed config keys + their types (used by set_config_value).
 CONFIG_KEYS = {
