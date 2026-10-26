@@ -38,6 +38,16 @@ fail() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2; FAILURES=$(( FAILU
 # Run a batch of sftp commands on stdin; returns sftp's exit code.
 sftp_batch() { sftp "${SFTP_OPTS[@]}" -b - "$DEST"; }
 
+# Free bytes on the receiver filesystem holding <remote_dir> (sftp `df`, 1K
+# blocks, "Avail" column = what a non-root writer can use). Empty on failure.
+remote_avail_bytes() {
+    printf 'df %s\n' "$1" | sftp_batch 2>/dev/null \
+        | awk '$1 ~ /^[0-9]+$/ && NF >= 4 { print $3 * 1024; exit }'
+}
+
+# Headroom kept free on the receiver beyond the file itself.
+SPACE_MARGIN_BYTES="${SPACE_MARGIN_BYTES:-$(( 100 * 1024 * 1024 ))}"
+
 # ── Verify receiver is reachable ──
 log "Checking offsite receiver ${DEST} ..."
 if ! printf 'pwd\n' | sftp_batch >/dev/null 2>&1; then
@@ -69,6 +79,16 @@ sync_dir() {
             skip=$(( skip + 1 ))
             continue
         fi
+        # Space guard (2026-10-26): a put that hits ENOSPC leaves a .partial
+        # filling the receiver, which then also fails the next modality.
+        # Skip (and report) instead of starting an upload that cannot fit.
+        local size avail
+        size=$(stat -c %s "$f")
+        avail=$(remote_avail_bytes "$remote_dir")
+        if [ -n "$avail" ] && [ $(( size + SPACE_MARGIN_BYTES )) -gt "$avail" ]; then
+            fail "${label}: NOT uploading ${base}: needs ${size}B + margin, receiver has ${avail}B free"
+            continue
+        fi
         # Atomic: upload to .partial, then rename to the final name.
         if printf 'put %s %s/%s.partial\nrename %s/%s.partial %s/%s\n' \
                 "$f" "$remote_dir" "$base" "$remote_dir" "$base" "$remote_dir" "$base" \
@@ -77,14 +97,19 @@ sync_dir() {
             new=$(( new + 1 ))
         else
             fail "${label}: upload FAILED for ${base}"
+            # Don't leave a half-written .partial eating receiver space.
+            printf 'rm %s/%s.partial\n' "$remote_dir" "$base" | sftp_batch >/dev/null 2>&1 \
+                && log "${label}: removed leftover ${base}.partial"
         fi
     done
     log "${label}: ${new} new, ${skip} already present"
 }
 
 log "=== junto offsite sync -> ${DEST} start ==="
-sync_dir "chroma" "$CHROMA_LOCAL_DIR" "$CHROMA_REMOTE" "chroma-backup-*.tar.gz"
+# Mongo first: it is the source of truth and small, so a full receiver
+# can't starve it behind a large chroma tarball.
 sync_dir "mongo"  "$MONGO_LOCAL_DIR"  "$MONGO_REMOTE"  "mongo-backup-*.archive.gz"
+sync_dir "chroma" "$CHROMA_LOCAL_DIR" "$CHROMA_REMOTE" "chroma-backup-*.tar.gz"
 
 # Retention is enforced on the receiver (212, keep-14). No remote rotation here.
 
