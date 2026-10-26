@@ -47,7 +47,8 @@ Mechanics:
   doesn't count), so a parked agent is never nudged.
 - Auto-reset agents (idle_park_autoreset) get a direct "park now, you'll be
   /clear+go'd" body with their reported context size; it overrides the
-  project policy text (Tom 2026-10-17).
+  project policy text (Tom 2026-10-17). Since 2026-10-26 only at night
+  (21-05 America/Chicago); by day they get the project policy like everyone.
 - Self-wake skip: no nudge while the agent has its own pending reminder due
   within SELF_WAKE_WINDOW_SECONDS (it has already armed a wake). The timer is
   still marked nudged, so the reminder's turn re-arms it as usual.
@@ -68,7 +69,7 @@ import logging
 import time
 import uuid
 from collections import deque
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Deque, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
@@ -105,7 +106,7 @@ NUDGE_BODY = (
 # Agents on idle_park_autoreset get a direct "park now" instead: the box will
 # /clear + go them after they park, and that only happens if they park while
 # the nudge is fresh. It overrides the project's keep-alive policy (Tom,
-# 2026-10-17). Must start with "Idle": the reset gate anchors on
+# 2026-10-17) — at night only since 2026-10-26 (see _is_night). Must start with "Idle": the reset gate anchors on
 # "[SYSTEM NOTICE] Idle" (contrib/context-report NUDGE_MARKER).
 NUDGE_AUTORESET_BODY = (
     "Idle {minutes} min{context}. You're on auto-reset: PARK NOW "
@@ -412,10 +413,29 @@ def _on_autoreset(db, project: str, agent: Optional[str]) -> bool:
         return False
 
 
-def nudge_text(db, project: str, minutes: int, agent: Optional[str] = None) -> Tuple[str, str]:
+# Auto-reset agents get PARK NOW only at night (Tom's local time). By day they
+# follow the project's keep-alive policy like everyone else, so Tom can work
+# with them without a park + go every hour (Tom, 2026-10-26). Matches the
+# NIGHT window in the park_on_idle_nudge guidelines (21-05 America/Chicago).
+NIGHT_TZ = "America/Chicago"
+NIGHT_START_HOUR = 21
+NIGHT_END_HOUR = 6
+
+
+def _is_night(now: Optional[datetime] = None) -> bool:
+    try:
+        from zoneinfo import ZoneInfo
+        local = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo(NIGHT_TZ))
+    except Exception:
+        return True  # no tz data: keep the pre-2026-10-26 always-park behavior
+    return local.hour >= NIGHT_START_HOUR or local.hour < NIGHT_END_HOUR
+
+
+def nudge_text(db, project: str, minutes: int, agent: Optional[str] = None,
+               now: Optional[datetime] = None) -> Tuple[str, str]:
     """(subject, body) for an idle nudge to `agent` in `project`."""
     subject = NUDGE_SUBJECT.format(minutes=minutes)
-    if _on_autoreset(db, project, agent):
+    if _is_night(now) and _on_autoreset(db, project, agent):
         tokens = _reported_context_tokens(db, agent)
         context = f" (your context: ~{tokens // 1000}K tokens)" if tokens else ""
         return subject, NUDGE_AUTORESET_BODY.format(minutes=minutes, context=context)

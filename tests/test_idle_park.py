@@ -549,10 +549,11 @@ class _AutoresetDb(_PolicyDb):
         self.agent_status = _Status()
 
 
-def _autoreset_cfg(monkeypatch, agents):
+def _autoreset_cfg(monkeypatch, agents, night=True):
     from shared_memory import push_control
     monkeypatch.setattr(push_control, "get_effective_config",
                         lambda db, p: {"idle_park_autoreset": agents})
+    monkeypatch.setattr(idle_park, "_is_night", lambda now=None: night)
 
 
 def test_autoreset_agent_gets_park_now_with_context(monkeypatch):
@@ -575,3 +576,25 @@ def test_non_autoreset_agent_still_gets_project_policy(monkeypatch):
     policy = {"name": "park_on_idle_nudge", "scope": "nimbus", "active": True, "rule": "KEEP-ALIVE"}
     _, body = idle_park.nudge_text(_AutoresetDb([policy]), "nimbus", 50, "coordinator")
     assert body.endswith("KEEP-ALIVE")
+
+
+# --- Auto-reset is night-only (Tom, 2026-10-26) --------------------------------
+
+def test_autoreset_agent_gets_project_policy_by_day(monkeypatch):
+    _autoreset_cfg(monkeypatch, "nimbusSupport", night=False)
+    policy = {"name": "park_on_idle_nudge", "scope": "nimbus", "active": True, "rule": "KEEP-ALIVE"}
+    _, body = idle_park.nudge_text(_AutoresetDb([policy], tokens=285_708), "nimbus", 50, "nimbusSupport")
+    assert body.endswith("KEEP-ALIVE") and "PARK NOW" not in body
+
+
+@pytest.mark.parametrize("utc_hour,night", [
+    (1, False),   # 20:00 CDT
+    (2, True),    # 21:00 CDT
+    (10, True),   # 05:00 CDT
+    (11, False),  # 06:00 CDT
+    (17, False),  # 12:00 CDT
+])
+def test_is_night_window_central(utc_hour, night):
+    from datetime import datetime, timezone
+    # 2026-10-26 is CDT (UTC-5).
+    assert idle_park._is_night(datetime(2026, 10, 26, utc_hour, 0, tzinfo=timezone.utc)) is night
