@@ -321,7 +321,16 @@ def get_mongo():
         # Ensure indexes for guidelines collection (server-managed agent instructions)
         guidelines_col = _mongo_db.guidelines
         guidelines_col.create_index("scope")
-        guidelines_col.create_index("name", unique=True)
+        # Unique per (name, scope): a project rule like park_on_idle_nudge can
+        # exist once per project. The old name-only unique index made `set`
+        # move the row between scopes (2026-10-26); drop it if present.
+        try:
+            if "name_1" in guidelines_col.index_information():
+                guidelines_col.drop_index("name_1")
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("guidelines: could not drop legacy name_1 index: %s", e)
+        guidelines_col.create_index([("name", 1), ("scope", 1)], unique=True)
 
         # Seed code-defined GLOBAL guidelines (scope="global") into the DB so a
         # guidance change travels with the deploy to every server — incl. the
