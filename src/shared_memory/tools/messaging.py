@@ -1856,8 +1856,9 @@ async def memory_report_context(
     network-reachable (interface:context-tokens-sideband-v0).
 
     TRUST: this sets another instance's context fields, so it is only appropriate in
-    a trusted fleet (home/junto). Adopter deployments should gate it (owner/admin) or
-    restrict it to self-reports.
+    a trusted fleet (home/junto). With JUNTO_REQUIRE_KEY on, a non-owner/admin
+    caller may report only its own instance (others land in `skipped`) — the
+    per-session self-report path (interface:context-self-report-v0).
 
     Args:
         session_id: Your session ID
@@ -1889,6 +1890,15 @@ async def memory_report_context(
     from shared_memory.context_stamp import record_history as record_context_history
     from shared_memory.idle_park import note_turn
 
+    # Keyed deployments (JUNTO_REQUIRE_KEY): a non-admin caller may report only
+    # its OWN context — the self-report path the junto-inbox plugin uses
+    # (interface:context-self-report-v0). A trusted-LAN fleet keeps the
+    # one-reporter-per-box model, where a reporter session speaks for others.
+    from shared_memory import auth as _auth
+    _caller = active_sessions.get(session_id) or {}
+    _self_only = (_auth.REQUIRE_KEY
+                  and _caller.get("role", "agent") not in ("owner", "admin"))
+
     now = utc_now()
     now_iso = now.isoformat()
     written = 0
@@ -1898,6 +1908,9 @@ async def memory_report_context(
             skipped.append(str(r)[:40])
             continue
         instance = r.get("instance")
+        if _self_only and instance != _caller.get("claude_instance"):
+            skipped.append(f"{str(instance)[:40]} (self-report only)")
+            continue
         tokens = r.get("context_tokens")
         window = r.get("context_window")
         if not instance or not isinstance(tokens, int) or tokens <= 0:

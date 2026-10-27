@@ -67,6 +67,7 @@ version via `memory_health` (`server_version`).
   - Fallbacks: push_control `idle_park_timezone` (project, then server default), then America/Chicago.
   - Every nudge now ends with `Your local time: HH:MM (zone) — DAY|NIGHT`, so idle policies no longer need a hardcoded `TZ=... date`.
 - **Server-default idle policy:** push_control `idle_park_policy`. Its text goes into the nudge for any project without its own `park_on_idle_nudge` guideline, so a server with many projects sets it once.
+- **Self-report context on keyed servers:** with `JUNTO_REQUIRE_KEY` on, a non-owner/admin `memory_report_context` call may only report its own instance; others land in `skipped`. This is the server half of interface:context-self-report-v0, where the junto-inbox plugin reports its own agent's context on any OS.
 - **`JUNTO_LOG_QUERY_TEXT=false`** stops storing query/prompt text in `query_events` / `recall_events`. The ids/scores rows are kept for metrics. Default true.
 
 ### Previously undocumented (shipped between 1.34 and this release)
