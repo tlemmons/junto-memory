@@ -141,6 +141,8 @@ services:
       - JUNTO_CLAIM_GATE_ENABLED=${JUNTO_CLAIM_GATE_ENABLED:-false}
       - JUNTO_CLAIM_GATE_URL=${JUNTO_CLAIM_GATE_URL:-http://host.docker.internal:11434/v1}
       - JUNTO_CLAIM_GATE_MODEL=${JUNTO_CLAIM_GATE_MODEL:-phi4:14b}
+      - JUNTO_CLAIM_GATE_EXTRACT_MODEL=${JUNTO_CLAIM_GATE_EXTRACT_MODEL:-}
+      - JUNTO_CLAIM_GATE_EXTRACT_REASONING=${JUNTO_CLAIM_GATE_EXTRACT_REASONING:-}
       # Pending-agent GC (identity_gc.py, design:identity-lifecycle-v0
       # Mechanism B). Reaps PENDING-tier roster ghosts idle past the grace
       # window (never named/admin; blocked by live sessions and open inbound

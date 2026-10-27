@@ -6,6 +6,14 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+### Added
+- **Separate model for claim extraction + facets.** `JUNTO_CLAIM_GATE_EXTRACT_MODEL`
+  (claim EXTRACT, operation, shelf_life, trigger) and
+  `JUNTO_CLAIM_GATE_EXTRACT_REASONING` (sent as `reasoning_effort`, e.g. `none`
+  for thinking models). The contradiction judge stays on
+  `JUNTO_CLAIM_GATE_MODEL`. Both unset = unchanged behavior. Basis: n=150
+  bake-off 2026-10-27 (learning_85ee50137127e19c).
+
 ### Fixed
 - **Agents that keep working after parking get idle nudges again.** An agent
   woken while parked usually works on the inbox plugin's session and never calls
