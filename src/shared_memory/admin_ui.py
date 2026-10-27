@@ -45,6 +45,8 @@ DESCRIPTIONS = {
     "idle_park_optout": "Comma list of agents never nudged.",
     "idle_park_min_context": "Only nudge agents whose reported context is at least this many tokens.",
     "idle_park_autoreset": "Comma list of agents auto-/clear + go'd after a nudged park (tmux boxes).",
+    "idle_park_policy": "Idle-policy text put in the nudge for projects that have no park_on_idle_nudge guideline of their own.",
+    "idle_park_timezone": "IANA time zone (e.g. America/Denver) for the nudge's day/night verdict when the agent set none via memory_start_session(timezone=...).",
     "action_lapse_days": "Unanswered action messages lapse (leave the action lane, not deleted) after N days. 0 = off.",
     "action_lapse_responded_days": "Answered-but-never-closed tasks/blockers lapse N days after the reply. 0 = use action_lapse_days.",
     # query_config

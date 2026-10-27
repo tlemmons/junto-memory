@@ -410,7 +410,7 @@ def test_nudge_text_carries_live_project_policy():
                      "rule": "  KEEP-ALIVE OR PARK: check context first.  "}])
     _, body = idle_park.nudge_text(db, "nimbus", 50)
     assert "park_on_idle_nudge" in body
-    assert body.endswith("KEEP-ALIVE OR PARK: check context first.")
+    assert "KEEP-ALIVE OR PARK: check context first.\n\nYour local time:" in body
     assert "clean stopping point" not in body
 
 
@@ -427,7 +427,7 @@ def test_nudge_text_falls_back_when_policy_inactive_other_project_or_blank(doc):
 def test_nudge_text_normalizes_project_scope():
     db = _PolicyDb([{"name": "park_on_idle_nudge", "scope": "my_proj", "active": True,
                      "rule": "policy"}])
-    assert idle_park.nudge_text(db, "My-Proj", 50)[1].endswith("policy")
+    assert "\n\npolicy\n\nYour local time:" in idle_park.nudge_text(db, "My-Proj", 50)[1]
 
 
 def test_nudge_text_survives_db_without_guidelines():
@@ -574,7 +574,7 @@ def _autoreset_cfg(monkeypatch, agents, night=True):
     from shared_memory import push_control
     monkeypatch.setattr(push_control, "get_effective_config",
                         lambda db, p: {"idle_park_autoreset": agents})
-    monkeypatch.setattr(idle_park, "_is_night", lambda now=None: night)
+    monkeypatch.setattr(idle_park, "_is_night", lambda now=None, tz=None: night)
 
 
 def test_autoreset_agent_gets_park_now_with_context(monkeypatch):
@@ -596,7 +596,7 @@ def test_non_autoreset_agent_still_gets_project_policy(monkeypatch):
     _autoreset_cfg(monkeypatch, "nimbusSupport")
     policy = {"name": "park_on_idle_nudge", "scope": "nimbus", "active": True, "rule": "KEEP-ALIVE"}
     _, body = idle_park.nudge_text(_AutoresetDb([policy]), "nimbus", 50, "coordinator")
-    assert body.endswith("KEEP-ALIVE")
+    assert "KEEP-ALIVE\n\nYour local time:" in body
 
 
 # --- Auto-reset is night-only (Tom, 2026-10-26) --------------------------------
@@ -605,7 +605,7 @@ def test_autoreset_agent_gets_project_policy_by_day(monkeypatch):
     _autoreset_cfg(monkeypatch, "nimbusSupport", night=False)
     policy = {"name": "park_on_idle_nudge", "scope": "nimbus", "active": True, "rule": "KEEP-ALIVE"}
     _, body = idle_park.nudge_text(_AutoresetDb([policy], tokens=285_708), "nimbus", 50, "nimbusSupport")
-    assert body.endswith("KEEP-ALIVE") and "PARK NOW" not in body
+    assert "KEEP-ALIVE\n\nYour local time:" in body and "PARK NOW" not in body
 
 
 @pytest.mark.parametrize("utc_hour,night", [
@@ -619,3 +619,52 @@ def test_is_night_window_central(utc_hour, night):
     from datetime import datetime, timezone
     # 2026-10-26 is CDT (UTC-5).
     assert idle_park._is_night(datetime(2026, 10, 26, utc_hour, 0, tzinfo=timezone.utc)) is night
+
+
+# --- per-agent timezone + server default policy (Tom 2026-10-27, work box) ---
+
+class _TzDb(_PolicyDb):
+    def __init__(self, docs=(), agent_tz=None):
+        super().__init__(list(docs))
+
+        class _Dir:
+            def find_one(_s, q, proj=None):
+                return {"timezone": agent_tz} if agent_tz else None
+        self.agent_directory = _Dir()
+
+
+def _cfg(monkeypatch, **cfg):
+    from shared_memory import push_control
+    monkeypatch.setattr(push_control, "get_effective_config", lambda db, p: dict(cfg))
+
+
+def test_agent_timezone_order(monkeypatch):
+    _cfg(monkeypatch, idle_park_timezone="Europe/London")
+    assert idle_park.agent_timezone(_TzDb(agent_tz="America/Denver"), "work", "eric") == "America/Denver"
+    assert idle_park.agent_timezone(_TzDb(agent_tz="Not/AZone"), "work", "eric") == "Europe/London"
+    _cfg(monkeypatch)
+    assert idle_park.agent_timezone(_TzDb(), "work", "eric") == "America/Chicago"
+
+
+def test_clock_line_uses_agent_zone_for_day_night(monkeypatch):
+    from datetime import datetime, timezone
+    _cfg(monkeypatch)
+    now = datetime(2026, 10, 27, 4, 0, tzinfo=timezone.utc)  # 23:00 Chicago, 05:00 London, 13:00 Tokyo
+    _, chi = idle_park.nudge_text(_TzDb(agent_tz="America/Chicago"), "work", 50, "a", now=now)
+    _, tok = idle_park.nudge_text(_TzDb(agent_tz="Asia/Tokyo"), "work", 50, "a", now=now)
+    assert chi.endswith("Your local time: 23:00 (America/Chicago) — NIGHT (night = 21:00–06:00).")
+    assert "13:00 (Asia/Tokyo) — DAY" in tok
+
+
+def test_server_policy_fills_in_when_project_has_none(monkeypatch):
+    _cfg(monkeypatch, idle_park_policy="  KEEP WARM BY DAY  ")
+    _, body = idle_park.nudge_text(_TzDb(), "awareness", 50, "roy")
+    assert "push_control idle_park_policy" in body and "KEEP WARM BY DAY\n\nYour local time:" in body
+    proj = {"name": "park_on_idle_nudge", "scope": "awareness", "active": True, "rule": "PROJECT RULE"}
+    _, body = idle_park.nudge_text(_TzDb([proj]), "awareness", 50, "roy")
+    assert "PROJECT RULE" in body and "KEEP WARM" not in body
+
+
+def test_valid_timezone():
+    assert idle_park.valid_timezone("America/Denver")
+    assert not idle_park.valid_timezone("Mountain") and not idle_park.valid_timezone(None)

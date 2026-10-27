@@ -42,6 +42,11 @@ Mechanics:
   with an active project-scoped guideline `park_on_idle_nudge` gets that
   guideline's live text in the body instead (nudge_text), so its own idle
   policy (e.g. nimbus keep-alive) wins without agents overriding the nudge.
+  Projects without one fall back to push_control `idle_park_policy` (project
+  override or server default), so a many-project server sets it once.
+- Every body ends with the agent's local time and a DAY/NIGHT verdict in its
+  own zone (agent_timezone: agent_directory.timezone → idle_park_timezone →
+  America/Chicago), so policies need not hardcode `TZ=... date`.
 - Parked agents: after memory_end_session the agent's calls don't arm a timer
   until it starts a new session itself (note_session_start; a plugin rebind
   doesn't count) or does real work (UNPARK_TOOLS), so a parked agent is not
@@ -446,28 +451,96 @@ NIGHT_START_HOUR = 21
 NIGHT_END_HOUR = 6
 
 
-def _is_night(now: Optional[datetime] = None) -> bool:
+def _is_night(now: Optional[datetime] = None, tz: Optional[str] = None) -> bool:
     try:
         from zoneinfo import ZoneInfo
-        local = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo(NIGHT_TZ))
+        local = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo(tz or NIGHT_TZ))
     except Exception:
         return True  # no tz data: keep the pre-2026-10-26 always-park behavior
     return local.hour >= NIGHT_START_HOUR or local.hour < NIGHT_END_HOUR
+
+
+def valid_timezone(tz) -> bool:
+    """True for an IANA zone name zoneinfo can load (e.g. 'America/Denver')."""
+    if not isinstance(tz, str) or not tz.strip():
+        return False
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(tz.strip())
+        return True
+    except Exception:
+        return False
+
+
+def agent_timezone(db, project: str, agent: Optional[str]) -> str:
+    """The agent's local zone for day/night decisions (Tom 2026-10-27: offices
+    in several locations, so per agent). Order: the agent's own
+    agent_directory.timezone (memory_start_session(timezone=...)) → push_control
+    idle_park_timezone (project, then server default) → NIGHT_TZ."""
+    from shared_memory.helpers import normalize_project
+    try:
+        if db is not None and agent:
+            doc = db.agent_directory.find_one(
+                {"project": normalize_project(project), "instance": agent}, {"timezone": 1})
+            tz = (doc or {}).get("timezone")
+            if valid_timezone(tz):
+                return tz.strip()
+    except Exception:
+        pass
+    try:
+        from shared_memory.push_control import get_effective_config
+        tz = get_effective_config(db, project).get("idle_park_timezone")
+        if valid_timezone(tz):
+            return tz.strip()
+    except Exception:
+        pass
+    return NIGHT_TZ
+
+
+def _clock_line(tz: str, now: Optional[datetime] = None) -> str:
+    """One line telling the agent its local time and the server's day/night
+    verdict, so idle policies need not hardcode a zone (`TZ=... date`)."""
+    when = "NIGHT" if _is_night(now, tz) else "DAY"
+    try:
+        from zoneinfo import ZoneInfo
+        hhmm = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo(tz)).strftime("%H:%M")
+    except Exception:
+        hhmm = "??:??"
+    return (f"Your local time: {hhmm} ({tz}) — {when} "
+            f"(night = {NIGHT_START_HOUR:02d}:00–{NIGHT_END_HOUR:02d}:00).")
+
+
+def _server_idle_policy(db, project: str) -> Optional[str]:
+    """push_control idle_park_policy (project override, else server default):
+    the idle policy for projects without their own park_on_idle_nudge
+    guideline — one setting covers a server with many projects."""
+    try:
+        from shared_memory.push_control import get_effective_config
+        rule = get_effective_config(db, project).get("idle_park_policy")
+    except Exception:
+        return None
+    return rule.strip() if isinstance(rule, str) and rule.strip() else None
 
 
 def nudge_text(db, project: str, minutes: int, agent: Optional[str] = None,
                now: Optional[datetime] = None) -> Tuple[str, str]:
     """(subject, body) for an idle nudge to `agent` in `project`."""
     subject = NUDGE_SUBJECT.format(minutes=minutes)
-    if _is_night(now) and _on_autoreset(db, project, agent):
+    tz = agent_timezone(db, project, agent)
+    clock = "\n\n" + _clock_line(tz, now)
+    if _is_night(now, tz) and _on_autoreset(db, project, agent):
         tokens = _reported_context_tokens(db, agent)
         context = f" (your context: ~{tokens // 1000}K tokens)" if tokens else ""
-        return subject, NUDGE_AUTORESET_BODY.format(minutes=minutes, context=context)
+        return subject, NUDGE_AUTORESET_BODY.format(minutes=minutes, context=context) + clock
     rule = _project_idle_policy(db, project)
     if rule:
         return subject, NUDGE_POLICY_BODY.format(
-            minutes=minutes, guideline=POLICY_GUIDELINE, rule=rule)
-    return subject, NUDGE_BODY.format(minutes=minutes)
+            minutes=minutes, guideline=POLICY_GUIDELINE, rule=rule) + clock
+    rule = _server_idle_policy(db, project)
+    if rule:
+        return subject, NUDGE_POLICY_BODY.format(
+            minutes=minutes, guideline="push_control idle_park_policy", rule=rule) + clock
+    return subject, NUDGE_BODY.format(minutes=minutes) + clock
 
 
 def _has_pending_self_wake(db, project: str, agent: str, now_wall=None) -> bool:

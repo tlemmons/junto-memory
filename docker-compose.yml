@@ -143,6 +143,7 @@ services:
       - JUNTO_CLAIM_GATE_MODEL=${JUNTO_CLAIM_GATE_MODEL:-phi4:14b}
       - JUNTO_CLAIM_GATE_EXTRACT_MODEL=${JUNTO_CLAIM_GATE_EXTRACT_MODEL:-}
       - JUNTO_CLAIM_GATE_EXTRACT_REASONING=${JUNTO_CLAIM_GATE_EXTRACT_REASONING:-}
+      - JUNTO_LOG_QUERY_TEXT=${JUNTO_LOG_QUERY_TEXT:-true}
       # Pending-agent GC (identity_gc.py, design:identity-lifecycle-v0
       # Mechanism B). Reaps PENDING-tier roster ghosts idle past the grace
       # window (never named/admin; blocked by live sessions and open inbound

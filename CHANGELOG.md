@@ -61,6 +61,14 @@ version via `memory_health` (`server_version`).
   The global rules point every agent at `memory_get_skill("parking")`, which didn't exist
   on a fresh or isolated server.
 
+### Added (this release, for multi-site / API-billed deployments)
+- **Per-agent time zone for the idle nudge.**
+  - Set it with `memory_start_session(timezone="America/Denver")`, persisted on agent_directory. An invalid zone is reported in `timezone_warning`.
+  - Fallbacks: push_control `idle_park_timezone` (project, then server default), then America/Chicago.
+  - Every nudge now ends with `Your local time: HH:MM (zone) — DAY|NIGHT`, so idle policies no longer need a hardcoded `TZ=... date`.
+- **Server-default idle policy:** push_control `idle_park_policy`. Its text goes into the nudge for any project without its own `park_on_idle_nudge` guideline, so a server with many projects sets it once.
+- **`JUNTO_LOG_QUERY_TEXT=false`** stops storing query/prompt text in `query_events` / `recall_events`. The ids/scores rows are kept for metrics. Default true.
+
 ### Previously undocumented (shipped between 1.34 and this release)
 - Retrieval:
   - chunk index on arctic-embed2 (d777671, cf703c6, 932ae57, 715c07e, 37e3c05);

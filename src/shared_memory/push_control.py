@@ -69,6 +69,8 @@ CONFIG_KEYS = {
     "idle_park_optout": str,        # comma-separated agent names never nudged
     "idle_park_min_context": int,   # only nudge agents whose reported context >= this
     "idle_park_autoreset": str,     # comma-separated agents auto-/clear+go'd after a nudged park
+    "idle_park_policy": str,        # idle-policy text for projects without a park_on_idle_nudge guideline
+    "idle_park_timezone": str,      # IANA zone for day/night when the agent set none (default America/Chicago)
     "action_lapse_days": int,       # unanswered action msgs lapse after N days; 0 disables
     "action_lapse_responded_days": int,  # responded tasks/blockers lapse N days after the reply; 0 = use action_lapse_days
 }
@@ -298,6 +300,8 @@ def _default_config_dict() -> Dict[str, Any]:
         "idle_park_optout": "",
         "idle_park_min_context": DEFAULT_IDLE_PARK_MIN_CONTEXT,
         "idle_park_autoreset": "",
+        "idle_park_policy": "",
+        "idle_park_timezone": "",
         "action_lapse_days": DEFAULT_ACTION_LAPSE_DAYS,
         "action_lapse_responded_days": DEFAULT_ACTION_LAPSE_RESPONDED_DAYS,
     }

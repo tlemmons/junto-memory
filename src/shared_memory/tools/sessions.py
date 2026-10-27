@@ -155,6 +155,7 @@ async def memory_start_session(
     aliases: List[str] = None,
     principal: bool = False,
     guidelines_held: str = None,
+    timezone: str = None,
     ctx: Context = None
 ) -> str:
     """
@@ -197,6 +198,11 @@ async def memory_start_session(
             per project — an alias that collides with a live agent name or
             another agent's alias is rejected (surfaced in `registry_warning`).
             None = leave existing aliases untouched; [] = clear them.
+        timezone: Optional IANA time zone for this agent (e.g. "America/Denver").
+            Persisted on the agent_directory record; the idle-park nudge uses it
+            for the agent's local time and DAY/NIGHT verdict. None = leave the
+            stored value untouched. An invalid name is ignored and reported in
+            `timezone_warning`.
         principal: Service-principal session mode (design:identity-lifecycle-v0
             Mechanism A; first consumer: subConscience runtime subs). Requires a
             VALIDATED api key (arg or Bearer header) — keyless/soft-auth
@@ -386,6 +392,7 @@ async def memory_start_session(
 
     # ── Registry awareness ──
     _needs_role_description = False
+    _timezone_warning = None
     _registry_warning = None
     _identity_suggestion = None
     _is_worker = False
@@ -524,6 +531,13 @@ async def memory_start_session(
                 update_fields["role_description"] = role_description
             if spawned_by:
                 update_fields["spawned_by"] = spawned_by
+            if timezone is not None:
+                from shared_memory.idle_park import valid_timezone
+                if valid_timezone(timezone):
+                    update_fields["timezone"] = timezone.strip()
+                else:
+                    _timezone_warning = (f"timezone {timezone!r} is not a valid IANA zone "
+                                         "(e.g. 'America/Denver'); not stored")
             # Component subscriptions (design:unified-messaging-v0 Stage 1).
             # Normalize to a clean list of non-empty strings; an explicit empty
             # list clears the subscription (so an agent that moves off a
@@ -839,6 +853,8 @@ async def memory_start_session(
         }
     if _registry_warning:
         output["registry_warning"] = _registry_warning
+    if _timezone_warning:
+        output["timezone_warning"] = _timezone_warning
     if _is_worker:
         output["worker"] = {
             "auto_id": claude_instance,

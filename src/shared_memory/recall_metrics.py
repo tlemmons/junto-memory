@@ -44,6 +44,18 @@ PULLS_COLLECTION = "recall_pulls"
 QUERY_EVENTS_COLLECTION = "query_events"
 TTL_SECONDS = 90 * 24 * 3600
 QUERY_LOG_CHARS = 2000
+# JUNTO_LOG_QUERY_TEXT=false keeps the ids/scores rows (pull-through metrics,
+# floor simulation) but stores query=None — for deployments where the text of
+# what people search for must not sit in Mongo for 90 days (work box, Tom
+# 2026-10-27). Read per call so tests and a restart-free env flip both work.
+_TEXT_OFF = ("0", "false", "no", "off")
+
+
+def _query_text(query):
+    import os
+    if os.environ.get("JUNTO_LOG_QUERY_TEXT", "true").strip().lower() in _TEXT_OFF:
+        return None
+    return (query or "")[:QUERY_LOG_CHARS] or None
 PULL_JOIN_WINDOW_HOURS = 24
 
 _indexed = False
@@ -93,7 +105,7 @@ def log_recall_event(db, project, agent, ids, floor, scores=None, query=None, ma
             "floor": floor,
             "scores": list(scores) if scores is not None else None,
             "matches": list(matches) if matches is not None else None,
-            "query": (query or "")[:QUERY_LOG_CHARS] or None,
+            "query": _query_text(query),
             "retriever": retriever,
         })
     except Exception as e:  # noqa: BLE001
@@ -110,7 +122,7 @@ def log_query_event(db, project, agent, query, ids, scores=None, matches=None):
             "ts": utc_now(),
             "project": project,
             "agent": agent,
-            "query": (query or "")[:QUERY_LOG_CHARS],
+            "query": _query_text(query),
             "ids": list(ids),
             "scores": list(scores) if scores is not None else None,
             "matches": list(matches) if matches is not None else None,
