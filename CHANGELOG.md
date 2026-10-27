@@ -17,8 +17,10 @@ version via `memory_health` (`server_version`).
   There is no downgrade without the old files.
 - **Global guidelines reseed on boot.** The code set is now the 13 `trim_*` rules plus
   `session_length_discipline`. The seed never deletes, so the old globals stay active
-  next to the new ones. Run `scripts/guideline_trim_flip.py` BEFORE the first boot; it
-  aborts once any `trim_*` row exists. `memory_guidelines` refuses global-scope edits
+  next to the new ones. Retire them with `scripts/retire_orphan_globals.py`. It defaults to
+  a dry run and takes `--execute`, `--keep a,b` and `--rollback`. It works before or after
+  boot and archives what it retires. Don't use the older `guideline_trim_flip.py` for
+  upgrades: it inserts July-era rule text. `memory_guidelines` refuses global-scope edits
   (321808d), and guideline identity is now `(name, scope)` (91eae5d, unique index).
 - **Removed tools:** the six `memory_autopilot_*` tools. The `agent_autopilot` /
   `autopilot_events` collections are dropped at boot (8591fd2, design:autopilot-removal-v0).
