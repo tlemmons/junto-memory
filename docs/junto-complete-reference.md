@@ -470,7 +470,25 @@ Results rank by relevance, not recency. **Always check the `created`/`updated` f
 
 ### 7.4 The Global Guidelines System
 
-The server ships 15 global guidelines that all agents receive. They cover: anti-sycophancy, mandatory pre-implementation memory queries, topic-scoped parking (not monolith state specs), session discipline, no local memory files, mandatory learning recording, session length, knowledge freshness, backlog filtering, and function registry hygiene.
+The server ships 14 global guidelines that all agents receive (`src/shared_memory/global_guidelines.py`). They are `session_length_discipline` plus the 13 `trim_*` rules:
+
+- accuracy over agreement;
+- memory-first at the artifact;
+- execute, don't ask;
+- persistent knowledge goes to the server;
+- record learnings immediately;
+- session discipline;
+- messages are mark-as-seen;
+- pointers, not summaries;
+- contracts before code;
+- check freshness;
+- concise output;
+- parking via `memory_get_skill("parking")`;
+- read the source.
+
+The parking checklist itself is a shared skill, code-seeded insert-if-absent (`default_skills.py`).
+
+Upgrading a server from a pre-trim build leaves the old globals active next to the new ones. The seed never deletes, and `memory_guidelines` refuses global edits. Retire them with `scripts/retire_orphan_globals.py` (see CHANGELOG 1.40.0, "Upgrading from an older build").
 
 As of v1.28, these are **code-seeded** — they auto-apply on server boot and are updated with every server deployment. Project-scoped guidelines (specific to one project's agents) are stored separately and are not affected by the global seed.
 
