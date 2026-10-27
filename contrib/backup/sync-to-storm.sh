@@ -4,7 +4,7 @@
 # 2026-08-22: repointed from the ex-storm Windows host (192.168.15.250, physical
 # box decommissioned 08-14) to LXC 212 on madrox (192.168.15.98), an SFTP-only
 # chrooted receiver (user junto-backup, jail dirs /data/chroma + /data/mongo).
-# 212 owns retention (keep-14 per modality) AND the offsite/cloud push, so this
+# 212 owns retention (keep-7 per modality since 2026-10-26) AND the offsite/cloud push, so this
 # script only lands tarballs — no remote rotation, no cloud step here.
 # The OFFSITE_* / "storm" names are kept as the offsite-target abstraction.
 # Ref: junto/backlog_39b05cf07539, learning (storm decom + VM250 stopgap).
@@ -48,6 +48,11 @@ remote_avail_bytes() {
 # Headroom kept free on the receiver beyond the file itself.
 SPACE_MARGIN_BYTES="${SPACE_MARGIN_BYTES:-$(( 100 * 1024 * 1024 ))}"
 
+# Only land backups younger than the receiver's retention (212 prunes
+# -mtime +7). Local keeps 14, so without this every pruned file looked "new"
+# and was re-uploaded with a fresh mtime, defeating retention (2026-10-27).
+OFFSITE_MAX_AGE_DAYS="${OFFSITE_MAX_AGE_DAYS:-7}"
+
 # ── Verify receiver is reachable ──
 log "Checking offsite receiver ${DEST} ..."
 if ! printf 'pwd\n' | sftp_batch >/dev/null 2>&1; then
@@ -71,10 +76,14 @@ sync_dir() {
         | sftp "${SFTP_OPTS[@]}" -b - "$DEST" 2>/dev/null \
         | sed -n "s#.*/##p" | grep -E "^${pattern//\*/.*}$" || true)
 
-    local new=0 skip=0 f base
+    local new=0 skip=0 old=0 f base
     for f in "$local_dir"/$pattern; do
         [ -f "$f" ] || continue
         base=$(basename "$f")
+        if [ $(( $(date +%s) - $(stat -c %Y "$f") )) -gt $(( OFFSITE_MAX_AGE_DAYS * 86400 )) ]; then
+            old=$(( old + 1 ))
+            continue
+        fi
         if grep -qxF "$base" <<< "$remote_names"; then
             skip=$(( skip + 1 ))
             continue
@@ -102,7 +111,7 @@ sync_dir() {
                 && log "${label}: removed leftover ${base}.partial"
         fi
     done
-    log "${label}: ${new} new, ${skip} already present"
+    log "${label}: ${new} new, ${skip} already present, ${old} older than ${OFFSITE_MAX_AGE_DAYS}d (not sent)"
 }
 
 log "=== junto offsite sync -> ${DEST} start ==="
