@@ -113,12 +113,23 @@ def _auth(request) -> Dict[str, Any]:
 
 
 def _lan_only(request) -> Optional[Any]:
+    """Gate for the admin READ routes: refuse tunnel origins, and when
+    JUNTO_REQUIRE_KEY is on also refuse requests without a valid key (any
+    role). Without that, a keyed deployment on a flat network (e.g. the
+    Tailscale-only work box, where no tunnel header exists) served project,
+    agent and settings data to any peer with no key at all."""
     from starlette.responses import JSONResponse
 
-    from shared_memory.auth import detect_tunnel_origin
+    from shared_memory import auth
     headers = [(k.lower(), v) for k, v in request.headers.raw]
-    if detect_tunnel_origin(headers):
+    if auth.detect_tunnel_origin(headers):
         return JSONResponse({"error": "admin is LAN-only"}, status_code=403)
+    if auth.REQUIRE_KEY:
+        key = auth.parse_bearer_token(headers)
+        if not key:
+            return JSONResponse({"error": "no API key"}, status_code=401)
+        if not auth.validate_api_key(key):
+            return JSONResponse({"error": "invalid or revoked key"}, status_code=401)
     return None
 
 

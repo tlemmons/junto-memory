@@ -472,11 +472,31 @@ async def sweep_once(chroma, log_fn=None) -> Dict[str, Any]:
     return out
 
 
+def any_scope_enabled(db) -> bool:
+    """True when chunk_index is on in code or in any query_config scope.
+
+    The sweep is pure cost until something reads the index: without this gate
+    every server polled the embedder (default host.docker.internal:11434) every
+    15 min and, if anything answered, embedded every collection, even with
+    chunk_index off everywhere (work-box upgrade review, 2026-10-27)."""
+    from shared_memory.query_config import DEFAULT_CHUNK_INDEX
+    if DEFAULT_CHUNK_INDEX:
+        return True
+    if db is None:
+        return False
+    try:
+        return db.query_config.find_one({"chunk_index": True}, {"_id": 1}) is not None
+    except Exception:
+        return False
+
+
 async def _loop() -> None:
-    from shared_memory.clients import get_chroma
+    from shared_memory.clients import get_chroma, get_mongo
     while True:
         try:
             await asyncio.sleep(SWEEP_SECONDS)
+            if not any_scope_enabled(get_mongo()):
+                continue
             res = await sweep_once(await get_chroma())
             busy = [s for s in res.get("sources", []) if s.get("added") or s.get("changed")
                     or s.get("deleted") or s.get("meta") or s.get("error")]
@@ -493,7 +513,8 @@ async def _loop() -> None:
 
 def start_chunk_sweep() -> None:
     """Start the freshness sweep. Idempotent (lifespan runs per client session).
-    JUNTO_CHUNK_SWEEP_SECONDS=0 disables it."""
+    JUNTO_CHUNK_SWEEP_SECONDS=0 disables it; each pass is skipped while no
+    scope has chunk_index on (any_scope_enabled)."""
     global _sweep_task
     if SWEEP_SECONDS <= 0:
         return

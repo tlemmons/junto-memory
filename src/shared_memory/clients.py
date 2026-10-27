@@ -403,6 +403,17 @@ def get_mongo():
             logging.getLogger(__name__).error(
                 "directives: code-seed failed: %s", e
             )
+        # Default skills (default_skills.py): insert-if-absent, so a fresh or
+        # isolated server has the "parking" skill the global rules point at,
+        # and a locally edited copy is never overwritten.
+        try:
+            from shared_memory.default_skills import seed_default_skills
+            seed_default_skills(_mongo_db)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(
+                "skills: default-skill seed failed: %s", e
+            )
 
         # Op-log (Phase 1 foundation, design v0.3.0 §4.2). Collection +
         # indexes only — no writers yet. Phase 1 #2 instruments mutation

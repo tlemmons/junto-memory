@@ -342,3 +342,25 @@ def test_chunker3_prefixes_title_and_hashes_it(monkeypatch):
     assert all(t == f"Mizar box weights\n\n{p}" for t, p in zip(titled, plain))
     assert ci.doc_hash(body, meta) != ci.doc_hash(body, {"title": "renamed"})
     assert ci.doc_texts(body, {}) == plain           # no title → no prefix
+
+
+class _QCfg:
+    def __init__(self, docs):
+        self.docs = docs
+
+    def find_one(self, q, proj=None):
+        return next((d for d in self.docs if all(d.get(k) == v for k, v in q.items())), None)
+
+
+class _QDb:
+    def __init__(self, docs):
+        self.query_config = _QCfg(docs)
+
+
+def test_sweep_runs_only_when_some_scope_enables_chunk_index(monkeypatch):
+    monkeypatch.setattr(qc, "DEFAULT_CHUNK_INDEX", False)
+    assert not ci.any_scope_enabled(None)
+    assert not ci.any_scope_enabled(_QDb([{"scope": "junto", "chunk_index": False}]))
+    assert ci.any_scope_enabled(_QDb([{"scope": "nimbus", "chunk_index": True}]))
+    monkeypatch.setattr(qc, "DEFAULT_CHUNK_INDEX", True)
+    assert ci.any_scope_enabled(None)

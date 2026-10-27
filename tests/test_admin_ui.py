@@ -97,3 +97,20 @@ def test_auth_requires_owner_and_refuses_tunnel(monkeypatch):
     assert ui._auth(_Req({}))["status"] == 401
     t = ui._auth(_Req({"Authorization": "Bearer own", "CF-Connecting-IP": "1.2.3.4"}))
     assert not t["ok"] and t["error"] == "admin is LAN-only"
+
+
+def test_reads_need_no_key_by_default(monkeypatch):
+    import shared_memory.auth as auth
+    monkeypatch.setattr(auth, "REQUIRE_KEY", False)
+    assert ui._lan_only(_Req({})) is None
+    assert ui._lan_only(_Req({"CF-Connecting-IP": "1.2.3.4"})).status_code == 403
+
+
+def test_reads_need_a_valid_key_when_require_key(monkeypatch):
+    # Tailscale-only work box: no tunnel header, so origin can't gate reads.
+    import shared_memory.auth as auth
+    monkeypatch.setattr(auth, "REQUIRE_KEY", True)
+    monkeypatch.setattr(auth, "validate_api_key", lambda k: {"name": "eric", "role": "agent"} if k == "good" else None)
+    assert ui._lan_only(_Req({})).status_code == 401
+    assert ui._lan_only(_Req({"Authorization": "Bearer bad"})).status_code == 401
+    assert ui._lan_only(_Req({"Authorization": "Bearer good"})) is None
