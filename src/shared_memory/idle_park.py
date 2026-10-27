@@ -44,7 +44,8 @@ Mechanics:
   policy (e.g. nimbus keep-alive) wins without agents overriding the nudge.
 - Parked agents: after memory_end_session the agent's calls don't arm a timer
   until it starts a new session itself (note_session_start; a plugin rebind
-  doesn't count), so a parked agent is never nudged.
+  doesn't count) or does real work (UNPARK_TOOLS), so a parked agent is not
+  nudged for reading or answering a message.
 - Auto-reset agents (idle_park_autoreset) get a direct "park now, you'll be
   /clear+go'd" body with their reported context size; it overrides the
   project policy text (Tom 2026-10-17). Since 2026-10-26 only at night
@@ -82,6 +83,27 @@ BACKGROUND_TOOLS = frozenset({
     "memory_start_session",
     "memory_report_context",
     "memory_get_emission_stats",
+})
+
+# Work a parked agent only does when it has resumed working: it unparks the
+# agent and arms its timer. Agents woken while parked often keep working on
+# the inbox plugin's session and never call memory_start_session, so without
+# this they were never nudged again (server-team/billing-team sat at ~700K all
+# night 10-26, coordinator@nimbus msg_df405eec7915). Reads, acks and
+# memory_send_message stay out: a parked agent woken to answer one message
+# should not be nudged for it.
+UNPARK_TOOLS = frozenset({
+    "memory_update_work",
+    "memory_lock_files",
+    "memory_define_spec",
+    "memory_record_learning",
+    "memory_store",
+    "memory_register_function",
+    "memory_add_backlog_item",
+    "memory_update_backlog_item",
+    "memory_complete_backlog_item",
+    "memory_batch_backlog",
+    "memory_delegate",
 })
 
 SWEEP_INTERVAL_SECONDS = 60
@@ -178,7 +200,9 @@ def note_tool_call(tool_name: str, session_id, now: Optional[float] = None) -> N
             _parked_after_nudge.append((ident[0], ident[1], timer.get("nudged_wall")))
         return
     if ident in _parked:
-        return
+        if tool_name not in UNPARK_TOOLS:
+            return
+        _parked.discard(ident)
     timer = _timers.get(ident)
     if timer is None:
         _timers[ident] = {"last_real": now, "nudged_at": None}

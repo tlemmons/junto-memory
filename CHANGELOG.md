@@ -6,6 +6,16 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+### Fixed
+- **Agents that keep working after parking get idle nudges again.** An agent
+  woken while parked usually works on the inbox plugin's session and never calls
+  `memory_start_session`, so the parked flag stuck and its idle timer never armed
+  (nimbus server-team/billing-team sat at ~700K all night on 2026-10-26). Real
+  work while parked (`memory_update_work`, `memory_lock_files`, spec/learning/
+  backlog writes, …: `idle_park.UNPARK_TOOLS`) now unparks the agent and arms the
+  timer. Reads, acks and `memory_send_message` still don't, so answering one
+  message while parked doesn't earn a nudge.
+
 ### Changed
 - **Auto-reset agents get a direct "park now" nudge.** An agent listed in
   `idle_park_autoreset` is told to park now, shown its reported context size, and

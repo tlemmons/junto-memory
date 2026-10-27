@@ -526,6 +526,27 @@ def test_agent_session_start_unparks(task):
     assert idle_park._timers[KEY]["last_real"] == 200
 
 
+@pytest.mark.parametrize("tool", ["memory_update_work", "memory_lock_files", "memory_define_spec"])
+def test_real_work_while_parked_unparks_and_arms(tool):
+    # Woken while parked, working on the plugin's session, no start_session
+    # (server-team/billing-team 10-26, msg_df405eec7915).
+    note_tool_call("memory_end_session", "s_agent", now=100)
+    idle_park.note_session_start("junto", "memory", "junto-inbox channel plugin")
+    note_tool_call(tool, "s_plugin", now=200)
+    assert idle_park._timers[KEY]["last_real"] == 200
+    note_tool_call("memory_query", "s_plugin", now=300)
+    assert idle_park._timers[KEY]["last_real"] == 300
+    assert list(due_agents(_fifty, now=300 + 50 * 60)) == [("junto", "memory", 50)]
+
+
+@pytest.mark.parametrize("tool", ["memory_send_message", "memory_acknowledge_message",
+                                  "memory_get_messages", "memory_query"])
+def test_answering_while_parked_stays_parked(tool):
+    note_tool_call("memory_end_session", "s_agent", now=100)
+    note_tool_call(tool, "s_plugin", now=200)
+    assert KEY not in idle_park._timers
+
+
 def test_park_only_affects_that_project_and_agent():
     active_sessions["s_other"] = {"project": "nimbus", "claude_instance": "memory"}
     try:
