@@ -1887,14 +1887,13 @@ async def memory_report_context(
     if db is None:
         return json.dumps({"error": "MongoDB unavailable"})
 
-    from shared_memory.context_stamp import record_history as record_context_history
-    from shared_memory.idle_park import note_turn
-
     # Keyed deployments (JUNTO_REQUIRE_KEY): a non-admin caller may report only
     # its OWN context — the self-report path the junto-inbox plugin uses
     # (interface:context-self-report-v0). A trusted-LAN fleet keeps the
     # one-reporter-per-box model, where a reporter session speaks for others.
     from shared_memory import auth as _auth
+    from shared_memory.context_stamp import record_history as record_context_history
+    from shared_memory.idle_park import note_turn
     _caller = active_sessions.get(session_id) or {}
     _self_only = (_auth.REQUIRE_KEY
                   and _caller.get("role", "agent") not in ("owner", "admin"))
