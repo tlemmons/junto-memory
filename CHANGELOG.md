@@ -6,6 +6,100 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+## [1.40.0] - 2026-10-27
+
+### Upgrading from an older build (read first — e.g. the June `0e2a7ce` / 1.34 work box)
+- **Chroma 1.2.4 → 1.5.9 is a ONE-WAY on-disk migration** (0121f14; `chromadb==1.5.9`
+  client pin in requirements.txt). Before the first boot:
+  - stop the stack;
+  - cold-copy the `chroma-persistent` and Mongo volumes;
+  - rehearse on a copy.
+  There is no downgrade without the old files.
+- **Global guidelines reseed on boot.** The code set is now the 13 `trim_*` rules plus
+  `session_length_discipline`. The seed never deletes, so the old globals stay active
+  next to the new ones. Run `scripts/guideline_trim_flip.py` BEFORE the first boot; it
+  aborts once any `trim_*` row exists. `memory_guidelines` refuses global-scope edits
+  (321808d), and guideline identity is now `(name, scope)` (91eae5d, unique index).
+- **Removed tools:** the six `memory_autopilot_*` tools. The `agent_autopilot` /
+  `autopilot_events` collections are dropped at boot (8591fd2, design:autopilot-removal-v0).
+- **`memory_db` writes now COMMIT** (5995cee). They were silently rolled back before.
+  Audit `read_only:false` handles.
+- **Defaults that are ON:**
+  - idle→park nudge after 50 min (`idle_park_minutes`);
+  - action-message lapse after 30 days (`action_lapse_days`). The first sweep runs
+    ~5 min after boot and sends one digest per agent;
+  - session persistence across restarts (`JUNTO_SESSION_PERSIST`);
+  - 6 h idle expiry for sessions without a live inbox subscription.
+- **`/health` returns 503 without a writable Mongo primary** (d6508d7). Watchdogs act on it.
+- **Stricter calls:**
+  - sending to an unknown recipient errors (d1061ee);
+  - case-variant spec names are refused (ff3795f);
+  - `memory_guidelines set` without a scope on an ambiguous name is refused.
+- **Compose:**
+  - Mongo `ulimits nofile 64000`;
+  - `extra_hosts host.docker.internal:host-gateway`;
+  - `JUNTO_MCP_LAN_IP` still defaults to the home IP, so re-apply local binds.
+- **Optional, off unless configured:** claim gate / facets / chunk index / rerank / delegation
+  runner (need Ollama or the reranker service). New env vars, all optional:
+  `JUNTO_CLAIM_GATE_*`, `JUNTO_FACETS_ENABLED`, `JUNTO_EMBED_URL`,
+  `JUNTO_CHUNK_SWEEP_SECONDS`, `JUNTO_RERANK_URL`, `JUNTO_VAULT_KEY`,
+  `JUNTO_PENDING_REAP_*`, `JUNTO_SESSION_IDLE_HOURS`.
+- **Home-only pieces, not for other deployments:** `infra/sage/*`, `contrib/backup/sync-to-storm.sh`,
+  the default IPs in `contrib/local-inference/li.py` and `contrib/reranker`, and the
+  `coordinator` directive banner.
+
+### Security / hardening (this release)
+- **Admin dashboard READ routes require a valid key when `JUNTO_REQUIRE_KEY=true`.** On a
+  network without a tunnel header (Tailscale-only), origin trust let any peer read
+  project, agent and settings data with no key. Writes were already owner-only.
+- **Chunk-index sweep is gated on the feature:** each 15-min pass is skipped unless some
+  `query_config` scope has `chunk_index` on. Before, it polled the embedder regardless,
+  and embedded every collection if anything answered.
+- **Code-seeded shared `parking` skill**, insert-if-absent (never overwrites a local edit).
+  The global rules point every agent at `memory_get_skill("parking")`, which didn't exist
+  on a fresh or isolated server.
+
+### Previously undocumented (shipped between 1.34 and this release)
+- Retrieval:
+  - chunk index on arctic-embed2 (d777671, cf703c6, 932ae57, 715c07e, 37e3c05);
+  - lexical lane for exact-term hits (419bdf1);
+  - cross-encoder rerank (78b1951; default `rerank_min` 0.05, 32be3ee);
+  - query/recall event logging for evals (9153dc2; `query_events` / `recall_events`
+    keep query text 90 days).
+- Recall: the `/recall` endpoint and its gates (9c530c8, 801e273, 1802eea, d901c27), plus the
+  prompt hook (fbb8b79). Facets on learnings (b2ea77f…). Write-time contradiction claim
+  gate (94c759a, 73a4f29, b42f496).
+- Sessions:
+  - session persistence (6e69e7e);
+  - `guidelines_held` on start_session (010f2dd);
+  - one roster line per agent, and plugin boilerplate no longer titles work items
+    (a77a086, 9c24e0d);
+  - no idle-expiry while the agent's own plugin is subscribed (8e7ffee);
+  - orphaned-session delivery fixes (1b0cba8);
+  - `junto_session` alias for clients that strip `session_id` (251c8f7).
+- Identity:
+  - lifecycle phases A/B/C (7bbaea2, 862d981, 3956949);
+  - escheat of stale app identities (4afe4f6);
+  - role_description write-through (63af082);
+  - owner/admin role bypass for roster actions (6c22f86).
+- Specs and skills:
+  - `transfer_spec` (449a12a, 7a82612);
+  - skills registry and `/export-skills` (a417e5a, 0ce7e8a, 98b175b, 6ee07fc);
+  - directives (eea6a3c);
+  - state-spec write guard and standing-rule detection (43c9733, 8da96f9).
+- Messaging:
+  - push-all-info (4cea043);
+  - alias fail-loud (d1061ee);
+  - blocker lane count (dac0e26).
+- Fixes:
+  - backlog same-project move no longer deletes the item (316b351);
+  - Mongo credentials are URL-escaped (304911c);
+  - `archive_by_tag` records the real previous status (04cff77);
+  - `get_by_id` accepts id prefixes and message ids (1c324e9);
+  - `memory_db` audit trail (0c537a4);
+  - backup consistency and offsite fixes (d78badb, 026b880, 151a845).
+- Guideline trim from 15 rules to 2 + 13 `trim_*` (f7b4cdf, 77832eb, 9db9170, 7cf1a9e).
+
 ### Added
 - **Separate model for claim extraction + facets.** `JUNTO_CLAIM_GATE_EXTRACT_MODEL`
   (claim EXTRACT, operation, shelf_life, trigger) and
