@@ -21,17 +21,20 @@ Usage:
   retire_orphan_globals.py --execute
   retire_orphan_globals.py --keep a,b --execute   # leave these orphans active
   retire_orphan_globals.py --rollback [--execute] # reactivate what this script retired
-Connects with MONGO_* from the repo .env (same as facets_backfill.py).
+Connects with MONGO_* from the repo .env (same as facets_backfill.py), or —
+on a box without the repo venv — run it INSIDE the server container, where it
+uses the server's own Mongo client:
+  docker exec -i mcp-rag-arch python - --in-container [--execute] < scripts/retire_orphan_globals.py
 """
 
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "src"))
-sys.path.insert(0, str(REPO / "scripts"))
-
-from facets_backfill import _env  # noqa: E402
+IN_CONTAINER = "--in-container" in sys.argv
+if not IN_CONTAINER:
+    REPO = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(REPO / "src"))
+    sys.path.insert(0, str(REPO / "scripts"))
 
 ACTOR = "retire_orphan_globals"
 
@@ -55,12 +58,20 @@ def orphan_globals(db, keep=()):
 
 def main():
     execute = "--execute" in sys.argv
-    from pymongo import MongoClient
-    env = _env()
-    c = MongoClient("localhost", int(env.get("MONGO_PORT", 27019)),
-                    username=env["MONGO_USER"], password=env["MONGO_PASSWORD"],
-                    authSource="admin", directConnection=True)
-    db = c[env.get("MONGO_DB", "mcp_orchestrator")]
+    if IN_CONTAINER:
+        from shared_memory.clients import get_mongo
+        db = get_mongo()
+        if db is None:
+            print("ABORT: server Mongo client unavailable")
+            return 1
+    else:
+        from facets_backfill import _env
+        from pymongo import MongoClient
+        env = _env()
+        c = MongoClient("localhost", int(env.get("MONGO_PORT", 27019)),
+                        username=env["MONGO_USER"], password=env["MONGO_PASSWORD"],
+                        authSource="admin", directConnection=True)
+        db = c[env.get("MONGO_DB", "mcp_orchestrator")]
     from shared_memory.helpers import utc_now
     from shared_memory.tools.guidelines import bump_guidelines_version
     mode = "EXECUTE" if execute else "DRY-RUN"
