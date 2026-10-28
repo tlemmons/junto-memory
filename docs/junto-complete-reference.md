@@ -96,7 +96,7 @@ The developer's `claude` process connects to the junto-memory server via HTTP (M
 - The server validates API keys (`smk_...`) on every `memory_start_session` call.
 - Keys are provisioned by an admin via `memory_admin(action="create_key")`.
 - Auth is Bearer header: `Authorization: Bearer smk_...` in `~/.mcp.json`. The key does not need to be passed as a tool argument.
-- When `JUNTO_REQUIRE_KEY=true` (recommended for non-localhost deployments), keyless sessions are rejected outright.
+- When `JUNTO_REQUIRE_KEY=true` (recommended for non-localhost deployments), keyless sessions are rejected outright. Without it, `MCP_AUTH_ENABLED=true` still lets a keyless session in at `agent` tier with access to all projects. Under `JUNTO_REQUIRE_KEY`, the `/admin` read endpoints also need a key, and `memory_report_context` is self-report only for non-admins.
 - Four key tiers: `owner` (full admin + key management), `admin` (project-scoped admin), `user` (human-tier — its messages start fresh chains at depth 0), `agent` (default, project-scoped access).
 
 **Network isolation:**
@@ -153,7 +153,9 @@ Agent calls memory_end_session(summary, handoff_notes)
     → plugin SSE connection closes
 ```
 
-Sessions are ephemeral server-side (in-memory only for active state). The durable record is the handoff document created by `memory_end_session` and the state spec written during park. An agent that dies mid-session without parking loses its in-progress context but not the knowledge base.
+Live sessions are mirrored to Mongo (`JUNTO_SESSION_PERSIST`, default on), so a `session_id` keeps working across a server restart; inbox subscriptions re-bind on reconnect. Sessions idle for `JUNTO_SESSION_IDLE_HOURS` (default 6) with no live subscription expire. The durable record is the handoff document created by `memory_end_session` and the state spec written during park. An agent that dies mid-session without parking loses its in-progress context but not the knowledge base.
+
+**Idle nudge and time zone.** An agent idle for `idle_park_minutes` (default 50) with at least `idle_park_min_context` (default 200K) of reported context gets one nudge. Its body is the project's idle policy, and it ends with the agent's local time and a DAY/NIGHT verdict. Pass `timezone="America/Denver"` (IANA) to `memory_start_session` to set the zone; otherwise `idle_park_timezone` applies, then America/Chicago. See README "Context Gauge and Idle-Park Nudge".
 
 ### 3.5 Guidelines
 
@@ -458,6 +460,8 @@ memory_query("junto setup gotchas known issues")
 ```
 
 Results rank by relevance, not recency. **Always check the `created`/`updated` field** on results. Results older than 30 days have staleness warnings — verify before trusting. When multiple results cover the same topic, prefer newer.
+
+If the server has the reranker on (`rerank` query setting), `relevance` is a cross-encoder score that runs low: read the content of a 5–15% hit before discarding it.
 
 `memory_find_function` searches the function registry by name or purpose — use this before implementing any function to check if it already exists.
 
@@ -1082,6 +1086,10 @@ Server-side variables in `.env` (junto-memory):
 | `JUNTO_MCP_LAN_IP` | LAN/Tailscale IP the server binds MCP port to |
 | `ORIGIN_SERVER_ID` | Unique ID for this deployment instance |
 | `MONGO_USER` / `MONGO_PASSWORD` / `MONGO_DB` | MongoDB credentials |
+| `JUNTO_LOG_QUERY_TEXT` | `false` stops storing the text of searches (ids/scores are kept). Recommended on shared/work servers. |
+| `JUNTO_RERANK_URL`, `JUNTO_CLAIM_GATE_*`, `JUNTO_FACETS_ENABLED` | Optional local inference, all off by default and fail-open. See README "Optional Local Inference". |
+
+Every server variable, with its code default, is documented in `.env.example`. Runtime settings (idle-park policy and time zone, action lapse, push budgets, the `rerank` query flag) live in the database and are edited with `memory_admin` (`push_control_set_config` / `query_set_config`) or `/admin` → Settings.
 
 ---
 

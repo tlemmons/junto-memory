@@ -509,7 +509,7 @@ A model too big for VRAM (e.g. a 72B model on 2×24 GB) runs partly on CPU and e
 
 ## Admin Web UI
 
-The server serves an operator page at **`http://<server>:8080/admin`**. It is **LAN-only**: requests arriving through a tunnel get 403. Anyone on the LAN can view; every change needs an **owner API key** (pasted into the page, sent as a Bearer header).
+The server serves an operator page at **`http://<server>:8080/admin`**. It is **LAN-only**: requests arriving through a tunnel get 403. Anyone on the LAN can view (with `JUNTO_REQUIRE_KEY=true`, viewing needs a valid key of any role); every change needs an **owner API key** (pasted into the page, sent as a Bearer header).
 
 | Tab | What it shows / does |
 |---|---|
@@ -529,13 +529,59 @@ To put it behind a hostname, proxy `/admin` from nginx or similar, and keep that
 
 **Context gauge.** `contrib/context-report/junto-context-report.py` runs on each machine (systemd user timer). It finds local `claude` processes, reads each agent's context-fill metrics written by its status line, and calls `memory_report_context`. `memory_get_agent_status` and `/admin` → Agents then show every agent's context fill across all machines.
 
-**Idle-park nudge.** If an agent makes no real tool call for `idle_park_minutes` (default 50, just under the ~60-minute prompt-cache TTL), the server pushes it one notice suggesting it park at a clean stop. Only agents with at least `idle_park_min_context` (default 200K) of reported context are nudged. Agents listed in `idle_park_autoreset` go further: after a nudged park, the reporter checks the agent's tmux pane is safe to type into, then types `/clear` and `go`. Configure with `memory_admin push_control_set_config` or `/admin` → Settings.
+**Self-report on keyed servers.** With `JUNTO_REQUIRE_KEY=true`, a non-owner/admin caller of `memory_report_context` may report only its *own* agent's context; reports for other instances come back in `skipped`. This is the path for a client that reports for itself (interface:context-self-report-v0), so on a multi-person server no agent can set another's gauge. On a trusted fleet without that flag, one reporter per machine speaks for every agent on it.
+
+**Idle-park nudge.** If an agent makes no real tool call for `idle_park_minutes` (default 50, just under the ~60-minute prompt-cache TTL), the server pushes it one notice. Only agents with at least `idle_park_min_context` (default 200K) of reported context are nudged, and `idle_park_optout` lists agents that never are. Agents listed in `idle_park_autoreset` go further: after a nudged park, the reporter checks the agent's tmux pane is safe to type into, then types `/clear` and `go`.
+
+**What the nudge says.**
+- The body is the project's idle policy. If the project has an active `park_on_idle_nudge` guideline, its text is used.
+- Otherwise the body is the `idle_park_policy` setting (per project, or the server default), so a server with many projects sets one policy once, e.g. "keep the cache warm by day, park at night".
+- With neither set, the default body suggests parking at a clean stop.
+- Every nudge ends with the agent's **local time and a DAY/NIGHT verdict**, e.g. `Your local time: 13:07 (America/Chicago) — DAY (night = 21:00–06:00)`, so policies never need to shell out for the time.
+
+**Time zones.** An agent sets its zone once with `memory_start_session(..., timezone="America/Denver")` (an IANA name, stored on its directory entry). Agents without one use `idle_park_timezone` (project, then server default), then `America/Chicago`.
+
+Configure all of these with `memory_admin push_control_set_config` or `/admin` → Settings.
+
+---
+
+## Action Lapse
+
+An action message (task, question, blocker, contract, review) stays in the recipient's action lane until someone closes it, and replies often forget `in_response_to`, so old asks pile up and hide new ones. Every 6 hours the server lapses open action messages older than `action_lapse_days` (default **30**; 0 disables). Tasks and blockers that were answered but never closed lapse `action_lapse_responded_days` (default 7) after the reply.
+
+Lapsed messages leave the action lane but are **not deleted**. `memory_update_message_status(id, "open")` or a reply from the owner revives them. Threads a human touched are exempt. Each affected recipient gets one digest notice per sweep listing what lapsed.
+
+---
+
+## Optional Local Inference
+
+Three features use a local model. All are **off by default** and all **fail open**: if the model host is down or slow, the server answers exactly as it would without them. Each is turned on with an env var (plus a restart) or a runtime setting, so a server can run without a GPU and add one later. The endpoints are URLs, so the GPU can be the docker host itself (`host.docker.internal`, mapped by `extra_hosts` in `docker-compose.yml`) or another machine.
+
+| Feature | What it does | Needs | Turn on |
+|---|---|---|---|
+| **Reranker** | Re-orders `memory_query` candidates with a cross-encoder. Response shape is unchanged; `relevance` becomes the cross-encoder score, which runs low (a useful indirect match can show 5–15%). | `contrib/reranker/rerank_server.py` (BAAI/bge-reranker-v2-m3 on GPU, torch + sentence-transformers; systemd unit in the same folder) | `JUNTO_RERANK_URL` in `.env`, then `memory_admin(action="query_set_config", key="rerank", value=true)` for all projects, or add `project=` for one |
+| **Write-time contradiction check** | When a learning is recorded, extracts its one-sentence claim and asks a judge model whether it contradicts the similar earlier learnings the server already surfaces. The response labels them CONTRADICTS / CONSISTENT. Advisory only; it never blocks a write. | An OpenAI-compatible `/v1` endpoint (e.g. Ollama) with a judge model (default `phi4:14b`) | `JUNTO_CLAIM_GATE_ENABLED=true` plus `JUNTO_CLAIM_GATE_URL` / `_MODEL` / `_EXTRACT_MODEL` |
+| **Facets** | Adds `claim`, `operation`, `trigger` and `shelf_life` fields to each learning in the background after the write. They show up on `memory_query` results. | The same endpoint and extract model | `JUNTO_FACETS_ENABLED=true`. Backfill older learnings with `scripts/facets_backfill.py --batch N` |
+
+On real queries the reranker took precision from **.84 to .96** (Claude-graded sample; interface:rerank-v0). With the reranker on, memory_query took 0.4–0.6 s, versus 0.3–0.45 s without.
+
+Two cautions. Turn `rerank` on only after the service answers: with the flag on and no service, every `memory_query` waits up to `JUNTO_RERANK_TIMEOUT` (2 s) before falling back. And thinking models (qwen3.x, gemma4) need `JUNTO_CLAIM_GATE_EXTRACT_REASONING=none`, or they spend the token budget thinking and return nothing.
+
+See `.env.example` for every inference variable.
+
+---
+
+## Ambient Recall (`/recall`)
+
+`POST /recall` is a plain-HTTP endpoint (no MCP handshake) for client hooks, e.g. a Claude Code `UserPromptSubmit` hook. The hook posts the recent conversation each turn and gets back **headers only**, never bodies: id, type, title, a one-line summary, score, updated date and author for the few memories above a similarity floor. The agent pulls a body with `memory_get_by_id` only if one clearly applies.
+
+Body: `{project, query, agent?, k? (1–15, default 5), threshold? (default: the recall_floor setting, 0.6), scope? (learnings|specs|functions|all)}`. Auth follows the same rules as `memory_start_session`. An outage returns 5xx, never an empty result. Contract: interface:recall-v0.
 
 ---
 
 ## Configuration
 
-All configuration is via environment variables. See `.env.example` for the complete reference.
+Server configuration comes from environment variables; `.env.example` documents every one, with its default. Settings that change at runtime (idle-park, action lapse, push budgets, query defaults such as `rerank`) live in the database instead and are edited with `memory_admin` or `/admin` → Settings.
 
 ### Required Variables
 
@@ -545,7 +591,7 @@ All configuration is via environment variables. See `.env.example` for the compl
 | `MONGO_USER` | `mcp_orch` | MongoDB username. |
 | `MONGO_DB` | `mcp_orchestrator` | MongoDB database name. |
 | `MONGO_HOST` | `localhost` | MongoDB host (set automatically in Docker Compose). |
-| `MONGO_PORT` | `27019` | MongoDB external port. (`.env.example` currently shows `27018`; that's stale — `docker-compose.yml` uses `27019`.) |
+| `MONGO_PORT` | `27019` | MongoDB host-side port (`docker-compose.yml` publishes 27019 on 127.0.0.1). |
 | `CHROMA_HOST` | `localhost` | ChromaDB host (set automatically in Docker Compose). |
 | `CHROMA_PORT` | `8001` | ChromaDB external port. |
 
@@ -553,7 +599,17 @@ All configuration is via environment variables. See `.env.example` for the compl
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MCP_AUTH_ENABLED` | `false` | Enable API key authentication. When true, `memory_start_session` requires a valid key — passed either as the `api_key` tool argument or via an `Authorization: Bearer <key>` HTTP header (see [Security](#security)). |
+| `MCP_AUTH_ENABLED` | `false` | Enable API key authentication. When true, keys are validated and scoped and an invalid key is rejected, but a keyless session still falls back to `agent` tier unless `JUNTO_REQUIRE_KEY` is set. Keys are passed either as the `api_key` tool argument or via an `Authorization: Bearer <key>` HTTP header (see [Security](#security)). |
+| `JUNTO_REQUIRE_KEY` | `false` | Reject every keyless session. Use on any server reachable beyond a trusted LAN (see [Auth modes](#auth-modes)). |
+| `JUNTO_TUNNEL_REQUIRES_KEY` | `true` (compose: `false`) | Reject keyless sessions that arrive through a Cloudflare tunnel (`CF-Connecting-IP` header). |
+| `JUNTO_MCP_LAN_IP` | maintainer's LAN IP | IP that port 8080 binds to besides 127.0.0.1 (read by `docker-compose.yml`). Set yours. |
+| `JUNTO_LOG_QUERY_TEXT` | `true` | Store the text of searches in the metrics collections (90-day TTL). `false` keeps ids/scores but drops the text. |
+| `JUNTO_SESSION_IDLE_HOURS` | `6` | Expire sessions idle this long with no live inbox subscription. `0` disables. |
+| `JUNTO_SESSION_PERSIST` | `true` | Keep session ids valid across a server restart (mirrored to Mongo). |
+| `JUNTO_RERANK_URL` | `http://host.docker.internal:8091` | Reranker service. The on-switch is the `rerank` query setting (see [Optional Local Inference](#optional-local-inference)). |
+| `JUNTO_CLAIM_GATE_ENABLED` | `false` | Write-time contradiction check (needs an OpenAI-compatible endpoint, `JUNTO_CLAIM_GATE_URL`). |
+| `JUNTO_FACETS_ENABLED` | `false` | Background facets on learnings (same endpoint). |
+| `JUNTO_PENDING_REAP_ENABLED` | `false` | Reap idle pending-tier roster ghosts after `JUNTO_PENDING_REAP_GRACE_HOURS` (48). |
 | `JUNTO_VAULT_KEY` | -- | Fernet key for the connection-secret vault (local-model delegation). Needed only to store connection secrets. Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Keep it out of backups and git. |
 | `ANTHROPIC_API_KEY` | -- | Required only for the standalone librarian enrichment service. |
 | `LIBRARIAN_PROJECT_ROOTS` | -- | JSON map of project names to filesystem paths for librarian code analysis. |
@@ -684,12 +740,23 @@ Set `MCP_AUTH_ENABLED=true` in `.env` to require API keys for all sessions. Keys
 |------|--------|
 | `owner` | Full access — manage API keys, guidelines, all projects |
 | `admin` | Manage backlog, specs, functions, messaging across all projects |
+| `user` | Human-driven tooling (dashboards, CLIs): broader read across projects and can send messages (which start fresh chains at depth 0), but no key or guideline management |
 | `agent` | Standard agent access, scoped to assigned projects |
 | `readonly` | Query and search only, no writes |
 
 Each API key can be scoped to specific projects for **tenant isolation** — agents only see data in their allowed projects. All security-sensitive operations are written to an **audit log** (90-day retention).
 
 When auth is disabled (default), all tools are open — suitable for local single-user setups.
+
+#### Auth modes
+
+| Setting | Keyless session | Invalid key | Use for |
+|---|---|---|---|
+| `MCP_AUTH_ENABLED` unset (default) | allowed | n/a | local single-user |
+| `MCP_AUTH_ENABLED=true` | **allowed**, falls back to `agent` tier with access to all projects | rejected | a trusted LAN where some clients have no key |
+| `MCP_AUTH_ENABLED=true` + `JUNTO_REQUIRE_KEY=true` | **rejected** | rejected | any server reachable beyond a trusted LAN (Tailscale, VPN, shared office network) |
+
+`MCP_AUTH_ENABLED=true` on its own does **not** require keys: a keyless agent gets more access than a project-scoped key. If every legitimate client holds a key, set `JUNTO_REQUIRE_KEY=true`. `JUNTO_TUNNEL_REQUIRES_KEY` (code default `true`) rejects keyless sessions only when they arrive through a Cloudflare tunnel. The same rules apply to the plain-HTTP endpoints `/recall` and `/export-skills`. The `/admin` page refuses tunnel traffic and needs an owner key for changes. With `JUNTO_REQUIRE_KEY=true`, its read endpoints also need a valid key (any role) and answer 401 without one.
 
 #### Passing the key: tool argument or `Authorization` header
 
@@ -720,7 +787,7 @@ Precedence: explicit `api_key` argument > header > keyless. A keyless session (n
 - **Reverse proxy with auth** — Use nginx or Caddy with HTTP basic auth, mTLS, or OAuth2 in front of the server.
 - **SSH tunnel** — `ssh -L 8080:localhost:8080 your-server` for ad-hoc remote access.
 
-The `MONGO_PASSWORD` in `.env.example` defaults to `changeme`. The server will start with this value, but **you must change it** for any non-throwaway deployment. MongoDB and ChromaDB ports are also exposed by default in Docker Compose — restrict these with firewall rules if your machine is network-accessible.
+The `MONGO_PASSWORD` in `.env.example` defaults to `changeme`. The server will start with this value, but **you must change it** for any non-throwaway deployment. In `docker-compose.yml`, MongoDB (27019) and ChromaDB (8001) bind to 127.0.0.1 only, and the MCP port (8080) binds to 127.0.0.1 plus `JUNTO_MCP_LAN_IP`, never 0.0.0.0. Keep it that way if you edit the ports.
 
 ---
 
@@ -771,8 +838,8 @@ Contributions welcome! These are known gaps that would benefit the project:
 - ~~**Authentication and tenant isolation**~~ — Done! API keys with RBAC and project scoping. See [Security](#security).
 - **PostgreSQL support** — the `memory_db` tool supports MSSQL and MySQL. PostgreSQL not yet implemented.
 - **Local model support for librarian** — Ollama integration so the enrichment daemon doesn't require a cloud API key
-- **TTL and stale data cleanup** — background pruning of expired sessions, locks, and messages with configurable retention
-- **Data export/backup tooling** — dump and restore scripts for migration and disaster recovery
+- ~~**TTL and stale data cleanup**~~ — Largely done: idle-session expiry (`JUNTO_SESSION_IDLE_HOURS`), lane-based message TTLs (info 48 h; open actions never age; closed actions 7 d), [action lapse](#action-lapse), pending-agent reaping, and 90-day metrics TTLs.
+- **Data export/backup tooling** — `contrib/backup/` has Mongo (mongodump) and Chroma (pause, copy, archive) backup scripts to run from cron. A one-command restore/migration tool is still missing.
 
 See [docs/WORKED_EXAMPLE.md](docs/WORKED_EXAMPLE.md) for an end-to-end walkthrough of multi-agent coordination.
 

@@ -6,6 +6,17 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+### Docs
+- `.env.example` now documents every env var the server reads (28 were missing), grouped by area, with code defaults: auth (`JUNTO_REQUIRE_KEY`, `JUNTO_TUNNEL_REQUIRES_KEY`), deployment, sessions/SSE, messaging, identity lifecycle, privacy (`JUNTO_LOG_QUERY_TEXT`), optional local inference (rerank, claim gate, facets, chunk index), librarian webhook, sync engine, diagnostics.
+- README:
+  - new sections: **Action Lapse**, **Optional Local Inference** (reranker / write-time contradiction check / facets: what each needs, how to turn it on, fail-open), **Ambient Recall (`/recall`)**, **Auth modes** (soft-auth vs `JUNTO_REQUIRE_KEY`);
+  - the idle-park section now covers policy text, per-agent `timezone=`, the DAY/NIGHT line and context self-report;
+  - the Optional Variables table gains the new vars;
+  - `user` role added to the role table;
+  - stale MONGO_PORT and "DB ports exposed" notes fixed;
+  - roadmap updated.
+- `docs/junto-complete-reference.md`: session persistence (sessions no longer "in-memory only"), idle nudge + time zone, REQUIRE_KEY side effects, rerank relevance note, server env pointers.
+
 ## [1.40.0] - 2026-10-27
 
 ### Upgrading from an older build (read first — e.g. the June `0e2a7ce` / 1.34 work box)
