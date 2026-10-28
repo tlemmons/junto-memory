@@ -6,8 +6,19 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+## [1.41.2] - 2026-10-28
+
 ### Changed
-- **`JUNTO_MCP_LAN_IP` is now required** in `docker-compose.yml` (no default). It used to fall back to the maintainer's home LAN IP, which gave other hosts a confusing bind error. Compose now stops with "set JUNTO_MCP_LAN_IP in .env". Existing deployments that already set it (e.g. the work box) are unaffected; set it in `.env` before the next `docker compose` command otherwise.
+- **No home-network defaults in the shipped tree.** Nothing in `src/` changed, so server behaviour is unchanged. Every endpoint that used to fall back to the maintainer's LAN now comes from an env var or argument, and the tool stops with a clear message when it is unset:
+  - `docker-compose.yml`: **`JUNTO_MCP_LAN_IP` is now required** (no default; it used to fall back to the maintainer's home LAN IP and gave other hosts a confusing bind error). Compose stops with "set JUNTO_MCP_LAN_IP in .env". Deployments that already set it (e.g. the work box) are unaffected. Comments no longer name home hosts.
+  - `contrib/local-inference/li.py`: `--url` or **`JUNTO_OLLAMA_URL`** (`DEFAULT_URL` removed).
+  - `scripts/retrieval_eval.py`, `lane_replay.py`, `rerank_replay.py`, `embed_bakeoff.py` (maintainer research scripts): **`JUNTO_OLLAMA_URL`**, checked only when an Ollama call is made. `rerank_replay.py` also reads `JUNTO_RERANK_URL` (default `http://127.0.0.1:8091`, localhost).
+  - `scripts/chunk_index.py`: **`JUNTO_EMBED_URL`** is required for `status`/`sync` (it used to `setdefault` a home address).
+  - `contrib/backup/sync-to-storm.sh`, `infra/sage/junto-backup/junto-backup-verify.sh`: **`OFFSITE_HOST`** (legacy alias `STORM_HOST`), from the environment or `~/.config/junto-backup/offsite.env` (override the path with `JUNTO_OFFSITE_ENV`). Missing → exit 2. sage keeps working through that file.
+  - `contrib/test/{supervisor_pattern_validate,transport_loss_repro}.py`: usage examples say `<peer-host>` (both already required env).
+  - `contrib/context-report/junto-context-report.py` docstring: `<server-host>`.
+  - Tests: fixture hosts are RFC 5737 documentation addresses (`192.0.2.x`).
+  - `.env.example` placeholder `JUNTO_MCP_LAN_IP=192.0.2.10`, plus a "Host-side tools" section. The README gains the matching table.
 
 ## [1.41.1] - 2026-10-28
 

@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import hashlib
 import logging
+import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -39,7 +40,13 @@ logging.disable(logging.INFO)
 
 from facets_backfill import _chroma, _mongo  # noqa: E402
 
-OLLAMA = "http://192.168.15.240:11434"
+def _ollama() -> str:
+    """Ollama base URL from JUNTO_OLLAMA_URL. No default: this is a maintainer
+    experiment, so point it at your own Ollama box (e.g. http://<host>:11434)."""
+    url = os.environ.get("JUNTO_OLLAMA_URL", "").rstrip("/")
+    if not url:
+        sys.exit("JUNTO_OLLAMA_URL is not set: export it to your Ollama base URL, e.g. http://<host>:11434")
+    return url
 RUNS = "lane_replay_runs"
 JUDGE = "lane_replay_judgments"
 QUERY_CAP = 2500
@@ -156,7 +163,7 @@ def _judge_one(model, qtext, row):
     err = "bad output"
     for _ in range(2):
         try:
-            r = call(OLLAMA, model, JUDGE_INSTRUCTIONS, passage, JUDGE_SCHEMA, 180)
+            r = call(_ollama(), model, JUDGE_INSTRUCTIONS, passage, JUDGE_SCHEMA, 180)
             g = int(r.get("grade"))
             if g in (0, 1, 2):
                 return g, str(r.get("reason", ""))[:120]
@@ -169,7 +176,7 @@ async def run(a):
     from shared_memory import chunk_index as ci
     from shared_memory.helpers import get_project_collection, get_shared_collection
     sfx = "" if ci.CHUNKER == 2 else str(ci.CHUNKER)
-    ci.EMBED_URL = OLLAMA
+    ci.EMBED_URL = _ollama()
     ci.EMBED_TIMEOUT_S = 30.0
     db, chroma = _mongo(), await _chroma()
     await ci.get_chunk_client("localhost", 8001)

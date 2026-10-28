@@ -34,7 +34,8 @@ For chroma (`~/chroma-backups`) and mongo (`~/mongo-backups`):
 - **gzip integrity** — `gzip -t` on the newest (catches present-but-corrupt;
   directly covers the 2026-08-04 shape).
 
-Offsite (**LXC 212 on madrox @ 192.168.15.98**, SFTP-only chroot, dirs
+Offsite (**LXC 212 on madrox**; host in `~/.config/junto-backup/offsite.env` as
+`OFFSITE_HOST=…`, read by both scripts, which refuse to run without it; SFTP-only chroot, dirs
 `/data/chroma` + `/data/mongo`, via `~/.ssh/junto-offsite-212`; listed with
 sftp, not a remote shell):
 - **Freshness** — newest synced copy < 26h. **Receiver unreachable = FAIL**, not

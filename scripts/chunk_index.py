@@ -18,7 +18,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
-os.environ.setdefault("JUNTO_EMBED_URL", "http://192.168.15.240:11434")
 
 from shared_memory import chunk_index as ci  # noqa: E402
 
@@ -30,6 +29,13 @@ async def main():
     ap.add_argument("cmd", choices=["status", "sync", "drop"])
     ap.add_argument("--source", default=None)
     a = ap.parse_args()
+    if a.cmd != "drop":
+        # No default: the server's in-container default (host.docker.internal)
+        # doesn't resolve on a host, and no other box's address belongs here.
+        url = os.environ.get("JUNTO_EMBED_URL", "").rstrip("/")
+        if not url:
+            sys.exit("JUNTO_EMBED_URL is not set: export it to your Ollama base URL, e.g. http://<host>:11434")
+        ci.EMBED_URL = url
     import chromadb
     chroma = await chromadb.AsyncHttpClient(host=HOST, port=PORT)
     cclient = await ci.get_chunk_client(HOST, PORT)

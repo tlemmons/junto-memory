@@ -36,6 +36,7 @@ import asyncio
 import json
 import random
 import re
+import os
 import sys
 import time
 from pathlib import Path
@@ -51,7 +52,13 @@ QUERIES = "retrieval_eval_queries"
 RUNS = "retrieval_eval_runs"
 COLLECTIONS = ["proj_junto", "proj_nimbus", "proj_cerebro", "shared_patterns"]
 DOC_TYPES = {"learning", "spec", "function_ref", "architecture"}
-OLLAMA = "http://192.168.15.240:11434"
+def _ollama() -> str:
+    """Ollama base URL from JUNTO_OLLAMA_URL. No default: this is a maintainer
+    experiment, so point it at your own Ollama box (e.g. http://<host>:11434)."""
+    url = os.environ.get("JUNTO_OLLAMA_URL", "").rstrip("/")
+    if not url:
+        sys.exit("JUNTO_OLLAMA_URL is not set: export it to your Ollama base URL, e.g. http://<host>:11434")
+    return url
 GEN_MODEL = "qwen3:14b"
 
 QSCHEMA = {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]}
@@ -76,7 +83,7 @@ def _tok():
 
 def _ask(passage, ident_rule):
     from li import call
-    out = call(OLLAMA, GEN_MODEL, GEN_INSTRUCTIONS.format(ident_rule=ident_rule), passage, QSCHEMA, 180)
+    out = call(_ollama(), GEN_MODEL, GEN_INSTRUCTIONS.format(ident_rule=ident_rule), passage, QSCHEMA, 180)
     q = (out or {}).get("question", "").strip()
     return q if 6 <= len(q.split()) <= 40 else None
 
@@ -218,7 +225,7 @@ async def _rank(col, qtext, qvec, k, where, lexical, cvec=None):
 async def run(args):
     from shared_memory import chunk_index
     from shared_memory.helpers import embed_query_once
-    chunk_index.EMBED_URL = OLLAMA
+    chunk_index.EMBED_URL = _ollama()
     chunk_index.EMBED_TIMEOUT_S = 30.0
     chunked = args.retriever.startswith("chunk")
     if chunked:

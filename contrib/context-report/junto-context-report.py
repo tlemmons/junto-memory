@@ -10,7 +10,7 @@ memory_report_context over MCP at JUNTO_SHARED_MEMORY_URL.
 Uses MCP (not direct Mongo) because the Mongo port is localhost-only on the server box
 while :8080/mcp is reachable fleet-wide — so this same script works on madrox, HA, etc.
 On the server box the default localhost URL is correct; off-box set
-JUNTO_SHARED_MEMORY_URL=http://sage:8080/mcp (or 192.168.15.240) in the service env.
+JUNTO_SHARED_MEMORY_URL=http://<server-host>:8080/mcp in the service env.
 
 (Filename kept as sage-context-report.py so the existing sage service/timer are unchanged;
 the script itself is box-agnostic.) interface:context-tokens-sideband-v0.

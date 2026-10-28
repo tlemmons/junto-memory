@@ -47,11 +47,21 @@ MAX_AGE_SECONDS=$(( 26 * 3600 ))
 MEDIAN_WINDOW=7
 UNDERSIZE_FRACTION_PCT=50   # newest must be >= 50% of trailing median
 
-# Offsite receiver (LXC 212 on madrox @ .98; ex-storm .250 Windows box was
+# Offsite receiver (an LXC on the LAN; the ex-storm Windows box was
 # decommissioned 2026-08-14). SFTP-only chroot, jail dirs /data/chroma + /data/mongo.
 OFFSITE_KEY="${OFFSITE_KEY:-${STORM_KEY:-$HOME/.ssh/junto-offsite-212}}"
 OFFSITE_USER="${OFFSITE_USER:-${STORM_USER:-junto-backup}}"
-OFFSITE_HOST="${OFFSITE_HOST:-${STORM_HOST:-192.168.15.98}}"
+# Offsite target. No default host: set OFFSITE_HOST in the environment or in
+# ${JUNTO_OFFSITE_ENV:-$HOME/.config/junto-backup/offsite.env} (sourced if present;
+# sage's lives there). STORM_HOST is accepted as a legacy alias.
+OFFSITE_ENV_FILE="${JUNTO_OFFSITE_ENV:-$HOME/.config/junto-backup/offsite.env}"
+# shellcheck disable=SC1090
+[ -f "$OFFSITE_ENV_FILE" ] && . "$OFFSITE_ENV_FILE"
+OFFSITE_HOST="${OFFSITE_HOST:-${STORM_HOST:-}}"
+if [ -z "$OFFSITE_HOST" ]; then
+    echo "ERROR: OFFSITE_HOST is not set (env or $OFFSITE_ENV_FILE); refusing to guess a host." >&2
+    exit 2
+fi
 OFFSITE_CHROMA="${OFFSITE_CHROMA:-/data/chroma}"
 OFFSITE_MONGO="${OFFSITE_MONGO:-/data/mongo}"
 OFFSITE_SFTP_OPTS=(-i "$OFFSITE_KEY" -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new)

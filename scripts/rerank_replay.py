@@ -4,7 +4,7 @@
     JUNTO_CHUNK_DB=junto_chunks_v3 JUNTO_CHUNKER=3 .venv/bin/python scripts/rerank_replay.py run
     .venv/bin/python scripts/rerank_replay.py volume [--run RUN]
 
-Needs the rerank service (contrib/reranker/rerank_server.py, 127.0.0.1:8091)
+Needs the rerank service (contrib/reranker/rerank_server.py; JUNTO_RERANK_URL, default 127.0.0.1:8091)
 and sage Ollama for the rewrite model.
 
 Per distinct nimbus query (recall_events + query_events, as lane_replay.py):
@@ -30,6 +30,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import sys
 import time
 import urllib.request
@@ -41,8 +42,14 @@ logging.disable(logging.INFO)
 
 from facets_backfill import _chroma, _mongo  # noqa: E402
 
-OLLAMA = "http://192.168.15.240:11434"
-RERANK = "http://127.0.0.1:8091/rerank"
+def _ollama() -> str:
+    """Ollama base URL from JUNTO_OLLAMA_URL. No default: this is a maintainer
+    experiment, so point it at your own Ollama box (e.g. http://<host>:11434)."""
+    url = os.environ.get("JUNTO_OLLAMA_URL", "").rstrip("/")
+    if not url:
+        sys.exit("JUNTO_OLLAMA_URL is not set: export it to your Ollama base URL, e.g. http://<host>:11434")
+    return url
+RERANK = os.environ.get("JUNTO_RERANK_URL", "http://127.0.0.1:8091").rstrip("/") + "/rerank"
 REWRITE_MODEL = "gpt-oss:20b"
 RUNS = "rerank_replay_runs"
 REWRITES = "lane_replay_rewrites"
@@ -70,7 +77,7 @@ def _rewrite(db, ctx):
         return hit["rewrite"]
     from li import call
     try:
-        r = call(OLLAMA, REWRITE_MODEL, REWRITE_INSTRUCTIONS, "CONTEXT:\n" + ctx[-2500:], REWRITE_SCHEMA, 180)
+        r = call(_ollama(), REWRITE_MODEL, REWRITE_INSTRUCTIONS, "CONTEXT:\n" + ctx[-2500:], REWRITE_SCHEMA, 180)
         rw = (r.get("query") or "").strip()
     except Exception as e:  # noqa: BLE001
         rw = None
@@ -133,7 +140,7 @@ async def run(a):
     from shared_memory import chunk_index as ci
     from shared_memory.helpers import get_project_collection, get_shared_collection
     assert ci.CHUNKER == 3, "run with JUNTO_CHUNK_DB=junto_chunks_v3 JUNTO_CHUNKER=3"
-    ci.EMBED_URL = OLLAMA
+    ci.EMBED_URL = _ollama()
     ci.EMBED_TIMEOUT_S = 30.0
     db, chroma = _mongo(), await _chroma()
     await ci.get_chunk_client("localhost", 8001)

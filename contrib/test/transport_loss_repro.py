@@ -11,9 +11,9 @@ This script confirms or refutes that hypothesis by deliberately breaking the
 transport mid-session and printing the exception type + traceback.
 
 Usage (from sage):
-    JUNTO_PEER_URL=http://192.168.15.66:8080/mcp \
+    JUNTO_PEER_URL=http://<peer-host>:8080/mcp \
     JUNTO_PEER_KEY=<peer-admin-key> \
-    PEER_SSH_HOST=192.168.15.66 \
+    PEER_SSH_HOST=<peer-host> \
     python contrib/test/transport_loss_repro.py
 """
 

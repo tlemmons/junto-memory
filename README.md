@@ -627,6 +627,15 @@ Server configuration comes from environment variables; `.env.example` documents 
 | `DB_<NAME>_TIMEOUT` | `30` | Query timeout in seconds. |
 | `DB_<NAME>_MAX_ROWS` | `500` | Maximum rows returned per query. |
 
+### Host-side tools (not read by the server)
+
+These have **no default**, and each tool exits with a clear message when its variable is unset, so nothing silently targets someone else's machine:
+
+| Variable | Used by |
+|----------|---------|
+| `JUNTO_OLLAMA_URL` | `contrib/local-inference/li.py` (or `--url`) and the maintainer research scripts `scripts/{retrieval_eval,lane_replay,rerank_replay,embed_bakeoff}.py`. `scripts/chunk_index.py` reads `JUNTO_EMBED_URL`. |
+| `OFFSITE_HOST` | `contrib/backup/sync-to-storm.sh` and `infra/sage/junto-backup/junto-backup-verify.sh`. Also read from `~/.config/junto-backup/offsite.env` (or `$JUNTO_OFFSITE_ENV`). |
+
 ---
 
 ## Project Structure

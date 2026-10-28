@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Sync the latest local junto backups to the OFFSITE receiver.
 #
-# 2026-08-22: repointed from the ex-storm Windows host (192.168.15.250, physical
-# box decommissioned 08-14) to LXC 212 on madrox (192.168.15.98), an SFTP-only
-# chrooted receiver (user junto-backup, jail dirs /data/chroma + /data/mongo).
+# 2026-08-22: repointed from the ex-storm Windows host (physical box
+# decommissioned 08-14) to an SFTP-only chrooted receiver (an LXC on the LAN) (user junto-backup, jail dirs /data/chroma + /data/mongo).
 # 212 owns retention (keep-7 per modality since 2026-10-26) AND the offsite/cloud push, so this
 # script only lands tarballs — no remote rotation, no cloud step here.
 # The OFFSITE_* / "storm" names are kept as the offsite-target abstraction.
@@ -19,7 +18,17 @@
 set -uo pipefail   # NOT -e: aggregate per-file results, report all faults.
 
 # ── Config ──
-OFFSITE_HOST="${OFFSITE_HOST:-${STORM_HOST:-192.168.15.98}}"
+# Offsite target. No default host: set OFFSITE_HOST in the environment or in
+# ${JUNTO_OFFSITE_ENV:-$HOME/.config/junto-backup/offsite.env} (sourced if present;
+# sage's lives there). STORM_HOST is accepted as a legacy alias.
+OFFSITE_ENV_FILE="${JUNTO_OFFSITE_ENV:-$HOME/.config/junto-backup/offsite.env}"
+# shellcheck disable=SC1090
+[ -f "$OFFSITE_ENV_FILE" ] && . "$OFFSITE_ENV_FILE"
+OFFSITE_HOST="${OFFSITE_HOST:-${STORM_HOST:-}}"
+if [ -z "$OFFSITE_HOST" ]; then
+    echo "ERROR: OFFSITE_HOST is not set (env or $OFFSITE_ENV_FILE); refusing to guess a host." >&2
+    exit 2
+fi
 OFFSITE_USER="${OFFSITE_USER:-${STORM_USER:-junto-backup}}"
 OFFSITE_KEY="${OFFSITE_KEY:-${SSH_KEY:-$HOME/.ssh/junto-offsite-212}}"
 CHROMA_REMOTE="${CHROMA_REMOTE:-/data/chroma}"

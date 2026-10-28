@@ -23,6 +23,7 @@ Ollama models run with num_ctx 8192 (gemma: 2048); longer docs are cut there.
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -33,7 +34,13 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 from retrieval_eval import COLLECTIONS, QUERIES, RUNS, _chroma, _load_docs, _mongo, _tok  # noqa: E402
 
-OLLAMA = "http://192.168.15.240:11434"
+def _ollama() -> str:
+    """Ollama base URL from JUNTO_OLLAMA_URL. No default: this is a maintainer
+    experiment, so point it at your own Ollama box (e.g. http://<host>:11434)."""
+    url = os.environ.get("JUNTO_OLLAMA_URL", "").rstrip("/")
+    if not url:
+        sys.exit("JUNTO_OLLAMA_URL is not set: export it to your Ollama base URL, e.g. http://<host>:11434")
+    return url
 QWEN_INSTRUCT = ("Instruct: Given a question from a software agent, retrieve the team knowledge-base "
                  "note that answers it\nQuery: ")
 
@@ -55,7 +62,7 @@ CANDIDATES = {
 
 def _ollama_embed(model, texts, ctx):
     body = {"model": model, "input": texts, "truncate": True, "options": {"num_ctx": ctx}}
-    req = urllib.request.Request(OLLAMA + "/api/embed", data=json.dumps(body).encode(),
+    req = urllib.request.Request(_ollama() + "/api/embed", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=600) as resp:
         return json.loads(resp.read())["embeddings"]
@@ -63,7 +70,7 @@ def _ollama_embed(model, texts, ctx):
 
 def _ollama_version():
     try:
-        with urllib.request.urlopen(OLLAMA + "/api/version", timeout=5) as r:
+        with urllib.request.urlopen(_ollama() + "/api/version", timeout=5) as r:
             return json.loads(r.read()).get("version")
     except Exception:
         return None
