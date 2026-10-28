@@ -6,6 +6,9 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+### Changed
+- **`JUNTO_MCP_LAN_IP` is now required** in `docker-compose.yml` (no default). It used to fall back to the maintainer's home LAN IP, which gave other hosts a confusing bind error. Compose now stops with "set JUNTO_MCP_LAN_IP in .env". Existing deployments that already set it (e.g. the work box) are unaffected; set it in `.env` before the next `docker compose` command otherwise.
+
 ## [1.41.1] - 2026-10-28
 
 ### Security

@@ -709,7 +709,7 @@ Edit `.env`. Required fields:
 | `MCP_AUTH_ENABLED` | `true` for any non-localhost deployment |
 | `JUNTO_REQUIRE_KEY` | `true` — rejects all keyless sessions (recommended when clients have provisioned keys) |
 | `JUNTO_TUNNEL_REQUIRES_KEY` | `true` — rejects keyless sessions arriving via tunnel |
-| `JUNTO_MCP_LAN_IP` | The IP address clients will connect to (Tailscale IP or LAN IP). **Required** — if unset, the server tries to bind `192.168.15.240` (the home server's IP) and will fail. |
+| `JUNTO_MCP_LAN_IP` | The IP address clients will connect to (Tailscale IP or LAN IP). **Required** — if unset, `docker compose` refuses to start with "set JUNTO_MCP_LAN_IP in .env". |
 | `ORIGIN_SERVER_ID` | A unique identifier for this deployment (e.g., `spg-central`, `acme-central`). Not `central` — that is the home server's value. |
 
 Leave `ANTHROPIC_API_KEY` commented unless you want the librarian enrichment daemon.
