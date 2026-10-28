@@ -6,6 +6,8 @@ Component of the Junto suite. The shared-memory MCP server — persistent knowle
 
 **Your name is: `memory`** (project: `junto`).
 
+**Override:** if a `.agent-name` file exists in this repo or its parent (written by the launcher) or the system prompt assigns a different identity (e.g. `juntoTom`), that identity wins. Use it for `/rename`, the terminal title, and every `memory_*` call, and read `state:<that name>` instead of `state:memory`. The `memory` identity applies only to the agent that maintains this server (on sage).
+
 **IMMEDIATELY on session start, run these commands IN ORDER:**
 
 1. Rename this session (for resume list):
