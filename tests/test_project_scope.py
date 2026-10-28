@@ -326,3 +326,14 @@ async def test_get_locks_scoped(sessions):
     finally:
         file_locks.pop("/a", None)
         file_locks.pop("/b", None)
+
+
+def test_list_projects_still_registered_as_a_tool():
+    # Regression: the _caller_scope helper was once inserted between
+    # @mcp.tool() and memory_list_projects, registering the helper as a tool
+    # and dropping memory_list_projects. Every registered tool is memory_*.
+    import shared_memory.tools  # noqa: F401
+    from shared_memory.app import mcp
+    names = {t.name for t in mcp._tool_manager.list_tools()}
+    assert "memory_list_projects" in names
+    assert not [n for n in names if not n.startswith("memory_")]

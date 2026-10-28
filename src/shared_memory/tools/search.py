@@ -104,7 +104,6 @@ async def memory_search_global(
     }, indent=2)
 
 
-@mcp.tool()
 def _caller_scope() -> Optional[dict]:
     """A session_info-shaped scope for a session-less call, from the Bearer key.
 
@@ -124,6 +123,7 @@ def _caller_scope() -> Optional[dict]:
     return None
 
 
+@mcp.tool()
 async def memory_list_projects(ctx: Context = None) -> str:
     """
     List all projects with memory collections.
