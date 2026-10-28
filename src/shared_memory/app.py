@@ -14,6 +14,7 @@ from shared_memory.intent import (
     build_call_tool_handler_with_intent,
     build_call_tool_handler_with_session_alias,
 )
+from shared_memory.project_scope import build_call_tool_handler_with_project_scope
 from shared_memory.timing import build_call_tool_handler_with_timing
 
 # Allow connections from any host (for remote access via IP or proxy)
@@ -65,6 +66,10 @@ _orig_call_tool_handler = mcp._mcp_server.request_handlers[_mcp_types.CallToolRe
 #   timing        — measures total wall time including all inner wrappers
 #   error_flag    — post-processes the final result
 #   session_alias — junto_session → session_id (must precede idle_park)
+#   project_scope — rejects project args outside a scoped key's projects
+#                   (interface:project-scope-enforcement-v0 R1; after
+#                   session_alias, before idle_park so a rejection never
+#                   resets an idle timer)
 #   idle_park     — resets the caller's idle→park timer (sees the raw tool name
 #                   + session_id before intent strips its sideband kwargs)
 #   intent        — extracts __intent_id from args before dispatch
@@ -73,8 +78,10 @@ mcp._mcp_server.request_handlers[_mcp_types.CallToolRequest] = (
     build_call_tool_handler_with_timing(
         build_call_tool_handler_with_error_flag(
             build_call_tool_handler_with_session_alias(
-                build_call_tool_handler_with_idle_park(
-                    build_call_tool_handler_with_intent(_orig_call_tool_handler)
+                build_call_tool_handler_with_project_scope(
+                    build_call_tool_handler_with_idle_park(
+                        build_call_tool_handler_with_intent(_orig_call_tool_handler)
+                    )
                 )
             )
         )

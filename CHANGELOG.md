@@ -6,6 +6,17 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+## [1.41.0] - 2026-10-28
+
+### Security
+- **Tenant isolation for project-scoped API keys** (`interface:project-scope-enforcement-v0`, backlog_8cd9708f4ad2). A key scoped to [alpha] could read and write project beta by passing `project="beta"` on most tools. Project checks were opt-in per tool and only `memory_store` / `memory_record_learning` / skills had one. Found in the 2026-10-28 work-upgrade rehearsal; v1.34 has it too.
+  - New MCP-layer wrapper (`project_scope.py`, between session_alias and idle_park in `app.py`): any `project` / `projects` argument outside the key's projects is rejected with `ERROR: Tenant isolation: …` (`isError=True`).
+  - Exempt on purpose: `memory_send_message` (cross-project messaging), `memory_start_session`, `memory_get_messages`, `memory_admin`.
+  - "All projects" listings filter to the key's projects plus shared: list_backlog, list_specs, search_global, get_active_work (sessions, work items, blocked agents, signals), list_agents, get_agent_status, list_alerts, get_emission_stats, get_locks, archive/restore_by_tag, enrichment queue. `memory_list_projects` (session-less) scopes by the Bearer key; under `JUNTO_REQUIRE_KEY` a keyless caller sees shared only.
+  - Doc-id lookups (get_by_id, backlog update/complete/batch, enrich_function, skills by id) treat another project's doc as not found. change_status's locate-on-miss no longer reveals it.
+  - New helpers in `auth.py`: `scoped_projects`, `project_allowed`, `collection_allowed`, `tenant_isolation_error`.
+- Who is affected: only sessions whose key carries a `projects` list (`MCP_AUTH_ENABLED=true`). Unscoped keys, keyless soft-auth sessions and auth-disabled servers behave exactly as before.
+
 ### Docs
 - `.env.example` now documents every env var the server reads (28 were missing), grouped by area, with code defaults: auth (`JUNTO_REQUIRE_KEY`, `JUNTO_TUNNEL_REQUIRES_KEY`), deployment, sessions/SSE, messaging, identity lifecycle, privacy (`JUNTO_LOG_QUERY_TEXT`), optional local inference (rerank, claim gate, facets, chunk index), librarian webhook, sync engine, diagnostics.
 - README:

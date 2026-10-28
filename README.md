@@ -758,6 +758,20 @@ When auth is disabled (default), all tools are open — suitable for local singl
 
 `MCP_AUTH_ENABLED=true` on its own does **not** require keys: a keyless agent gets more access than a project-scoped key. If every legitimate client holds a key, set `JUNTO_REQUIRE_KEY=true`. `JUNTO_TUNNEL_REQUIRES_KEY` (code default `true`) rejects keyless sessions only when they arrive through a Cloudflare tunnel. The same rules apply to the plain-HTTP endpoints `/recall` and `/export-skills`. The `/admin` page refuses tunnel traffic and needs an owner key for changes. With `JUNTO_REQUIRE_KEY=true`, its read endpoints also need a valid key (any role) and answer 401 without one.
 
+**Project-scoped keys are enforced on every tool (1.41+).** A key created with a `projects` list stays inside those projects (`interface:project-scope-enforcement-v0`):
+- Any tool call that names another project in `project`/`projects` is rejected with `ERROR: Tenant isolation: …`.
+- Listings that span projects when `project` is omitted return only the key's projects plus shared data: `memory_list_backlog`, `memory_list_specs`, `memory_search_global`, `memory_get_active_work`, `memory_list_agents`, `memory_get_agent_status`, `memory_list_alerts`, `memory_get_emission_stats`, `memory_get_locks`, `memory_archive_by_tag` / `memory_restore_by_tag`, and `memory_list_projects` (scoped by the request's Bearer key).
+- A doc in another project, addressed by id (`memory_get_by_id`, backlog update/complete/batch, `memory_enrich_function`, skills by `skill_` id), reads as not found.
+- Shared data stays readable.
+
+**Exemptions, on purpose:**
+- `memory_send_message(to_project=…)`: cross-project messaging is how teams talk.
+- `memory_start_session`: checks the scope itself.
+- `memory_get_messages`: has its own permission rules.
+- `memory_admin`: role-gated.
+
+Unscoped keys, keyless sessions and auth-disabled servers are unaffected.
+
 #### Passing the key: tool argument or `Authorization` header
 
 A key can reach the server two ways (`design:header-auth-v0`):

@@ -17,6 +17,7 @@ from pymongo import ReturnDocument
 from shared_memory import push_control
 from shared_memory.app import mcp
 from shared_memory.audit import log_audit
+from shared_memory.auth import project_allowed, scoped_projects
 from shared_memory.clients import get_mongo
 from shared_memory.config import (
     ACTION_CATEGORIES,
@@ -1799,9 +1800,19 @@ async def memory_get_agent_status(
     query = {"instance": instance} if instance else {}
     cursor = db.agent_status.find(query)
 
+    # agent_status rows carry no project (keyed by instance), so a scoped key
+    # resolves its visible instances through the directory (tenant isolation R5).
+    _scoped = scoped_projects(active_sessions.get(session_id))
+    _visible = None
+    if _scoped is not None:
+        _visible = set(db.agent_directory.distinct(
+            "instance", {"project": {"$in": [normalize_project(p) for p in _scoped]}}))
+
     agents = []
     now = utc_now()
     for doc in cursor:
+        if _visible is not None and doc.get("instance") not in _visible:
+            continue
         last_hb = parse_timestamp(doc.get("last_heartbeat"))
         stale = False
         if last_hb:
@@ -1996,7 +2007,11 @@ async def memory_list_agents(
 
     agents = []
     now = utc_now()
+    _me = active_sessions.get(session_id)
     for doc in cursor:
+        # A scoped key lists only its own projects' agents (tenant isolation R5).
+        if not project_allowed(_me, doc.get("project")):
+            continue
         _reg_pre = roster.get((doc.get("project"), doc.get("instance")))
         # Search the AUTHORITATIVE role text, not the directory cache —
         # otherwise a query matches (or misses) on words the caller can no

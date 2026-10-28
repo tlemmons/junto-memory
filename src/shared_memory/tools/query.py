@@ -8,6 +8,7 @@ from mcp.server.fastmcp import Context
 
 from shared_memory import chunk_index, query_config, rerank
 from shared_memory.app import mcp
+from shared_memory.auth import collection_allowed, project_allowed, scoped_projects
 from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import OVERLAP_WINDOW_HOURS, PROJECT_PREFIX, SHARED_PREFIX
 from shared_memory.helpers import (
@@ -560,10 +561,13 @@ async def memory_get_by_id(
         collections_to_search.append(await get_shared_collection(chroma, "context"))
         collections_to_search.append(await get_shared_collection(chroma, "work"))
     else:
-        # Search all collections
+        # Search all collections (a scoped key: its own projects + shared,
+        # so another project's doc reads as not found — tenant isolation R4)
+        _sess_info = active_sessions.get(session_id)
         all_collections = await chroma.list_collections()
         for col in all_collections:
-            if col.name.startswith(PROJECT_PREFIX) or col.name.startswith(SHARED_PREFIX):
+            if ((col.name.startswith(PROJECT_PREFIX) or col.name.startswith(SHARED_PREFIX))
+                    and collection_allowed(_sess_info, col.name)):
                 collections_to_search.append(col)
 
     async def _found_response(col, found_id: str, meta: dict, doc: str,
@@ -731,6 +735,10 @@ async def memory_get_active_work(
     if project:
         project = normalize_project(project)
 
+    # A scoped key sees only its own projects' agents and work (tenant
+    # isolation R5); _me is None-scoped for everyone else.
+    _me = active_sessions.get(session_id)
+
     # Get from active sessions (in-memory)
     active_work = []
     since_cutoff = None
@@ -745,6 +753,8 @@ async def memory_get_active_work(
             if info.get("is_principal"):
                 continue
             if project and normalize_project(info["project"]) != project:
+                continue
+            if not project_allowed(_me, info.get("project")):
                 continue
             if instance and info["claude_instance"] != instance:
                 continue
@@ -782,6 +792,8 @@ async def memory_get_active_work(
                 updated = meta.get("updated", "")
                 if updated < cutoff:
                     continue
+                if not project_allowed(_me, meta.get("project")):
+                    continue
                 recent_work.append({
                     "title": meta.get("title"),
                     "status": meta.get("status"),
@@ -813,7 +825,7 @@ async def memory_get_active_work(
     # NEW: Include blocked agents info
     blocked_agents = []
     for sid, info in active_sessions.items():
-        if info.get("blocked_by"):
+        if info.get("blocked_by") and project_allowed(_me, info.get("project")):
             blocked_agents.append({
                 "agent": info.get("claude_instance"),
                 "waiting_for": info.get("blocked_by"),
@@ -823,7 +835,16 @@ async def memory_get_active_work(
 
     # NEW: Include recent signals
     cleanup_stale_signals()
-    recent_signals = list(active_signals.values())[:10]
+    recent_signals = list(active_signals.values())
+    if scoped_projects(_me) is not None:
+        # A signal carries no project; resolve it from the sender's session
+        # and drop it when that session is gone or out of scope.
+        recent_signals = [
+            sig for sig in recent_signals
+            if (active_sessions.get(sig.get("from_session")) or {}).get("project")
+            and project_allowed(_me, active_sessions[sig["from_session"]]["project"])
+        ]
+    recent_signals = recent_signals[:10]
 
     return json.dumps({
         "currently_active": active_work[:limit],

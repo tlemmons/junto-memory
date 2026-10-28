@@ -6,6 +6,7 @@ from typing import List
 from mcp.server.fastmcp import Context
 
 from shared_memory.app import mcp
+from shared_memory.auth import collection_allowed
 from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import MAX_CONTENT_SIZE, ORIGIN_SERVER_ID, PROJECT_PREFIX
 from shared_memory.helpers import (
@@ -606,7 +607,8 @@ async def memory_list_specs(
         # Search shared and all project collections
         all_collections = await chroma.list_collections()
         for col in all_collections:
-            if col.name.startswith(PROJECT_PREFIX) or col.name == "shared_patterns":
+            if ((col.name.startswith(PROJECT_PREFIX) or col.name == "shared_patterns")
+                    and collection_allowed(active_sessions.get(session_id), col.name)):  # tenant isolation R3
                 collections_to_search.append(col)
 
     for collection in collections_to_search:
