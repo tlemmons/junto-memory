@@ -509,7 +509,11 @@ A model too big for VRAM (e.g. a 72B model on 2×24 GB) runs partly on CPU and e
 
 ## Admin Web UI
 
-The server serves an operator page at **`http://<server>:8080/admin`**. It is **LAN-only**: requests arriving through a tunnel get 403. Anyone on the LAN can view (with `JUNTO_REQUIRE_KEY=true`, viewing needs a valid key of any role); every change needs an **owner API key** (pasted into the page, sent as a Bearer header).
+The server serves an operator page at **`http://<server>:8080/admin`** and a read-only activity feed at **`/dashboard`**. Both are **LAN-only**: requests arriving through a tunnel get 403. Every change needs an **owner API key** (pasted into the page, sent as a Bearer header).
+
+Who can view depends on `JUNTO_REQUIRE_KEY`:
+- **Off** (LAN soft-auth): anyone on the LAN can view both pages.
+- **On**: the pages load, but their data needs an **unscoped** API key (any role), pasted into the page's key box. The two pages share it per browser tab. A key limited to particular projects gets 403, because these views span every project.
 
 | Tab | What it shows / does |
 |---|---|
@@ -771,6 +775,8 @@ When auth is disabled (default), all tools are open — suitable for local singl
 - `memory_admin`: role-gated.
 
 Unscoped keys, keyless sessions and auth-disabled servers are unaffected.
+
+The same applies to the server-wide HTTP views. Under `JUNTO_REQUIRE_KEY`, `/admin` reads, `/dashboard/api/*` and `/hook/compact-log/stats` need an unscoped key, and a scoped key gets 403 (see [Admin Web UI](#admin-web-ui)).
 
 #### Passing the key: tool argument or `Authorization` header
 

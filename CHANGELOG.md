@@ -6,6 +6,16 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+## [1.41.1] - 2026-10-28
+
+### Security
+- **Server-wide HTTP views need an unscoped key under `JUNTO_REQUIRE_KEY`** (`interface:project-scope-enforcement-v0` R7). `/dashboard/api/{sessions,agents,messages,backlog}` and `/hook/compact-log/stats` had NO auth at all, even under `JUNTO_REQUIRE_KEY`. Any peer on the network could read every project's sessions, agents, backlog and the last 30 messages (200-char previews) with no key. v1.34 has the same gap.
+  - These routes and every `/admin/api/*` read route now share one gate (`admin_ui._lan_only`): tunnel origin → 403. Under `JUNTO_REQUIRE_KEY`: no key or an invalid key → 401, a **project-scoped key → 403** (these views span every project), any unscoped key → allowed.
+  - `POST /hook/compact-log` (a caller-owned write) takes any valid key under `JUNTO_REQUIRE_KEY`.
+  - The `/admin` HTML shell now checks the tunnel origin only (`_tunnel_only`). A browser navigation cannot send a Bearer header, so 1.40's key gate made the admin page unloadable on keyed servers. The page sends the key on its API calls.
+  - `/dashboard` gains a key box (sessionStorage `junto_admin_key`, shared with `/admin`) and sends it as a Bearer header. A 401/403 says the server needs an unscoped key.
+- With `JUNTO_REQUIRE_KEY` off (e.g. home LAN soft-auth), nothing changes.
+
 ## [1.41.0] - 2026-10-28
 
 ### Security

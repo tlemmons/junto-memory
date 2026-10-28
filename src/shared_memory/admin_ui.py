@@ -115,11 +115,16 @@ def _auth(request) -> Dict[str, Any]:
 
 
 def _lan_only(request) -> Optional[Any]:
-    """Gate for the admin READ routes: refuse tunnel origins, and when
-    JUNTO_REQUIRE_KEY is on also refuse requests without a valid key (any
-    role). Without that, a keyed deployment on a flat network (e.g. the
-    Tailscale-only work box, where no tunnel header exists) served project,
-    agent and settings data to any peer with no key at all."""
+    """Gate for the server-wide READ routes (/admin reads, /dashboard/api/*,
+    compact-log stats): refuse tunnel origins, and when JUNTO_REQUIRE_KEY is on
+    also refuse requests without a valid key. Without that, a keyed deployment
+    on a flat network (e.g. the Tailscale-only work box, where no tunnel header
+    exists) served project, agent and settings data to any peer with no key.
+
+    Under JUNTO_REQUIRE_KEY a PROJECT-SCOPED key (non-empty `projects`) is
+    refused too: these views span every project, and scoped keys are confined
+    to their own (interface:project-scope-enforcement-v0 R7). Unscoped keys of
+    any role pass. With REQUIRE_KEY off (home) nothing changes."""
     from starlette.responses import JSONResponse
 
     from shared_memory import auth
@@ -130,8 +135,43 @@ def _lan_only(request) -> Optional[Any]:
         key = auth.parse_bearer_token(headers)
         if not key:
             return JSONResponse({"error": "no API key"}, status_code=401)
-        if not auth.validate_api_key(key):
+        rec = auth.validate_api_key(key)
+        if not rec:
             return JSONResponse({"error": "invalid or revoked key"}, status_code=401)
+        if rec.get("projects"):
+            return JSONResponse({"error": "server-wide view: requires an unscoped key"},
+                                status_code=403)
+    return None
+
+
+def _tunnel_only(request) -> Optional[Any]:
+    """Gate for routes that serve no data (the /admin and /dashboard HTML
+    shells): refuse tunnel origins only. A browser navigation cannot attach a
+    Bearer header, so key-gating the shell made the UI unloadable under
+    JUNTO_REQUIRE_KEY; the page sends the key on its API calls instead."""
+    from starlette.responses import JSONResponse
+
+    from shared_memory import auth
+    headers = [(k.lower(), v) for k, v in request.headers.raw]
+    if auth.detect_tunnel_origin(headers):
+        return JSONResponse({"error": "admin is LAN-only"}, status_code=403)
+    return None
+
+
+def _key_if_required(request) -> Optional[Any]:
+    """Gate for caller-owned writes (POST /hook/compact-log): under
+    JUNTO_REQUIRE_KEY any valid key, scoped or not. Open otherwise."""
+    from starlette.responses import JSONResponse
+
+    from shared_memory import auth
+    if not auth.REQUIRE_KEY:
+        return None
+    headers = [(k.lower(), v) for k, v in request.headers.raw]
+    key = auth.parse_bearer_token(headers)
+    if not key:
+        return JSONResponse({"error": "no API key"}, status_code=401)
+    if not auth.validate_api_key(key):
+        return JSONResponse({"error": "invalid or revoked key"}, status_code=401)
     return None
 
 
@@ -242,7 +282,7 @@ def register_admin_routes(mcp, get_mongo) -> None:
 
     @mcp.custom_route("/admin", methods=["GET"])
     async def admin_page(request):
-        blocked = _lan_only(request)
+        blocked = _tunnel_only(request)
         if blocked:
             return blocked
         try:

@@ -607,6 +607,11 @@ def main():
     @mcp.custom_route("/dashboard/api/sessions", methods=["GET"])
     async def dashboard_sessions(request):
         from starlette.responses import JSONResponse
+
+        from shared_memory.admin_ui import _lan_only
+        blocked = _lan_only(request)
+        if blocked:
+            return blocked
         sessions = []
         for sid, info in active_sessions.items():
             sessions.append({
@@ -623,6 +628,11 @@ def main():
     @mcp.custom_route("/dashboard/api/agents", methods=["GET"])
     async def dashboard_agents(request):
         from starlette.responses import JSONResponse
+
+        from shared_memory.admin_ui import _lan_only
+        blocked = _lan_only(request)
+        if blocked:
+            return blocked
         db = get_mongo()
         if db is None:
             return JSONResponse({"error": "MongoDB unavailable", "agents": []})
@@ -648,6 +658,11 @@ def main():
     @mcp.custom_route("/dashboard/api/messages", methods=["GET"])
     async def dashboard_messages(request):
         from starlette.responses import JSONResponse
+
+        from shared_memory.admin_ui import _lan_only
+        blocked = _lan_only(request)
+        if blocked:
+            return blocked
         db = get_mongo()
         if db is None:
             return JSONResponse({"error": "MongoDB unavailable", "messages": []})
@@ -675,6 +690,11 @@ def main():
     @mcp.custom_route("/dashboard/api/backlog", methods=["GET"])
     async def dashboard_backlog(request):
         from starlette.responses import JSONResponse
+
+        from shared_memory.admin_ui import _lan_only
+        blocked = _lan_only(request)
+        if blocked:
+            return blocked
         try:
             chroma = await get_chroma()
             all_collections = await chroma.list_collections()
@@ -734,6 +754,11 @@ def main():
         Data is collected for one week to inform the v3 PostCompact decision.
         """
         from starlette.responses import JSONResponse
+
+        from shared_memory.admin_ui import _key_if_required
+        blocked = _key_if_required(request)
+        if blocked:
+            return blocked
         try:
             body = await request.json()
         except Exception:
@@ -760,6 +785,11 @@ def main():
     async def hook_compact_stats(request):
         """Read-only stats for compaction event collection."""
         from starlette.responses import JSONResponse
+
+        from shared_memory.admin_ui import _lan_only
+        blocked = _lan_only(request)
+        if blocked:
+            return blocked
         db = get_mongo()
         if db is None:
             return JSONResponse({"error": "MongoDB unavailable"}, status_code=503)
