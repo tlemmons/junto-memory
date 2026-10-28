@@ -468,6 +468,7 @@ Agents never handle credentials. An agent **requests** a connection (`memory_run
 - Revoking a connection deletes the ciphertext and cancels queued runs. A run already claimed finishes within its 10-minute lease.
 - Every request, activation, rotation and revocation is in the connection audit (`/admin` → Connections).
 - `JUNTO_VAULT_KEY` lives in `.env`, not in the Mongo backups. A backup holds ciphertext only; losing the key means re-entering the secrets.
+- `JUNTO_DEFAULT_RUNNER_HOSTS` (comma list) sets which runner hosts a newly requested connection may run on. Unset means none: assign hosts in /admin before activating.
 
 ### Running a runner
 
@@ -633,8 +634,7 @@ These have **no default**, and each tool exits with a clear message when its var
 
 | Variable | Used by |
 |----------|---------|
-| `JUNTO_OLLAMA_URL` | `contrib/local-inference/li.py` (or `--url`) and the maintainer research scripts `scripts/{retrieval_eval,lane_replay,rerank_replay,embed_bakeoff}.py`. `scripts/chunk_index.py` reads `JUNTO_EMBED_URL`. |
-| `OFFSITE_HOST` | `contrib/backup/sync-to-storm.sh` and `infra/sage/junto-backup/junto-backup-verify.sh`. Also read from `~/.config/junto-backup/offsite.env` (or `$JUNTO_OFFSITE_ENV`). |
+| `JUNTO_OLLAMA_URL` | `contrib/local-inference/li.py` (or `--url`); http/https only. |
 
 ---
 

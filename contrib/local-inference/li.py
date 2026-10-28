@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 MAX_CHARS = 60_000       # whole-text cap (~15K tokens; fits the 16K context)
@@ -59,6 +60,8 @@ def call(url, model, instructions, text, schema, timeout, think="auto"):
     t = think_for(model, think)
     if t is not None:
         body["think"] = t
+    if urllib.parse.urlsplit(url).scheme.lower() not in ("http", "https"):
+        raise ValueError(f"Ollama URL must be http:// or https://, got {url!r}")
     req = urllib.request.Request(url.rstrip("/") + "/api/chat", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:

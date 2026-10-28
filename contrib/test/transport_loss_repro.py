@@ -10,7 +10,7 @@ loss; the resulting CancelledError propagates through sync_engine.run uncaught
 This script confirms or refutes that hypothesis by deliberately breaking the
 transport mid-session and printing the exception type + traceback.
 
-Usage (from sage):
+Usage (from the primary host):
     JUNTO_PEER_URL=http://<peer-host>:8080/mcp \
     JUNTO_PEER_KEY=<peer-admin-key> \
     PEER_SSH_HOST=<peer-host> \
