@@ -6,6 +6,20 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+## [1.42.0] - 2026-10-30
+
+Four memory-quality features (the Memento comparison build order). Two of them change what agents see by default: secret redaction on write, and rejected docs dropping out of search. Shelf-life decay ships OFF.
+
+### Added
+- **Secret redaction on write** (`interface:secret-redaction-v0`). `memory_store`, `memory_record_learning`, `memory_define_spec`, the backlog writers, `memory_register_function`, `memory_end_session` and `memory_send_message` replace credentials with `[REDACTED:<kind>]` before anything is persisted. Covered: PEM keys, vendor tokens (Anthropic, OpenAI, AWS, GitHub, Slack, Google, Stripe), junto `smk_` keys, JWTs, URL passwords, Bearer values, and `password=`/`token:`-style assignments whose value looks like a credential. Responses gain `redacted` + `redacted_warning` only when something was removed. Writes are never rejected. The existing corpus is not rewritten.
+- **Verification state + `memory_verify`** (`interface:verification-state-v0`). Docs can be marked `verified` / `rejected` / `unreviewed` (the default, no backfill), with an audit row in `verification_events`. Human, admin/owner and librarian sessions may verify; nobody but a human can verify their own doc. `memory_query` rows, `memory_get_by_id` and `/recall` snippets carry `verification`. Rejected docs leave search and recall (`include_inactive` shows them flagged). Verified docs lead their relevance band, and get +0.05 on the /recall sort. Tool count 63 → 64.
+- **Shelf-life decay** (`interface:ranking-decay-v0`), behind the new `shelf_life_decay` query-config flag (default **off**). Half-lives: volatile learnings 21 days, unverified durable 90 days. Verified durable learnings and docs without facets never decay. Floor 0.2. Reported relevance/score stay raw; decayed rows carry `decay`.
+- **`contrib/transcript-extract/`** (`design:transcript-extraction-v0`). Nightly, opt-in extraction of decision/explanation/resolution records from Claude Code transcripts into unreviewed learnings with provenance. Not scheduled by default.
+
+### Fixed
+- `memory_project update_agent` no longer writes `tier=named` when no tier is passed. Before, any role/purpose edit demoted an admin agent and removed it from the project's admins list. An invalid tier on update now errors.
+- `persist_agent_aliases` accepts an alias equal to a **retired** agent's name, which is the retire-then-alias identity fold.
+
 ## [1.41.3] - 2026-10-28
 
 A lean public tree: personal/home operations material is no longer shipped. Server behaviour is unchanged except one default (delegation runner hosts, below).
