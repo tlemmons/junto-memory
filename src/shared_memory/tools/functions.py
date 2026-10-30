@@ -117,7 +117,9 @@ async def memory_register_function(
     except Exception:
         pass
     from shared_memory.redact import redact_fields, redaction_notice
-    (purpose, gotchas, code), _redacted = redact_fields(purpose, gotchas, code)
+    (purpose, gotchas, code), _redacted = redact_fields(
+        purpose, gotchas, code, tool="memory_register_function", session_id=session_id,
+        fields=["purpose", "gotchas", "code"])
 
     if project:
         project = normalize_project(project)

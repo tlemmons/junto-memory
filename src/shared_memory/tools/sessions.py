@@ -1020,7 +1020,8 @@ async def memory_end_session(
         pass  # lint is best-effort; the park writes are the load-bearing ops
     from shared_memory.redact import redact_fields, redaction_notice
     (summary, learnings, handoff_notes), _redacted = redact_fields(
-        summary, learnings, handoff_notes)
+        summary, learnings, handoff_notes, tool="memory_end_session", session_id=session_id,
+        fields=["summary", "learnings", "handoff_notes"])
 
     # Store handoff note
     proj_collection = await get_project_collection(chroma, session_info["project"])

@@ -68,7 +68,9 @@ async def memory_add_backlog_item(
     from shared_memory.write_lint import recover_envelope_leak
     description, project, _lint_notes = recover_envelope_leak(description, "description", project)
     from shared_memory.redact import redact_fields, redaction_notice
-    (title, description), _redacted = redact_fields(title, description)
+    (title, description), _redacted = redact_fields(
+        title, description, tool="memory_add_backlog_item", session_id=session_id,
+        fields=["title", "description"])
 
     tags = tags or []
     chroma = await get_chroma()
@@ -373,7 +375,8 @@ async def memory_update_backlog_item(
 
     from shared_memory.redact import redact_fields, redaction_notice
     (title, description, deferred_reason), _redacted = redact_fields(
-        title, description, deferred_reason)
+        title, description, deferred_reason, tool="memory_update_backlog_item",
+        session_id=session_id, fields=["title", "description", "deferred_reason"])
 
     chroma = await get_chroma()
     session_info = active_sessions[session_id]
@@ -667,7 +670,8 @@ async def memory_batch_backlog(
             _it = dict(_it)
             _keys = [k for k in ("title", "description", "deferred_reason")
                      if isinstance(_it.get(k), str)]
-            _vals, _found = redact_fields(*[_it[k] for k in _keys])
+            _vals, _found = redact_fields(*[_it[k] for k in _keys], tool="memory_batch_backlog",
+                                          session_id=session_id, fields=_keys)
             _it.update(zip(_keys, _vals))
             for k, n in _found.items():
                 _redacted[k] = _redacted.get(k, 0) + n

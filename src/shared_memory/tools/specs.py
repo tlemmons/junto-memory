@@ -123,7 +123,8 @@ async def memory_define_spec(
     from shared_memory.write_lint import recover_envelope_leak
     content, project, _spec_lint_notes = recover_envelope_leak(content, "content", project)
     from shared_memory.redact import redact_fields, redaction_notice
-    (content,), _redacted = redact_fields(content)
+    (content,), _redacted = redact_fields(
+        content, tool="memory_define_spec", session_id=session_id, fields=["content"])
 
     chroma = await get_chroma()
     session_info = active_sessions[session_id]

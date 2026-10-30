@@ -102,3 +102,45 @@ def test_notice_shape():
     assert n["redacted"] == {"jwt": 2, "url_password": 1}
     assert "3 secret(s)" in n["redacted_warning"]
     assert "NOT persisted" in n["redacted_warning"]
+
+
+# --- redaction_events (metrics) -------------------------------------------------
+def test_hits_carry_kind_key_len_never_the_value():
+    hits = []
+    redact_secrets("MONGO_DEV_PASSWORD=T0mTest99 and mongodb://admin:T0mPass1@h", hits)
+    assert {"kind": "assigned_secret", "key": "MONGO_DEV_PASSWORD", "len": 9} in hits
+    assert {"kind": "url_password", "key": "mongodb", "len": 8} in hits
+    assert "T0m" not in repr(hits)
+
+
+def test_redact_fields_logs_one_event_with_field_names(monkeypatch):
+    from shared_memory import redact as r
+    from shared_memory.state import active_sessions
+    logged = []
+
+    class _Col:
+        def create_index(self, *a, **k):
+            pass
+
+        def insert_one(self, doc):
+            logged.append(doc)
+
+    class _DB(dict):
+        def __getitem__(self, k):
+            return _Col()
+
+    monkeypatch.setattr("shared_memory.clients.get_mongo", lambda: _DB())
+    monkeypatch.setattr(r, "_events_indexed", False)
+    col = _Col()
+    monkeypatch.setattr(_DB, "__getitem__", lambda self, k: col)
+    active_sessions["rs"] = {"project": "nimbus", "claude_instance": "billing-team"}
+    try:
+        redact_fields("ok", "token: secXk29dLq8vNmZ3pR7tWb4yHc6jFg1s",
+                      tool="memory_store", session_id="rs", fields=["title", "content"])
+        redact_fields("nothing here", tool="memory_store", session_id="rs", fields=["title"])
+    finally:
+        active_sessions.pop("rs", None)
+    assert len(logged) == 1
+    ev = logged[0]
+    assert ev["tool"] == "memory_store" and ev["project"] == "nimbus" and ev["agent"] == "billing-team"
+    assert ev["hits"] == [{"kind": "assigned_secret", "key": "token", "len": 32, "field": "content"}]

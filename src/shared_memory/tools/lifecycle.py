@@ -384,8 +384,8 @@ async def memory_verify(
             "(a human, an admin, or the librarian)."
         )})
 
-    from shared_memory.redact import redact_secrets
-    reason, _ = redact_secrets(reason)
+    from shared_memory.redact import redact_fields
+    (reason,), _ = redact_fields(reason, tool="memory_verify", session_id=session_id, fields=["reason"])
     now = utc_now_iso()
     old = meta.get("verification") or "unreviewed"
     meta["verification"] = verdict

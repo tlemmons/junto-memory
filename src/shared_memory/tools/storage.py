@@ -106,7 +106,8 @@ async def memory_store(
     # Secret redaction (Memento #3, interface:secret-redaction-v0) runs before
     # dedup/doc_id/op-log so no copy of the credential is derived anywhere.
     from shared_memory.redact import redact_fields
-    (title, content), _redacted = redact_fields(title, content)
+    (title, content), _redacted = redact_fields(
+        title, content, tool="memory_store", session_id=session_id, fields=["title", "content"])
 
     tags = tags or []
     files_related = files_related or []
@@ -402,7 +403,8 @@ async def memory_record_learning(
     from shared_memory.write_lint import recover_envelope_leak
     details, project, _lint_notes = recover_envelope_leak(details, "details", project)
     from shared_memory.redact import redact_fields
-    (title, details), _redacted = redact_fields(title, details)
+    (title, details), _redacted = redact_fields(
+        title, details, tool="memory_record_learning", session_id=session_id, fields=["title", "details"])
 
     if project:
         project = normalize_project(project)

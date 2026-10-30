@@ -847,7 +847,9 @@ async def memory_send_message(
     # Secret redaction (Memento #3) before dedup, so the dedup key and the
     # persisted doc both carry the redacted text.
     from shared_memory.redact import redact_fields, redaction_notice
-    (message, subject), _redacted = redact_fields(message, subject)
+    (message, subject), _redacted = redact_fields(
+        message, subject, tool="memory_send_message", session_id=session_id,
+        fields=["message", "subject"])
 
     # ── Dedup check ──
     # Reject identical messages to same target within 5 minutes

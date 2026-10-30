@@ -25,7 +25,7 @@ under-redaction leaks a credential to every agent on the server.
 
 import math
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # kind -> compiled pattern. Order matters: PEM first (it spans lines and
 # contains base64 that the shorter detectors would otherwise nibble at).
@@ -112,18 +112,32 @@ def _looks_secret(val: str) -> bool:
     return shannon_entropy(val) >= GENERIC_MIN_ENTROPY
 
 
-def redact_secrets(text: str) -> Tuple[str, Dict[str, int]]:
-    """Return (redacted_text, {kind: count}). Empty dict = nothing found."""
+def _key_label(kind: str, pre: str) -> Optional[str]:
+    """What the secret was attached to, never the secret: the assignment's key
+    name (MONGO_PASSWORD), the URL scheme (mongodb), or the auth scheme
+    (Bearer). Lets a reviewer judge a false positive without the value."""
+    if kind == "url_password":
+        return pre.split("://", 1)[0]
+    m = re.search(r"([A-Za-z0-9_.\-]+)[\"']?\s*(?:=|:|=>)?\s*[\"']?\s*$", pre)
+    return m.group(1)[-60:] if m else None
+
+
+def redact_secrets(text: str, hits: Optional[List[Dict]] = None) -> Tuple[str, Dict[str, int]]:
+    """Return (redacted_text, {kind: count}). Empty dict = nothing found.
+    When `hits` is a list, one {kind, key, len} dict per redaction is appended
+    to it (metrics, interface:secret-redaction-v0 §metrics)."""
     if not text or not isinstance(text, str):
         return text, {}
     found: Dict[str, int] = {}
 
-    def _bump(kind: str) -> str:
+    def _bump(kind: str, key: Optional[str] = None, length: int = 0) -> str:
         found[kind] = found.get(kind, 0) + 1
+        if hits is not None:
+            hits.append({"kind": kind, "key": key, "len": length})
         return f"[REDACTED:{kind}]"
 
     for kind, pat in _SHAPED:
-        text = pat.sub(lambda m, k=kind: _bump(k), text)
+        text = pat.sub(lambda m, k=kind: _bump(k, None, len(m.group(0))), text)
 
     def _value_sub(kind: str):
         def _f(m):
@@ -135,7 +149,8 @@ def redact_secrets(text: str) -> Tuple[str, Dict[str, int]]:
             if kind == "url_password" and (len(val) < 6 or _PLACEHOLDER_RE.match(val)
                                            or val[0] in "<$"):
                 return m.group(0)
-            return m.group("pre") + _bump(kind) + (m.groupdict().get("post") or "")
+            return (m.group("pre") + _bump(kind, _key_label(kind, m.group("pre")), len(val))
+                    + (m.groupdict().get("post") or ""))
         return _f
 
     text = _URL_CRED_RE.sub(_value_sub("url_password"), text)
@@ -157,14 +172,56 @@ def redaction_notice(found: Dict[str, int]) -> Dict:
     }
 
 
-def redact_fields(*values: str) -> Tuple[list, Dict[str, int]]:
+def redact_fields(*values: str, tool: Optional[str] = None,
+                  session_id: Optional[str] = None,
+                  fields: Optional[List[str]] = None) -> Tuple[list, Dict[str, int]]:
     """Redact several free-text fields of one write. Returns the values in the
-    same order (None passes through) plus the merged per-kind counts."""
+    same order (None passes through) plus the merged per-kind counts.
+
+    With `tool`, a write that had anything removed is logged to
+    redaction_events (log_redaction_event); `fields` names the values for
+    that log."""
     out = []
     merged: Dict[str, int] = {}
-    for v in values:
-        v2, found = redact_secrets(v)
+    hits: List[Dict] = []
+    for i, v in enumerate(values):
+        before = len(hits)
+        v2, found = redact_secrets(v, hits)
+        for h in hits[before:]:
+            h["field"] = fields[i] if fields and i < len(fields) else i
         out.append(v2)
         for k, n in found.items():
             merged[k] = merged.get(k, 0) + n
+    if hits and tool:
+        log_redaction_event(tool, session_id, hits)
     return out, merged
+
+
+REDACTION_EVENTS = "redaction_events"
+REDACTION_EVENTS_TTL_SECONDS = 365 * 24 * 3600
+_events_indexed = False
+
+
+def log_redaction_event(tool: str, session_id: Optional[str], hits: List[Dict]) -> None:
+    """One row per write that had secrets removed: {ts, tool, project, agent,
+    hits:[{kind, field, key, len}]}. Never the value. Best-effort; never
+    fails a write."""
+    global _events_indexed
+    try:
+        from shared_memory.clients import get_mongo
+        from shared_memory.helpers import utc_now
+        from shared_memory.state import active_sessions
+        db = get_mongo()
+        if db is None:
+            return
+        if not _events_indexed:
+            db[REDACTION_EVENTS].create_index("ts", expireAfterSeconds=REDACTION_EVENTS_TTL_SECONDS)
+            _events_indexed = True
+        sess = active_sessions.get(session_id) or {}
+        db[REDACTION_EVENTS].insert_one({
+            "ts": utc_now(), "tool": tool,
+            "project": sess.get("project"), "agent": sess.get("claude_instance"),
+            "hits": hits,
+        })
+    except Exception:  # noqa: BLE001 - metrics are never load-bearing
+        pass
