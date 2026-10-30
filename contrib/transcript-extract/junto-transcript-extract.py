@@ -83,8 +83,13 @@ def _text_of(content):
             out.append(("text", block["text"]))
         elif t == "tool_use":
             inp = block.get("input") or {}
-            hint = inp.get("description") or inp.get("command") or inp.get("file_path") or inp.get("query") or ""
-            out.append(("tool", f"[tool {block.get('name')}] {str(hint)[:MAX_TOOL_INPUT_CHARS]}"))
+            name = block.get("name") or ""
+            if "memory_record_learning" in name or "memory_store" in name or "memory_define_spec" in name:
+                # What the session ALREADY saved: the extractor must not re-record it.
+                hint = "ALREADY SAVED: " + str(inp.get("title") or inp.get("name") or "")
+            else:
+                hint = inp.get("description") or inp.get("command") or inp.get("file_path") or inp.get("query") or ""
+            out.append(("tool", f"[tool {name}] {str(hint)[:MAX_TOOL_INPUT_CHARS]}"))
         # tool_result and thinking blocks are dropped: results are bulk output,
         # thinking is not the agent's stated position.
     return out
