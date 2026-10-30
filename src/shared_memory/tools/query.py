@@ -232,6 +232,7 @@ async def memory_query(
                         # update path. None when the doc predates identity
                         # capture — consumers fail open on null.
                         "authored_by": meta.get("claude_instance"),
+                        "verification": meta.get("verification") or "unreviewed",
                         "warning": warning if warning else None
                     })
                     if _rr:
@@ -280,6 +281,7 @@ async def memory_query(
                         "content": h["doc"],
                         "access_count": meta.get("access_count", 0),
                         "authored_by": meta.get("claude_instance"),
+                        "verification": meta.get("verification") or "unreviewed",
                         "warning": warning if warning else None
                     })
                     await update_access_stats(proj_collection, h["id"])
@@ -340,6 +342,7 @@ async def memory_query(
                             "content": doc[:500] + "..." if len(doc) > 500 else doc,
                             "access_count": meta.get("access_count", 0),
                             "authored_by": meta.get("claude_instance"),
+                            "verification": meta.get("verification") or "unreviewed",
                             "warning": staleness if staleness else None
                         })
                         if _rr:
@@ -352,6 +355,15 @@ async def memory_query(
                             await update_access_stats(shared, doc_id)
             except Exception:
                 pass
+
+    # Verification (interface:verification-state-v0): rejected docs leave
+    # normal search like archived ones do; include_inactive shows them flagged.
+    if include_inactive:
+        for r in results:
+            if r.get("verification") == "rejected":
+                r["warning"] = ((r.get("warning") or "") + " REJECTED on verification: checked and found wrong.").strip()
+    else:
+        results = [r for r in results if r.get("verification") != "rejected"]
 
     if _rr and results:
         _pool = [r for r in results if r.get("match") != "exact"]
@@ -378,10 +390,12 @@ async def memory_query(
         # Relevance band: >70% = 0 (best), 50-70% = 1, <50% = 2
         pct = int(r["relevance"].rstrip("%")) / 100
         band = 0 if pct > 0.70 else (1 if pct > 0.50 else 2)
-        # Within band, sort by updated timestamp descending (newest first)
+        # Within band: verified first (interface:verification-state-v0), then
+        # newest first. Verification never lifts a doc across a band.
+        verified = 0 if r.get("verification") == "verified" else 1
         ts = parse_timestamp(r.get("updated") or r.get("created"))
         epoch = ts.timestamp() if ts else 0
-        return (band, -epoch)
+        return (band, verified, -epoch)
 
     results.sort(key=_sort_key)
     # Exact identifier hits keep their slots; the vector rows fill the rest.
@@ -595,8 +609,14 @@ async def memory_get_by_id(
             # backlog_601d268dbe6b). Null = pre-identity-capture doc —
             # consumers fail open.
             "authored_by": meta.get("claude_instance"),
+            "verification": meta.get("verification") or "unreviewed",
             "content": doc
         }
+        if meta.get("verified_by"):
+            payload["verified_by"] = meta.get("verified_by")
+            payload["verified_at"] = meta.get("verified_at")
+            if meta.get("verification_reason"):
+                payload["verification_reason"] = meta.get("verification_reason")
         if resolved_from:
             payload["resolved_from_prefix"] = resolved_from
         # Facets ride the follow-through surface too (get_by_id is the
