@@ -60,7 +60,7 @@ There are 370+ MCP memory servers listed on PulseMCP. Most give a single agent p
 | Secrets for data sources | No | Yes — Encrypted vault; agents request connections, the operator activates them, agents never see the secret |
 | Operator web UI | No | Yes — `/admin`: settings, agents, alerts, tasks, connections, change log |
 
-64 tools across 23 categories. Not a toy — a coordination system.
+65 tools across 23 categories. Not a toy — a coordination system.
 
 ---
 
@@ -225,7 +225,7 @@ No API keys or authentication tokens are required for local use (see [Security](
 
 ## Tool Reference
 
-64 tools organized into 23 categories. (For the canonical, current list with grouping and end-to-end flows, see the architecture spec inside the server: `memory_get_spec(name="architecture:shared-memory-v1", project="junto")`.)
+65 tools organized into 23 categories. (For the canonical, current list with grouping and end-to-end flows, see the architecture spec inside the server: `memory_get_spec(name="architecture:shared-memory-v1", project="junto")`.)
 
 ### Session Management (2)
 
@@ -267,11 +267,12 @@ No API keys or authentication tokens are required for local use (see [Security](
 | `memory_update_backlog_item` | Update a backlog item's status, priority, assignee, or description. |
 | `memory_complete_backlog_item` | Mark a backlog item as done or won't-do, with optional resolution notes. |
 
-### Inter-Agent Messaging (7)
+### Inter-Agent Messaging (8)
 
 | Tool | Description |
 |------|-------------|
 | `memory_send_message` | Send a message to another agent. Supports categories (task, question, blocker, etc.) and threading. |
+| `memory_notify` | Send a message to a PERSON over their own Gmail/Slack. Junto queues it; the person's notify runner (contrib/notify-runner, on their machine) delivers it through their approved Claude connector with a headless `claude -p`, behind a local recipient allowlist. Scheduled tasks can route to `human:<name>` too. Each person registers and tests their own channels. |
 | `memory_get_messages` | Get pending messages for your agent. Scoped by project. |
 | `memory_acknowledge_message` | Mark a message as received (shortcut for status update). |
 | `memory_update_message_status` | Track message lifecycle: pending, delivered, received, completed, failed. |
