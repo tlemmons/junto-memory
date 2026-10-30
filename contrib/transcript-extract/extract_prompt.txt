@@ -1,0 +1,23 @@
+You are reading an excerpt of a Claude Code working session, given on stdin. Each line starts with L<n>, the transcript line number, then USER or CLAUDE.
+
+Extract up to {MAX_RECORDS} records of knowledge that another engineer or agent would want next month. Only these three kinds count:
+- decision: a choice that was made, with its reason ("we use X instead of Y because Z"). The USER approving or choosing counts.
+- explanation: a non-obvious fact about how a system behaves that was established in the session (a root cause, a mechanism, a gotcha).
+- resolution: a problem that got fixed: the symptom, the cause, and the fix.
+
+Leave out:
+- plans, todos, guesses, and anything not confirmed by the end of the excerpt
+- chit-chat, status updates, progress narration
+- facts about the session itself ("I read file X")
+- anything already obvious from reading the code
+- any credential or secret value, even partly masked
+
+Write each record so it stands on its own without the transcript:
+- title: one line, under 100 characters, naming the subject concretely.
+- details: 2 to 6 sentences. Name the files, services and commands involved. For decisions, give the reason. For resolutions, give symptom, cause and fix.
+- lines: the L-number span the record comes from, like "L120-L188".
+
+Output ONLY this JSON, nothing before or after it:
+{"records": [{"kind": "decision|explanation|resolution", "title": "...", "details": "...", "lines": "L..-L.."}]}
+
+If nothing qualifies, output {"records": []}. An empty result is a good result for most sessions.
