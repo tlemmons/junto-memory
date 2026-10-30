@@ -42,11 +42,21 @@ _SHAPED: List[Tuple[str, re.Pattern]] = [
     ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}")),
     ("stripe_key", re.compile(r"\b(?:sk|rk)_live_[0-9A-Za-z]{20,}")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{10,}")),
+    # Base64 JSON blobs ({"... → eyJ) of credential length, e.g. a cloudflared
+    # tunnel token seen in `ps` output. Shorter eyJ strings are left alone.
+    ("encoded_token", re.compile(r"\beyJ[A-Za-z0-9+/_\-]{60,}={0,2}")),
 ]
 
 # scheme://user:PASSWORD@host — only the password group is replaced.
 _URL_CRED_RE = re.compile(
     r"(?P<pre>\b[a-zA-Z][a-zA-Z0-9+.\-]{1,20}://[^\s:/@]+:)(?P<val>[^\s@/]+)(?P<post>@)"
+)
+
+# CLI flags: --token <v>, --password=<v>, --api-key <v> ...
+_CLI_FLAG_RE = re.compile(
+    r"(?P<pre>(?<![\w-])--(?:token|password|passwd|secret|api-key|apikey|access-key|auth-token)(?:=|\s+))"
+    r"(?P<val>[^\s\"'`]{8,})",
+    re.IGNORECASE,
 )
 
 # Authorization: Bearer <tok> / Basic <tok>
@@ -155,6 +165,7 @@ def redact_secrets(text: str, hits: Optional[List[Dict]] = None) -> Tuple[str, D
 
     text = _URL_CRED_RE.sub(_value_sub("url_password"), text)
     text = _AUTH_HEADER_RE.sub(_value_sub("auth_header"), text)
+    text = _CLI_FLAG_RE.sub(_value_sub("cli_secret"), text)
     text = _ASSIGN_RE.sub(_value_sub("assigned_secret"), text)
     return text, found
 

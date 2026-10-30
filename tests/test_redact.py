@@ -30,6 +30,10 @@ POSITIVES = [
     ('"mqttPassword": "134a8f9c-77d2-4b1e-9c0d-5e6f7a8b9c0d"', "134a8f9c", "assigned_secret"),
     ("Server=10.100.0.1;Port=3306;User=app;Password=GWRx9q2LmZ7vT3", "GWRx9q2LmZ7vT3", "assigned_secret"),
     ("Clarity API - Token: secXk29dLq8vNmZ3pR7tWb4yHc6jFg1s", "secXk29dLq8v", "assigned_secret"),
+    ("cloudflared tunnel run --token eyJhIjoiMjlmMTRmNTg0ODlmN2Y0ODBlODRhZDA2MzUwNTJmZTMiLCJ0IjoiMGNiNmMz",
+     "eyJhIjoiMjlm", "encoded_token"),
+    ("mysql --password=Qz8vLm2kRt7x -h db", "Qz8vLm2kRt7x", "cli_secret"),
+    ("tool --api-key a8F3kLq9Zx2Vb7Nm", "a8F3kLq9Zx2Vb7Nm", "cli_secret"),
 ]
 
 NEGATIVES = [
@@ -51,6 +55,9 @@ NEGATIVES = [
     "password: changeme",
     "Authorization: Bearer $TOKEN",
     "already [REDACTED:assigned_secret] earlier",
+    "pass --token $CF_TUNNEL_TOKEN from the env",
+    "the --password flag is required",
+    'header eyJhbGciOiJIUzI1NiJ9 alone is not a token',
 ]
 
 
