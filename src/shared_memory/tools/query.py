@@ -384,11 +384,31 @@ async def memory_query(
             "message": "No matching memories found. This might be new territory - consider recording what you learn!"
         }, indent=2)
 
+    # Shelf-life decay (interface:ranking-decay-v0), per-project flag, default
+    # OFF. Ages the BAND input only; the reported relevance stays raw and a
+    # decayed row carries `decay` so the reader can see why it sank.
+    if _qcfg.get("shelf_life_decay"):
+        try:
+            from shared_memory.decay import age_days_of, decay_factor
+            from shared_memory.facets import get_facets_for_ids
+            _shelf = get_facets_for_ids(
+                get_mongo(), [r["id"] for r in results if str(r.get("id", "")).startswith("learning_")]
+            )
+            for r in results:
+                f = decay_factor((_shelf.get(r.get("id")) or {}).get("shelf_life"),
+                                 r.get("verification"),
+                                 age_days_of(r.get("updated") or r.get("created")))
+                if f < 1.0:
+                    r["_decay"] = f
+                    r["decay"] = round(f, 2)
+        except Exception:
+            pass
+
     # Tiered sort: group by relevance band, then sort by recency within each band.
     # This prevents old docs from outranking fresh ones on the same topic.
     def _sort_key(r):
         # Relevance band: >70% = 0 (best), 50-70% = 1, <50% = 2
-        pct = int(r["relevance"].rstrip("%")) / 100
+        pct = int(r["relevance"].rstrip("%")) / 100 * r.get("_decay", 1.0)
         band = 0 if pct > 0.70 else (1 if pct > 0.50 else 2)
         # Within band: verified first (interface:verification-state-v0), then
         # newest first. Verification never lifts a doc across a band.
@@ -405,6 +425,8 @@ async def memory_query(
         results = _rest[:max(0, limit - len(_exact))] + _exact
         results.sort(key=_sort_key)
     results = results[:limit]
+    for r in results:
+        r.pop("_decay", None)
 
     # Eval-set seeding (recall_metrics.query_events; maintainer retrieval-eval harness, not shipped).
     try:

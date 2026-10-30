@@ -443,7 +443,24 @@ async def _recall_payload(body, api_key, via_tunnel=False):
 
     # Verified docs get a small SORT bonus; the reported score stays the raw
     # similarity (interface:verification-state-v0).
-    candidates.sort(key=lambda c: -(c["score"] + (RECALL_VERIFIED_BONUS if c.get("verification") == "verified" else 0)))
+    # Shelf-life decay (interface:ranking-decay-v0), per-project flag, default
+    # OFF: multiplies the SORT score only; `score` stays raw.
+    _decay = {}
+    if _qcfg.get("shelf_life_decay"):
+        try:
+            from shared_memory.decay import age_days_of, decay_factor
+            from shared_memory.facets import get_facets_for_ids
+            _shelf = get_facets_for_ids(mongo, [c["id"] for c in candidates])
+            for c in candidates:
+                f = decay_factor((_shelf.get(c["id"]) or {}).get("shelf_life"),
+                                 c.get("verification"), age_days_of(c.get("updated")))
+                if f < 1.0:
+                    _decay[c["id"]] = f
+                    c["decay"] = round(f, 2)
+        except Exception:
+            _decay = {}
+    candidates.sort(key=lambda c: -(c["score"] * _decay.get(c["id"], 1.0)
+                                     + (RECALL_VERIFIED_BONUS if c.get("verification") == "verified" else 0)))
     candidates = candidates[:max(0, k - len(lexical))] + lexical
 
     # one_line: claim facet when present (mongo best-effort), else content head.

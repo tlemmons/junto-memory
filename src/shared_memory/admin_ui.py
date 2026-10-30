@@ -60,6 +60,7 @@ DESCRIPTIONS = {
     "chunk_recall_floor": "Recall similarity floor when the chunk index is on (separate from recall_floor because the score scale differs).",
     "rerank": "Re-rank memory_query results with the local cross-encoder (sharper results, ~0.2 s extra). Falls back to the normal ranking if the reranker is down. Does not affect recall.",
     "rerank_min": "Minimum reranker score (0-1) for a memory_query result to be returned when rerank is on.",
+    "shelf_life_decay": "Age learnings by their facet shelf_life when ranking (volatile half-life 21d, unverified durable 90d, verified durable never). Off until the replay eval passes.",
 }
 
 SECRET_KEYS = {"webhook_token"}
