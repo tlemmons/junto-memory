@@ -48,3 +48,22 @@ Cron (after the librarian, so its facets pass sees fresh rows next night):
   memory_query hit is at least 85% similar. Provenance (kind, CC session id,
   line span, transcript path) is in a footer and in tags
   `transcript-extract`, `kind:<k>`, `cc-session:<id>`.
+
+## Windows (Claude Code on a Windows workstation)
+
+The script is cross-platform. On the Windows box:
+
+1. Python 3.11+, `pip install mcp==1.30.0`, and `claude` on PATH (logged in).
+2. A checkout of this repo (the script imports the redactor from `src/`):
+   `git clone https://github.com/tlemmons/junto-memory C:\code\junto-memory`
+3. `%USERPROFILE%\.config\junto\transcript-extract.json`, keyed by the folder
+   names under `%USERPROFILE%\.claude\projects\` (e.g. `C--code-Nimbus`,
+   `C--code-Nimbus-server-team`). Each value is the junto project:
+   ```json
+   {"projects": {"C--code-Nimbus": "nimbus"}, "model": "sonnet"}
+   ```
+4. Point it at the server: set `JUNTO_MCP_URL=http://<junto host>:8080/mcp`.
+   Set `JUNTO_API_KEY` if the server needs a key from that host.
+5. Task Scheduler, daily 03:10:
+   `python C:\code\junto-memory\contrib\transcript-extract\junto-transcript-extract.py`
+   Run `--dry-run --limit 1` once by hand first.

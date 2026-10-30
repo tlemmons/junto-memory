@@ -27,7 +27,6 @@ import asyncio
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 import tempfile
@@ -260,6 +259,16 @@ def main():
         STATE.write_text(json.dumps(new_state, indent=1))
 
 
+def _arm_deadline(seconds):
+    """Hard ceiling on one run. signal.alarm is Unix-only, so a daemon timer
+    thread that hard-exits works on Windows (Task Scheduler) too."""
+    import threading
+    t = threading.Timer(seconds, lambda: (print(f"deadline {seconds}s hit; exiting", file=sys.stderr),
+                                          os._exit(3)))
+    t.daemon = True
+    t.start()
+
+
 if __name__ == "__main__":
-    signal.alarm(RUN_DEADLINE_SECONDS)
+    _arm_deadline(RUN_DEADLINE_SECONDS)
     main()
