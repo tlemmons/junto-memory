@@ -143,7 +143,14 @@ async def run(cfg, test=False, check=False):
                 sys.exit("memory_start_session failed")
 
             async def call(**kw):
-                return json.loads(_text(await s.call_tool("memory_notify", {"session_id": sid, **kw})) or "{}")
+                # Omit None: the tool's optional args are typed str/bool, and a
+                # null fails argument validation (the 10-30 first-run bug).
+                args = {"session_id": sid, **{k: v for k, v in kw.items() if v is not None}}
+                text = _text(await s.call_tool("memory_notify", args))
+                try:
+                    return json.loads(text or "{}")
+                except ValueError:
+                    return {"error": text[:500]}
 
             if check:
                 print(json.dumps({"config": {k: v for k, v in cfg.items() if k != "api_key"},
