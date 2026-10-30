@@ -28,9 +28,12 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 DEPLOYED = "2026-10-30"          # 1.42.0 live on sage
-BASELINE = {                     # read-only corpus scan before 1.42.0 (2026-10-30)
-    "docs_scanned": 34108,
-    "docs_with_credentials": 95,
+# Chroma docs (proj_* + shared_*) holding a credential at the 1.42.0 deploy,
+# same scope as report()'s rescan. (The first dry-run's 95/34,108 also covered
+# messages + Mongo specs: 81 Chroma + 14 messages.)
+BASELINE = {
+    "docs_scanned": 27395,
+    "docs_with_credentials": 84,
 }
 STALE_VOLATILE_DAYS = 21         # one volatile half-life (interface:ranking-decay-v0)
 EXTRACTOR = "extractor"
