@@ -1,0 +1,170 @@
+"""Write-time secret redaction (Memento #3, backlog_0ef9d63fbe9b).
+
+Best-effort: agent-authored text is scanned for credentials BEFORE it reaches
+Mongo/Chroma, and each hit is replaced in place with ``[REDACTED:<kind>]``.
+The caller gets the redacted text plus a per-kind count to surface in the tool
+response, so the writer learns a secret was dropped (and never sees it echoed).
+
+Two classes of detector:
+
+1. SHAPED tokens: vendor prefixes and fixed structures (PEM blocks, AKIA…,
+   ghp_…, sk-ant-…, smk_…, JWTs). These are near-zero false-positive, so they
+   redact unconditionally.
+2. GENERIC assignments: ``password=…``, ``"api_key": "…"``, ``token: …``,
+   ``Authorization: Bearer …`` and ``scheme://user:PASS@host``. Prose like
+   "the password is in 1Password" must survive, so the value has to look like
+   a credential: no whitespace, at least 8 chars, not a placeholder
+   (``<…>``, ``${…}``, ``$VAR``, ``xxxx``, ``***``, ``changeme``…), and
+   Shannon entropy over the threshold. Only the VALUE is replaced; the key
+   name stays so the text still reads.
+
+Never rejects a write. Redaction is lossy by design: the secret is gone from
+the store, which is the point. Over-redaction costs a token of context;
+under-redaction leaks a credential to every agent on the server.
+"""
+
+import math
+import re
+from typing import Dict, List, Tuple
+
+# kind -> compiled pattern. Order matters: PEM first (it spans lines and
+# contains base64 that the shorter detectors would otherwise nibble at).
+_SHAPED: List[Tuple[str, re.Pattern]] = [
+    ("private_key", re.compile(
+        r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----.*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----",
+        re.DOTALL)),
+    ("anthropic_key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}")),
+    ("openai_key", re.compile(r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_\-]{32,}")),
+    ("junto_key", re.compile(r"\bsmk_[A-Za-z0-9_\-]{30,}")),
+    ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("github_token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})")),
+    ("slack_token", re.compile(r"\bxox[abposr]-[A-Za-z0-9\-]{10,}")),
+    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}")),
+    ("stripe_key", re.compile(r"\b(?:sk|rk)_live_[0-9A-Za-z]{20,}")),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{10,}")),
+]
+
+# scheme://user:PASSWORD@host — only the password group is replaced.
+_URL_CRED_RE = re.compile(
+    r"(?P<pre>\b[a-zA-Z][a-zA-Z0-9+.\-]{1,20}://[^\s:/@]+:)(?P<val>[^\s@/]+)(?P<post>@)"
+)
+
+# Authorization: Bearer <tok> / Basic <tok>
+_AUTH_HEADER_RE = re.compile(
+    r"(?P<pre>\b(?:Bearer|Basic)\s+)(?P<val>[A-Za-z0-9_\-.=+/]{16,})"
+)
+
+# key <sep> value, with optional quotes. Key names are matched as a suffix so
+# MONGO_PASSWORD, db_password, x-api-key, client_secret all hit.
+_ASSIGN_RE = re.compile(
+    r"(?P<pre>\b[A-Za-z0-9_.\-]*?"
+    r"(?:password|passwd|pwd|secret|api[_\-]?key|apikey|access[_\-]?key|auth[_\-]?token|token|credential)"
+    r"[\"']?\s*(?:=|:|=>)\s*[\"']?)"
+    r"(?P<val>[^\s\"'`,;&}{)\]]{8,})",
+    re.IGNORECASE,
+)
+
+_PLACEHOLDER_RE = re.compile(
+    r"^(?:<.*>|\$?\{.*\}|\$[A-Za-z_][A-Za-z0-9_]*|%\(?[A-Za-z_]+\)?s?|\{\{.*\}\}|"
+    r"[xX*•.\-_]+|\[REDACTED(?::[a-z_]+)?\]|"
+    r"(?:changeme|pass|pw|password|secret|example|redacted|placeholder|your[_\-].*|none|null|true|false|undefined)\d*)$",
+    re.IGNORECASE,
+)
+
+GENERIC_MIN_ENTROPY = 3.0
+
+
+def shannon_entropy(s: str) -> float:
+    if not s:
+        return 0.0
+    n = len(s)
+    counts: Dict[str, int] = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+def _looks_secret(val: str) -> bool:
+    if _PLACEHOLDER_RE.match(val):
+        return False
+    # References, not values: a URL, a path, a <placeholder>, or an env-var
+    # name (MONGO_PASSWORD, $(cat …)).
+    if val[0] in "<$./~" or re.match(r"https?://", val, re.IGNORECASE):
+        return False
+    if re.fullmatch(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+", val):
+        return False
+    # Identifiers and code references are not credentials: a dotted/called
+    # name (os.environ.get, settings.API_KEY) or a pure lower_snake word.
+    if "(" in val or "[" in val or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+", val):
+        return False
+    if re.fullmatch(r"[a-z]+(?:[_\-][a-z]+)*", val):
+        return False
+    # CamelCase names (SystemConfig, CheckoutToken) and file paths
+    # (analyst/secrets/ga4-key.json) name where a secret lives, not the secret.
+    if re.fullmatch(r"[A-Z]?[a-z]+(?:[A-Z][a-z]+)+", val):
+        return False
+    if re.fullmatch(r"[\w.\-]+(?:/[\w.\-]+)+\.[A-Za-z]{1,5}", val):
+        return False
+    # Short human passwords (T0mTest99) sit below any entropy bar that
+    # spares prose, so letters mixed with digits/symbols count on their own.
+    if re.search(r"[A-Za-z]", val) and re.search(r"[^A-Za-z]", val):
+        return True
+    return shannon_entropy(val) >= GENERIC_MIN_ENTROPY
+
+
+def redact_secrets(text: str) -> Tuple[str, Dict[str, int]]:
+    """Return (redacted_text, {kind: count}). Empty dict = nothing found."""
+    if not text or not isinstance(text, str):
+        return text, {}
+    found: Dict[str, int] = {}
+
+    def _bump(kind: str) -> str:
+        found[kind] = found.get(kind, 0) + 1
+        return f"[REDACTED:{kind}]"
+
+    for kind, pat in _SHAPED:
+        text = pat.sub(lambda m, k=kind: _bump(k), text)
+
+    def _value_sub(kind: str):
+        def _f(m):
+            val = m.group("val")
+            if val.startswith("[REDACTED"):
+                return m.group(0)
+            if kind != "url_password" and not _looks_secret(val):
+                return m.group(0)
+            if kind == "url_password" and (len(val) < 6 or _PLACEHOLDER_RE.match(val)
+                                           or val[0] in "<$"):
+                return m.group(0)
+            return m.group("pre") + _bump(kind) + (m.groupdict().get("post") or "")
+        return _f
+
+    text = _URL_CRED_RE.sub(_value_sub("url_password"), text)
+    text = _AUTH_HEADER_RE.sub(_value_sub("auth_header"), text)
+    text = _ASSIGN_RE.sub(_value_sub("assigned_secret"), text)
+    return text, found
+
+
+def redaction_notice(found: Dict[str, int]) -> Dict:
+    """Response payload for a write that had secrets removed."""
+    total = sum(found.values())
+    return {
+        "redacted": found,
+        "redacted_warning": (
+            f"{total} secret(s) were replaced with [REDACTED:<kind>] before storing. "
+            "The original values were NOT persisted. Keep credentials in a secret "
+            "store and reference them by name."
+        ),
+    }
+
+
+def redact_fields(*values: str) -> Tuple[list, Dict[str, int]]:
+    """Redact several free-text fields of one write. Returns the values in the
+    same order (None passes through) plus the merged per-kind counts."""
+    out = []
+    merged: Dict[str, int] = {}
+    for v in values:
+        v2, found = redact_secrets(v)
+        out.append(v2)
+        for k, n in found.items():
+            merged[k] = merged.get(k, 0) + n
+    return out, merged

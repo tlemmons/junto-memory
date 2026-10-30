@@ -103,6 +103,10 @@ async def memory_store(
     # and re-route swallowed params before content is used for dedup/doc_id/op-log.
     from shared_memory.write_lint import recover_envelope_leak
     content, project, _lint_notes = recover_envelope_leak(content, "content", project)
+    # Secret redaction (Memento #3, interface:secret-redaction-v0) runs before
+    # dedup/doc_id/op-log so no copy of the credential is derived anywhere.
+    from shared_memory.redact import redact_fields
+    (title, content), _redacted = redact_fields(title, content)
 
     tags = tags or []
     files_related = files_related or []
@@ -251,6 +255,9 @@ async def memory_store(
     result = {"status": "stored_with_recovery" if _lint_notes else "stored", "id": doc_id}
     if _lint_notes:
         result["write_lint"] = _lint_notes
+    if _redacted:
+        from shared_memory.redact import redaction_notice
+        result.update(redaction_notice(_redacted))
         result["action_required"] = (
             "Your tool-call emission is malformed — it serialized the call's own "
             "XML envelope into `content`. The server repaired this write, but it "
@@ -394,6 +401,8 @@ async def memory_record_learning(
     # flagged in the response. The helper never raises.
     from shared_memory.write_lint import recover_envelope_leak
     details, project, _lint_notes = recover_envelope_leak(details, "details", project)
+    from shared_memory.redact import redact_fields
+    (title, details), _redacted = redact_fields(title, details)
 
     if project:
         project = normalize_project(project)
@@ -486,6 +495,9 @@ async def memory_record_learning(
         "status": "recorded_with_recovery" if _lint_notes else "recorded",
         "id": doc_id,
     }
+    if _redacted:
+        from shared_memory.redact import redaction_notice
+        result.update(redaction_notice(_redacted))
     if _lint_notes:
         result["write_lint"] = _lint_notes
         result["action_required"] = (

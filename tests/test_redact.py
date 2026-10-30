@@ -1,0 +1,104 @@
+"""Write-time secret redaction (Memento #3, interface:secret-redaction-v0).
+
+POSITIVES must lose the secret and keep the surrounding text. NEGATIVES are
+shapes the 2026-10-30 corpus dry-run (34,108 docs) showed agents write all the
+time: env-var NAMES, code references, placeholders, prose about passwords.
+Over-redaction there would eat real knowledge, so each one is pinned.
+"""
+
+import pytest
+
+from shared_memory.redact import redact_fields, redact_secrets, redaction_notice
+
+# (text, secret substring that must disappear, expected kind)
+POSITIVES = [
+    ("key sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "sk-ant-api03-AbCd", "anthropic_key"),
+    ("export OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "sk-proj-AbCd", "openai_key"),
+    ("JUNTO_API_KEY=smk_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-x", "smk_AbCd", "junto_key"),
+    ("aws AKIAIOSFODNN7EXAMPLE here", "AKIAIOSFODNN7EXAMPLE", "aws_access_key"),
+    ("gh token ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "ghp_AbCd", "github_token"),
+    ("slack xoxb-1234567890-abcdefghij", "xoxb-1234567890", "slack_token"),
+    ("maps AIzaSyA-1234567890abcdefghijklmnopqrstu", "AIzaSyA-1234", "google_api_key"),
+    ("stripe sk_live_AbCdEfGhIjKlMnOpQrStUv", "sk_live_AbCd", "stripe_key"),
+    ("HA_TOKEN=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N",
+     "eyJhbGciOiJIUzI1NiJ9", "jwt"),
+    ("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA\n-----END OPENSSH PRIVATE KEY-----",
+     "b3BlbnNzaC1rZXktdjEAAAA", "private_key"),
+    ("MONGO_URI='mongodb://admin:T0mPass1@localhost:27017'", "T0mPass1", "url_password"),
+    ('curl -H "Authorization: Bearer 46d8f0a1b2c3d4e5f6a7b8c9d0e1f2a3"', "46d8f0a1b2c3", "auth_header"),
+    ("MONGO_DEV_PASSWORD=T0mTest99", "T0mTest99", "assigned_secret"),
+    ('"mqttPassword": "134a8f9c-77d2-4b1e-9c0d-5e6f7a8b9c0d"', "134a8f9c", "assigned_secret"),
+    ("Server=10.100.0.1;Port=3306;User=app;Password=GWRx9q2LmZ7vT3", "GWRx9q2LmZ7vT3", "assigned_secret"),
+    ("Clarity API - Token: secXk29dLq8vNmZ3pR7tWb4yHc6jFg1s", "secXk29dLq8v", "assigned_secret"),
+]
+
+NEGATIVES = [
+    "the password is in 1Password",
+    "set MONGO_PASSWORD in .env, never commit it",
+    "password=os.environ['MONGO_PASSWORD']",
+    "api_key: settings.API_KEY",
+    "_apiKey = ConfigurationManager.AppSettings[\"StripeKey\"]",
+    "GoogleMapsPlacesApiKey: SystemConfig",
+    "token: analyst/secrets/ga4-sa-key.json",
+    "token = <your-token-here>",
+    "password=${MONGO_PASSWORD}",
+    "f\"mongodb://{user}:{password}@host\"",
+    "rtsp://admin:PW@camera",
+    "secret = MEDIA_RENDITION_SHARED_SECRET",
+    "see token_count=12345678 in the log",
+    "max_tokens=8192",
+    "token = 2026-10-30",
+    "password: changeme",
+    "Authorization: Bearer $TOKEN",
+    "already [REDACTED:assigned_secret] earlier",
+]
+
+
+@pytest.mark.parametrize("text,secret,kind", POSITIVES)
+def test_positive_redacted(text, secret, kind):
+    out, found = redact_secrets(text)
+    assert secret not in out
+    assert f"[REDACTED:{kind}]" in out
+    assert found.get(kind, 0) >= 1
+
+
+@pytest.mark.parametrize("text", NEGATIVES)
+def test_negative_untouched(text):
+    out, found = redact_secrets(text)
+    assert out == text, found
+    assert found == {}
+
+
+def test_key_name_survives_value_replaced():
+    out, _ = redact_secrets("MONGO_DEV_PASSWORD=T0mTest99 for the dev box")
+    assert out == "MONGO_DEV_PASSWORD=[REDACTED:assigned_secret] for the dev box"
+
+
+def test_url_keeps_user_and_host():
+    out, _ = redact_secrets("mongodb://admin:T0mPass1@localhost:27017/db")
+    assert out == "mongodb://admin:[REDACTED:url_password]@localhost:27017/db"
+
+
+def test_idempotent():
+    once, _ = redact_secrets("MONGO_DEV_PASSWORD=T0mTest99")
+    twice, found = redact_secrets(once)
+    assert twice == once and found == {}
+
+
+def test_none_and_empty_pass_through():
+    assert redact_secrets(None) == (None, {})
+    assert redact_secrets("") == ("", {})
+
+
+def test_redact_fields_merges_counts_and_keeps_order():
+    (a, b, c), found = redact_fields("password=Xy9#kq2Lm", None, "AKIAIOSFODNN7EXAMPLE")
+    assert b is None
+    assert "Xy9#kq2Lm" not in a and "AKIA" not in c
+    assert found == {"assigned_secret": 1, "aws_access_key": 1}
+
+
+def test_notice_shape():
+    n = redaction_notice({"jwt": 2, "url_password": 1})
+    assert n["redacted"] == {"jwt": 2, "url_password": 1}
+    assert "3 secret(s)" in n["redacted_warning"]
+    assert "NOT persisted" in n["redacted_warning"]
