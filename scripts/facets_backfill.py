@@ -214,6 +214,28 @@ async def run_batch(db, chroma, batch, project=None, dry_run=False):
     return done
 
 
+# sage-router P0 (design:sage-inference-router-v0, amendment A6): the nightly
+# batch yields the GPU when its model is not loaded and no card has room.
+ROUTER_STATUS_URL = os.environ.get("JUNTO_ROUTER_STATUS_URL",
+                                   "http://192.168.15.240:11500/v1/status")
+MODEL_NEED_GB = 18.0   # qwen3.8:27b resident size, rounded up
+
+
+def _gpu_busy() -> str:
+    """Reason to defer, or '' to go. Any failure reading /status = go."""
+    import httpx
+    model = claim_gate._extract_model()
+    try:
+        st = httpx.get(ROUTER_STATUS_URL, timeout=3.0).json()
+        resident = [r.get("model") for b in (st.get("backends") or {}).values()
+                    for r in (b.get("resident") or [])]
+        if model in resident or float(st.get("max_gpu_free_gb", 99)) >= MODEL_NEED_GB:
+            return ""
+        return f"{model} not resident and max_gpu_free_gb={st.get('max_gpu_free_gb')}"
+    except Exception:
+        return ""
+
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--probe", action="store_true")
@@ -241,6 +263,10 @@ async def main():
             await _process_one(db, chroma, doc_id, args.project)
         return
     if args.batch:
+        busy = _gpu_busy()
+        if busy:
+            print(f"== deferred: GPU busy ({busy}); the next nightly run retries ==")
+            return
         await run_batch(db, chroma, args.batch, args.project, args.dry_run)
         return
     ap.print_help()
