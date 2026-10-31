@@ -36,6 +36,13 @@ sys.path.insert(0, str(REPO / "src"))
 # them. In-container defaults point at host.docker.internal / mongodb.
 os.environ.setdefault("JUNTO_CLAIM_GATE_URL", "http://localhost:11434/v1")
 os.environ.setdefault("JUNTO_FACETS_ENABLED", "true")
+# Use the server's model choice: without these the backfill fell back to
+# phi4:14b while live writes used the .env extract model (found 10-31).
+for _line in (REPO / ".env").read_text().splitlines():
+    _k, _, _v = _line.strip().partition("=")
+    if _k in ("JUNTO_CLAIM_GATE_MODEL", "JUNTO_CLAIM_GATE_EXTRACT_MODEL",
+              "JUNTO_CLAIM_GATE_EXTRACT_REASONING") and _v:
+        os.environ.setdefault(_k, _v)
 
 from shared_memory import claim_gate, facets  # noqa: E402
 
