@@ -42,6 +42,7 @@ from pathlib import Path
 
 # Cron's PATH has no ~/.local/bin, where the claude CLI installs (the 10-31
 # extractor run failed on every transcript with "No such file: 'claude'").
+STATE_DIR = Path("~/.local/state/junto-notify-runner").expanduser()
 CLAUDE_BIN = (os.environ.get("CLAUDE_BIN") or shutil.which("claude")
               or str(Path("~/.local/bin/claude").expanduser()))
 
@@ -142,46 +143,60 @@ async def run(cfg, test=False, check=False):
     async with streamablehttp_client(url) as st:
         async with ClientSession(st[0], st[1]) as s:
             await s.initialize()
-            args = {"project": "junto", "claude_instance": f"notify-{cfg['human']}",
-                    "role_description": f"Notify runner for human:{cfg['human']} on {socket.gethostname()}"}
-            if cfg.get("api_key"):
-                args["api_key"] = cfg["api_key"]
-            sid = json.loads(_text(await s.call_tool("memory_start_session", args))).get("session_id")
+            # ONE long-lived session per runner, its id kept in a local state file.
+            # A new session every minute left ~1,440 open sessions a day; ending
+            # one every minute logged ~1,440 "notify pass" work items a day. A new
+            # session is started only when the server no longer knows the id.
+            sid_file = STATE_DIR / f"{cfg['human']}.sid"
+
+            async def new_session():
+                args = {"project": "junto", "claude_instance": f"notify-{cfg['human']}",
+                        "role_description": f"Notify runner for human:{cfg['human']} on {socket.gethostname()}"}
+                if cfg.get("api_key"):
+                    args["api_key"] = cfg["api_key"]
+                got = json.loads(_text(await s.call_tool("memory_start_session", args))).get("session_id")
+                if not got:
+                    sys.exit("memory_start_session failed")
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                sid_file.write_text(got)
+                return got
+
+            sid = sid_file.read_text().strip() if sid_file.exists() else ""
             if not sid:
-                sys.exit("memory_start_session failed")
+                sid = await new_session()
 
-            # End the session every pass: a once-a-minute runner that never ends
-            # its session leaves ~1,440 open notify sessions a day in active work.
-            try:
-                async def call(**kw):
-                    # Omit None: the tool's optional args are typed str/bool, and a
-                    # null fails argument validation (the 10-30 first-run bug).
-                    args = {"session_id": sid, **{k: v for k, v in kw.items() if v is not None}}
+            async def call(**kw):
+                nonlocal sid
+                # Omit None: the tool's optional args are typed str/bool, and a
+                # null fails argument validation (the 10-30 first-run bug).
+                args = {"session_id": sid, **{k: v for k, v in kw.items() if v is not None}}
+                text = _text(await s.call_tool("memory_notify", args))
+                if f"Session '{sid}' not found" in text:   # server restarted or session expired
+                    sid = await new_session()
+                    args["session_id"] = sid
                     text = _text(await s.call_tool("memory_notify", args))
-                    try:
-                        return json.loads(text or "{}")
-                    except ValueError:
-                        return {"error": text[:500]}
+                try:
+                    return json.loads(text or "{}")
+                except ValueError:
+                    return {"error": text[:500]}
 
-                if check:
-                    print(json.dumps({"config": {k: v for k, v in cfg.items() if k != "api_key"},
-                                      "server": await call(action="humans")}, indent=2, default=str))
-                    return
-                if test:
-                    ch = next(iter(cfg["channels"]))
-                    print("test queued:", await call(action="test", to=f"human:{cfg['human']}", channel=ch))
-                claimed = await call(action="claim", name=cfg["human"], runner_host=socket.gethostname())
-                if claimed.get("error"):
-                    sys.exit(f"claim failed: {claimed['error']}")
-                for n in claimed.get("notifications") or []:
-                    ok, pid, err = deliver(cfg, n)
-                    rep = await call(action="report", notification_id=n["notification_id"], ok=ok,
-                                     provider_id=pid, error=err)
-                    print(f"{n['notification_id']} {n['channel']} {'SENT ' + str(pid) if ok else 'FAILED ' + str(err)}"
-                          f" -> {rep.get('status')}")
+            if check:
+                print(json.dumps({"config": {k: v for k, v in cfg.items() if k != "api_key"},
+                                  "server": await call(action="humans")}, indent=2, default=str))
+                return
+            if test:
+                ch = next(iter(cfg["channels"]))
+                print("test queued:", await call(action="test", to=f"human:{cfg['human']}", channel=ch))
+            claimed = await call(action="claim", name=cfg["human"], runner_host=socket.gethostname())
+            if claimed.get("error"):
+                sys.exit(f"claim failed: {claimed['error']}")
+            for n in claimed.get("notifications") or []:
+                ok, pid, err = deliver(cfg, n)
+                rep = await call(action="report", notification_id=n["notification_id"], ok=ok,
+                                 provider_id=pid, error=err)
+                print(f"{n['notification_id']} {n['channel']} {'SENT ' + str(pid) if ok else 'FAILED ' + str(err)}"
+                      f" -> {rep.get('status')}")
 
-            finally:
-                await s.call_tool("memory_end_session", {"session_id": sid, "summary": "notify pass"})
 
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "--hook":
