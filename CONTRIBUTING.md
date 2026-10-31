@@ -7,7 +7,8 @@
 - **Do new work on a branch:** `feat/<topic>` for features, `fix/<topic>` for fixes, `docs/<topic>` for documentation.
 - **Push the branch early and often.** Pushing is a safety net, not a release.
 - **Merge to `main` only when the work is proven:** tests and lint pass, and the change has run clean on a live deployment. For the maintainers, that deployment is the home box.
-- **Exception:** a small, urgent fix to something broken in production may go straight to `main`.
+- **Merge through a pull request.** `main` is protected: it needs a pull request and green CI (lint, test, docker).
+- **Exception:** a small, urgent fix to something broken in production may be pushed straight to `main` by a maintainer, noted afterwards.
 
 ## Before you push
 
