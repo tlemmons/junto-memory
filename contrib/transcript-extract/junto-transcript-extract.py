@@ -27,11 +27,17 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+# Cron's PATH has no ~/.local/bin, where the claude CLI installs (the 10-31
+# extractor run failed on every transcript with "No such file: 'claude'").
+CLAUDE_BIN = (os.environ.get("CLAUDE_BIN") or shutil.which("claude")
+              or str(Path("~/.local/bin/claude").expanduser()))
 
 URL = os.environ.get("JUNTO_MCP_URL", "http://localhost:8080/mcp")
 API_KEY = os.environ.get("JUNTO_API_KEY")
@@ -146,7 +152,7 @@ def extract(chunk, model, max_records):
     # extracts itself), instructions as the system prompt, and a neutral cwd so
     # no project CLAUDE.md is discovered. --bare would be cleaner but needs an
     # API key; this keeps the run on the subscription.
-    cmd = ["claude", "-p", "Extract records from the transcript excerpt on stdin.",
+    cmd = [CLAUDE_BIN, "-p", "Extract records from the transcript excerpt on stdin.",
            "--system-prompt", prompt, "--output-format", "json", "--max-turns", "1",
            "--tools", "", "--strict-mcp-config", "--no-session-persistence"]
     if model:

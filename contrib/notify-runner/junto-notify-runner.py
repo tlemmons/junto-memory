@@ -32,12 +32,18 @@ Usage:
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
 from pathlib import Path
+
+# Cron's PATH has no ~/.local/bin, where the claude CLI installs (the 10-31
+# extractor run failed on every transcript with "No such file: 'claude'").
+CLAUDE_BIN = (os.environ.get("CLAUDE_BIN") or shutil.which("claude")
+              or str(Path("~/.local/bin/claude").expanduser()))
 
 CONFIG = Path(os.environ.get("JUNTO_NOTIFY_CONFIG", "~/.config/junto/notify-runner.json")).expanduser()
 DEADLINE = int(os.environ.get("JUNTO_NOTIFY_DEADLINE", "600"))
@@ -101,7 +107,7 @@ def deliver(cfg, n) -> tuple:
     with tempfile.TemporaryDirectory() as tmp:
         sp = Path(tmp) / "settings.json"
         sp.write_text(json.dumps(settings))
-        cmd = ["claude", "-p", prompt, "--allowedTools", f"ToolSearch,{ch['tool']}",
+        cmd = [CLAUDE_BIN, "-p", prompt, "--allowedTools", f"ToolSearch,{ch['tool']}",
                "--settings", str(sp), "--model", cfg.get("model", "haiku"), "--max-turns", "5",
                "--no-session-persistence", "--output-format", "json"]
         try:
@@ -109,6 +115,8 @@ def deliver(cfg, n) -> tuple:
                                   timeout=180, cwd=tmp)
         except subprocess.TimeoutExpired:
             return False, None, "claude -p timed out"
+        except OSError as e:
+            return False, None, f"claude -p could not start: {e}"
     try:
         out = json.loads(proc.stdout)
     except ValueError:
@@ -142,33 +150,38 @@ async def run(cfg, test=False, check=False):
             if not sid:
                 sys.exit("memory_start_session failed")
 
-            async def call(**kw):
-                # Omit None: the tool's optional args are typed str/bool, and a
-                # null fails argument validation (the 10-30 first-run bug).
-                args = {"session_id": sid, **{k: v for k, v in kw.items() if v is not None}}
-                text = _text(await s.call_tool("memory_notify", args))
-                try:
-                    return json.loads(text or "{}")
-                except ValueError:
-                    return {"error": text[:500]}
+            # End the session every pass: a once-a-minute runner that never ends
+            # its session leaves ~1,440 open notify sessions a day in active work.
+            try:
+                async def call(**kw):
+                    # Omit None: the tool's optional args are typed str/bool, and a
+                    # null fails argument validation (the 10-30 first-run bug).
+                    args = {"session_id": sid, **{k: v for k, v in kw.items() if v is not None}}
+                    text = _text(await s.call_tool("memory_notify", args))
+                    try:
+                        return json.loads(text or "{}")
+                    except ValueError:
+                        return {"error": text[:500]}
 
-            if check:
-                print(json.dumps({"config": {k: v for k, v in cfg.items() if k != "api_key"},
-                                  "server": await call(action="humans")}, indent=2, default=str))
-                return
-            if test:
-                ch = next(iter(cfg["channels"]))
-                print("test queued:", await call(action="test", to=f"human:{cfg['human']}", channel=ch))
-            claimed = await call(action="claim", name=cfg["human"], runner_host=socket.gethostname())
-            if claimed.get("error"):
-                sys.exit(f"claim failed: {claimed['error']}")
-            for n in claimed.get("notifications") or []:
-                ok, pid, err = deliver(cfg, n)
-                rep = await call(action="report", notification_id=n["notification_id"], ok=ok,
-                                 provider_id=pid, error=err)
-                print(f"{n['notification_id']} {n['channel']} {'SENT ' + str(pid) if ok else 'FAILED ' + str(err)}"
-                      f" -> {rep.get('status')}")
+                if check:
+                    print(json.dumps({"config": {k: v for k, v in cfg.items() if k != "api_key"},
+                                      "server": await call(action="humans")}, indent=2, default=str))
+                    return
+                if test:
+                    ch = next(iter(cfg["channels"]))
+                    print("test queued:", await call(action="test", to=f"human:{cfg['human']}", channel=ch))
+                claimed = await call(action="claim", name=cfg["human"], runner_host=socket.gethostname())
+                if claimed.get("error"):
+                    sys.exit(f"claim failed: {claimed['error']}")
+                for n in claimed.get("notifications") or []:
+                    ok, pid, err = deliver(cfg, n)
+                    rep = await call(action="report", notification_id=n["notification_id"], ok=ok,
+                                     provider_id=pid, error=err)
+                    print(f"{n['notification_id']} {n['channel']} {'SENT ' + str(pid) if ok else 'FAILED ' + str(err)}"
+                          f" -> {rep.get('status')}")
 
+            finally:
+                await s.call_tool("memory_end_session", {"session_id": sid, "summary": "notify pass"})
 
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "--hook":
