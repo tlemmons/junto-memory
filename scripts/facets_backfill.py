@@ -38,11 +38,17 @@ os.environ.setdefault("JUNTO_CLAIM_GATE_URL", "http://localhost:11434/v1")
 os.environ.setdefault("JUNTO_FACETS_ENABLED", "true")
 # Use the server's model choice: without these the backfill fell back to
 # phi4:14b while live writes used the .env extract model (found 10-31).
+# Same for the sage-router endpoint + token (design:sage-inference-router-v0);
+# the fallback is the host's own Ollama, not the container's host.docker.internal.
 for _line in (REPO / ".env").read_text().splitlines():
     _k, _, _v = _line.strip().partition("=")
     if _k in ("JUNTO_CLAIM_GATE_MODEL", "JUNTO_CLAIM_GATE_EXTRACT_MODEL",
-              "JUNTO_CLAIM_GATE_EXTRACT_REASONING") and _v:
+              "JUNTO_CLAIM_GATE_EXTRACT_REASONING", "JUNTO_CLAIM_GATE_API_KEY") and _v:
         os.environ.setdefault(_k, _v)
+    elif _k == "JUNTO_CLAIM_GATE_URL" and _v and "host.docker.internal" not in _v:
+        os.environ["JUNTO_CLAIM_GATE_URL"] = _v
+os.environ.setdefault("JUNTO_CLAIM_GATE_FALLBACK_URL", "http://localhost:11434/v1")
+os.environ.setdefault("JUNTO_FACETS_TASK", "backfill")
 
 from shared_memory import claim_gate, facets  # noqa: E402
 
