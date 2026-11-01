@@ -223,7 +223,7 @@ async def run_batch(db, chroma, batch, project=None, dry_run=False):
 # batch yields the GPU when its model is not loaded and no card has room.
 ROUTER_STATUS_URL = os.environ.get("JUNTO_ROUTER_STATUS_URL",
                                    "http://192.168.15.240:11500/v1/status")
-MODEL_NEED_GB = 18.0   # qwen3.8:27b resident size, rounded up
+MODEL_NEED_GB = 19.0   # qwen3.8:27b resident size at num_ctx 8192 (18.4 GB, 11-01), rounded up
 
 
 def _gpu_busy() -> str:
