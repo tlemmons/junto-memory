@@ -17,6 +17,12 @@ forever. This turns age into an exponential multiplier on relevance:
 Docs without a facet row (specs, store docs, unextracted learnings) never
 decay, so they rank as they did before. Gated per project by the
 `shelf_life_decay` query_config flag, default OFF until the replay eval runs.
+
+/recall multiplies its continuous score by the factor. memory_query does NOT
+(v2, 10-31): it sorts by relevance BAND, and multiplying before banding
+dropped on-topic rows two bands (the 10-30 replay, learning_9fb54b43c3819d1d).
+There a row past its half-life (factor < STALE_BELOW) only sinks to the bottom
+of its own band, after verified-first.
 """
 
 from typing import Optional
@@ -28,6 +34,8 @@ HALF_LIFE_DAYS = {
 # Never drop a doc below this fraction of its raw relevance: decay reorders,
 # it does not erase. A 1-year-old volatile row keeps 20%, not ~0.
 DECAY_FLOOR = 0.2
+# memory_query tiebreak: a row at or past one half-life sinks within its band.
+STALE_BELOW = 0.5
 
 
 def decay_factor(shelf_life: Optional[str], verification: Optional[str],

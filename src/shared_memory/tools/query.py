@@ -11,6 +11,7 @@ from shared_memory.app import mcp
 from shared_memory.auth import collection_allowed, project_allowed, scoped_projects
 from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import OVERLAP_WINDOW_HOURS, PROJECT_PREFIX, SHARED_PREFIX
+from shared_memory.decay import STALE_BELOW
 from shared_memory.helpers import (
     cleanup_stale_signals,
     embed_query_once,
@@ -385,8 +386,9 @@ async def memory_query(
         }, indent=2)
 
     # Shelf-life decay (interface:ranking-decay-v0), per-project flag, default
-    # OFF. Ages the BAND input only; the reported relevance stays raw and a
-    # decayed row carries `decay` so the reader can see why it sank.
+    # OFF. v2: a within-band tiebreak only, never a band change (decay.py). The
+    # reported relevance stays raw and a decayed row carries `decay` so the
+    # reader can see why it sank.
     if _qcfg.get("shelf_life_decay"):
         try:
             from shared_memory.decay import age_days_of, decay_factor
@@ -408,14 +410,16 @@ async def memory_query(
     # This prevents old docs from outranking fresh ones on the same topic.
     def _sort_key(r):
         # Relevance band: >70% = 0 (best), 50-70% = 1, <50% = 2
-        pct = int(r["relevance"].rstrip("%")) / 100 * r.get("_decay", 1.0)
+        pct = int(r["relevance"].rstrip("%")) / 100
         band = 0 if pct > 0.70 else (1 if pct > 0.50 else 2)
         # Within band: verified first (interface:verification-state-v0), then
-        # newest first. Verification never lifts a doc across a band.
+        # rows past their half-life last (decay flag), then newest first.
+        # Neither lifts nor drops a doc across a band.
         verified = 0 if r.get("verification") == "verified" else 1
+        stale = 1 if r.get("_decay", 1.0) < STALE_BELOW else 0
         ts = parse_timestamp(r.get("updated") or r.get("created"))
         epoch = ts.timestamp() if ts else 0
-        return (band, verified, -epoch)
+        return (band, verified, stale, -epoch)
 
     results.sort(key=_sort_key)
     # Exact identifier hits keep their slots; the vector rows fill the rest.

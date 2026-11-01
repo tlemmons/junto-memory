@@ -1,6 +1,7 @@
 """Shelf-life decay (Memento #2, interface:ranking-decay-v0)."""
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -96,10 +97,32 @@ async def test_flag_off_keeps_todays_order(mq):
     assert all("decay" not in r for r in rows)
 
 
-async def test_flag_on_sinks_stale_volatile_and_reports_raw_relevance(mq):
+async def test_flag_on_never_moves_a_row_across_bands(mq):
+    # v2: the 10-30 replay showed band-crossing hurt memory_query
+    # (learning_9fb54b43c3819d1d). The stale 90% row stays in band 0.
     mq["shelf_life_decay"] = True
     rows = json.loads(await q.memory_query("s", "x", project="x", limit=5))["results"]
-    assert [r["id"] for r in rows] == ["learning_new", "learning_old"]
-    old = rows[1]
+    assert [r["id"] for r in rows] == ["learning_old", "learning_new"]
+    old = rows[0]
     assert old["relevance"] == "90%" and old["decay"] == DECAY_FLOOR
     assert "_decay" not in old
+
+
+async def test_flag_on_sinks_stale_row_within_its_band(mq, monkeypatch):
+    # Same band (both ~80%). The volatile row is NEWER but past its half-life
+    # (40 days > 21); the durable row is older but inside its 90-day half-life.
+    now = datetime.now(timezone.utc)
+    proj = _QCol([("learning_vol", 0.2, (now - timedelta(days=40)).isoformat()),
+                  ("learning_dur", 0.2, (now - timedelta(days=60)).isoformat())])
+    db = _DB([{"_id": "learning_vol", "shelf_life": "volatile"},
+              {"_id": "learning_dur", "shelf_life": "durable"}])
+
+    async def _ret(v):
+        return v
+    monkeypatch.setattr(q, "get_project_collection", lambda c, p: _ret(proj))
+    monkeypatch.setattr(q, "get_mongo", lambda: db)
+    rows = json.loads(await q.memory_query("s", "x", project="x", limit=5))["results"]
+    assert [r["id"] for r in rows] == ["learning_vol", "learning_dur"]   # off: newest first
+    mq["shelf_life_decay"] = True
+    rows = json.loads(await q.memory_query("s", "x", project="x", limit=5))["results"]
+    assert [r["id"] for r in rows] == ["learning_dur", "learning_vol"]
