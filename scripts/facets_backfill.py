@@ -47,7 +47,6 @@ for _line in (REPO / ".env").read_text().splitlines():
         os.environ.setdefault(_k, _v)
     elif _k == "JUNTO_CLAIM_GATE_URL" and _v and "host.docker.internal" not in _v:
         os.environ["JUNTO_CLAIM_GATE_URL"] = _v
-os.environ.setdefault("JUNTO_CLAIM_GATE_FALLBACK_URL", "http://localhost:11434/v1")
 os.environ.setdefault("JUNTO_FACETS_TASK", "backfill")
 
 from shared_memory import claim_gate, facets  # noqa: E402

@@ -52,6 +52,8 @@ Config (env):
                             gives a connect error, 502 or 503. Never on other
                             statuses (429 budget_exhausted, 400 not_allowlisted).
                             design:sage-inference-router-v0 amendment A1.
+                            Unset on sage since 2026-11-01: the router now owns
+                            :11434 too, so a "fallback" there is the same process.
   JUNTO_FACETS_TASK         X-Infer-Task the facets calls send (default
                             "facets"; the nightly backfill sets "backfill").
 """
