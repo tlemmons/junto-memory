@@ -6,6 +6,28 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+## [1.43.0] - 2026-11-02
+
+Person notifications (`memory_notify`), more redaction detectors, and inference-router support for the model-backed features. Everything model-backed stays off unless configured. Shelf-life decay still ships OFF.
+
+### Added
+- **`memory_notify`** (`interface:human-notify-v0`), tool count 64 → 65. Junto can send a message to a person. Actions: `send` / `test` (redacted, capped at 3,000 chars, 20 per person per day, the same subject from the same sender deduped within 1h); `register` / `humans` (each person registers their own Gmail/Slack; changing someone else's needs a human or admin); `status`; `claim` / `report` (the runner protocol). New collection `notifications` (90-day TTL).
+- **`contrib/notify-runner/`**: per-person delivery runner (cron or Task Scheduler, every minute) that sends through Claude Code's connectors with `claude -p`. Keeps one long-lived session per runner.
+- **Redaction detectors**: `cli_secret` (the value after `--token` / `--password` / `--api-key` …; `$VAR` and short values are left alone) and `encoded_token` (`eyJ` + 60 or more base64 chars).
+- **`redaction_events`**: one row per write that had something removed (kind, field, key name, length, never the value). TTL 365 days.
+- **`scripts/memento_metrics.py`**: nightly snapshot plus report for the 1.42.0 features.
+- **Claim gate / facets behind an inference router** (`design:sage-inference-router-v0`). New optional env vars: `JUNTO_CLAIM_GATE_API_KEY` (Bearer to the primary URL), `JUNTO_CLAIM_GATE_FALLBACK_URL` (one retry on connect error / 502 / 503), `JUNTO_CLAIM_GATE_REASONING` (judge reasoning_effort), `JUNTO_FACETS_TASK`. Calls carry `X-Infer-Task`.
+- **Runner**: the `X-Infer-App` / `X-Infer-Task` headers, an optional `ollama_token_file`, and retries on 503 `no_capacity` (honours Retry-After, at most 120s, up to 5 tries).
+
+### Changed
+- **Shelf-life decay v2**: in `memory_query`, decay is now only a tiebreak within a relevance band. The band uses raw relevance, and a row past its half-life sinks to the bottom of its band. `/recall` is unchanged. The flag stays **off**.
+- The nightly facets backfill uses the server's `JUNTO_CLAIM_GATE_EXTRACT_MODEL`, and defers when its model isn't loaded and no GPU has room (it reads router `/v1/status`; if that fails, it runs anyway).
+- Transcript extractor: v2 prompt (skips what the session already saved; never writes retracted claims, point-in-time state or personal details); it now runs on Windows; it finds `claude` when run from cron.
+
+### Fixed
+- Notify runner: omits None args in `memory_notify` calls; a missing CLI is reported as a failed delivery instead of a crash.
+- Docstrings that still named phi4 as the judge and claudeControl as the alert consumer.
+
 ## [1.42.0] - 2026-10-30
 
 Four memory-quality features (the Memento comparison build order). Two of them change what agents see by default: secret redaction on write, and rejected docs dropping out of search. Shelf-life decay ships OFF.
