@@ -942,7 +942,7 @@ async def memory_send_message(
     # First crossing of the hard ceiling for this sender in this hour:
     # compute the incident window, write an alert, insert system@junto
     # recovery notices into both endpoints' inboxes, suspend the agent,
-    # and fire an out-of-band webhook to claudeControl. All inside a
+    # and fire the out-of-band alert webhook if configured. All inside a
     # try/except so a malfunction in the escalation path never breaks
     # the underlying send.
     if hard_trip:
