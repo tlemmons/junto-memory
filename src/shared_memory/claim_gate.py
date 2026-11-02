@@ -3,7 +3,7 @@
 Implements interface:claim-extraction-v0 v1.0.3 VERBATIM on top of the
 threshold stage in tools/storage.py. Pipeline per the contract:
 
-  EXTRACT (phi4:14b, temp 0, title + first ~3000 chars, max_tokens 400,
+  EXTRACT (JUNTO_CLAIM_GATE_EXTRACT_MODEL, temp 0, title + first ~3000 chars, max_tokens 400,
   non-empty validate) → title-anchor claims ("{title}\\n{claim}") →
   CLASSIFY (CONTRADICTS / CONSISTENT / UNRELATED, one word, substring
   parse, no-match → CONSISTENT fail-quiet).
@@ -16,9 +16,12 @@ Contract amendments honored here:
 - Extracted claims are PERSISTED in mongo `learning_claims`, tagged with
   RECIPE_VERSION; a recipe bump invalidates the cache lazily (mismatched
   rows are re-extracted on next touch).
-- The judge model for THIS consumer is phi4:14b (precision-decisive:
-  a false CONTRADICTS flags a legitimate write). Do NOT normalize to
-  gpt-oss — that variant belongs to junto-sub's trap-escalation check.
+- The judge is precision-decisive (a false CONTRADICTS flags a legitimate
+  write). The contract's reference judge was phi4:14b; on sage it has been
+  qwen3.8:27b since 2026-10-31, set via JUNTO_CLAIM_GATE_MODEL (the router's
+  junto judge allowlist is [qwen3.8:27b] only, so phi4 now gets 400
+  not_allowlisted). Do NOT normalize to gpt-oss — that variant belonged to
+  junto-sub's trap-escalation check.
 
 Known limit (do not overclaim): temporal invalidation (dataset P12,
 "A was true, the world changed") is missed by every tested model.
@@ -35,6 +38,8 @@ Config (env):
                             via the compose host-gateway extra_host).
   JUNTO_CLAIM_GATE_MODEL    default phi4:14b (contract reference model). The
                             CLASSIFY judge, and the extractor unless overridden.
+                            sage's .env MUST set it (qwen3.8:27b): the code
+                            default is no longer allowlisted by the router.
   JUNTO_CLAIM_GATE_EXTRACT_MODEL      optional model for claim EXTRACT and the
                             facets (operation / shelf_life / trigger); unset →
                             JUNTO_CLAIM_GATE_MODEL. The judge stays on
