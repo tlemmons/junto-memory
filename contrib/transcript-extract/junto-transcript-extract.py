@@ -180,6 +180,20 @@ def _text(result):
         return ""
 
 
+async def server_features():
+    """The server's feature switches (memory_health `features`), read before any
+    model call so a disabled server costs nothing. None = the server predates
+    the switch (< 1.43.1)."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+    headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY else None
+    async with streamablehttp_client(URL, headers=headers) as streams:
+        async with ClientSession(streams[0], streams[1]) as s:
+            await s.initialize()
+            health = json.loads(_text(await s.call_tool("memory_health", {"include_storage": False})) or "{}")
+    return health.get("features")
+
+
 async def write_records(batch, dry_run):
     """batch: list of (junto_project, transcript_path, session_id, record)."""
     if dry_run or not batch:
@@ -189,7 +203,8 @@ async def write_records(batch, dry_run):
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
     headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY else None
-    written = dupes = 0
+    written = dupes = disabled = 0
+    off_projects = set()
     async with streamablehttp_client(URL, headers=headers) as streams:
         async with ClientSession(streams[0], streams[1]) as s:
             await s.initialize()
@@ -203,6 +218,9 @@ async def write_records(batch, dry_run):
             if not sid:
                 raise RuntimeError(f"start_session failed: {start}")
             for project, path, cc_sid, r in batch:
+                if project in off_projects:
+                    disabled += 1
+                    continue
                 probe = json.loads(_text(await s.call_tool("memory_query", {
                     "session_id": sid, "query": f"{r['title']}\n{r['details'][:300]}",
                     "project": project, "limit": 1, "include_shared": False,
@@ -213,15 +231,24 @@ async def write_records(batch, dry_run):
                     continue
                 details = (f"{r['details']}\n\n---\nProvenance: transcript-extract · kind={r['kind']} · "
                            f"cc_session={cc_sid} · lines {r.get('lines', '?')} · {path}")
-                await s.call_tool("memory_record_learning", {
+                res = json.loads(_text(await s.call_tool("memory_record_learning", {
                     "session_id": sid, "project": project, "title": r["title"], "details": details,
                     "tags": ["transcript-extract", f"kind:{r['kind']}", f"cc-session:{cc_sid}"],
-                })
+                })) or "{}")
+                if res.get("code") == "transcript_extract_disabled":
+                    # Switched off for this project (query_config override).
+                    print(f"transcript extraction disabled on the server for {project}", file=sys.stderr)
+                    off_projects.add(project)
+                    disabled += 1
+                    continue
                 written += 1
             await s.call_tool("memory_end_session", {
                 "session_id": sid, "summary": f"transcript extract: {written} written, {dupes} duplicates skipped",
             })
-    return {"written": written, "duplicates": dupes}
+    out = {"written": written, "duplicates": dupes}
+    if disabled:
+        out["disabled"] = disabled
+    return out
 
 
 def main():
@@ -234,6 +261,16 @@ def main():
     projects = cfg.get("projects") or {}
     if not projects:
         print(f"no opted-in projects in {CONFIG}; nothing to do")
+        return
+    try:
+        features = asyncio.run(server_features())
+    except Exception as e:
+        print(f"cannot reach {URL} to check the server switch: {e}", file=sys.stderr)
+        sys.exit(2)
+    if features is None:
+        print("server predates the transcript_extract switch (< 1.43.1); proceeding", file=sys.stderr)
+    elif not features.get("transcript_extract"):
+        print("transcript extraction is disabled on the server (query_config transcript_extract); nothing to do")
         return
     state = load_json(STATE, {})
     model = cfg.get("model", "sonnet")

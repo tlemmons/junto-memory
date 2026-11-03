@@ -51,6 +51,13 @@ DEFAULT_RERANK_MIN = 0.05  # top-3 rows scoring 0.02-0.5 were still mostly usefu
 # OFF until the replay eval shows it helps (Memento #2).
 DEFAULT_SHELF_LIFE_DECAY = False
 
+# Transcript extraction (contrib/transcript-extract, design:transcript-extraction-v0).
+# OFF by default: the operator opts a server (or one project) in. When off,
+# memory_record_learning rejects transcript-extract writes, and the extractor
+# reads memory_health features.transcript_extract and exits before any model
+# call (so no API spend).
+DEFAULT_TRANSCRIPT_EXTRACT = False
+
 # Allowed config keys + their types (used by set_config_value).
 CONFIG_KEYS = {
     "default_expand": bool,
@@ -64,6 +71,7 @@ CONFIG_KEYS = {
     "rerank": bool,
     "rerank_min": float,
     "shelf_life_decay": bool,
+    "transcript_extract": bool,
 }
 
 DEFAULT_SCOPE = "__default__"
@@ -91,6 +99,7 @@ def _default_config_dict() -> Dict[str, Any]:
         "rerank": DEFAULT_RERANK,
         "rerank_min": DEFAULT_RERANK_MIN,
         "shelf_life_decay": DEFAULT_SHELF_LIFE_DECAY,
+        "transcript_extract": DEFAULT_TRANSCRIPT_EXTRACT,
     }
 
 

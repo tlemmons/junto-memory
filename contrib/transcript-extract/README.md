@@ -18,6 +18,25 @@ verification state (interface:verification-state-v0), i.e. 1.42.0 or newer.
 Keys are directory names under `~/.claude/projects/`; values are junto
 projects. No file, or an empty map, makes every run a no-op.
 
+## Server switch (1.43.1+)
+
+The server must also allow it: query_config `transcript_extract`, **off by
+default**. An operator turns it on for the whole server, or for one project:
+
+```python
+memory_admin(action="query_set_config", key="transcript_extract", value=True)                     # server-wide
+memory_admin(action="query_set_config", key="transcript_extract", value=False, project="nimbus")  # one project off
+```
+
+Each run first reads `memory_health` → `features.transcript_extract` (the
+server default). If it is off, the run exits **before any model call**, so a
+disabled server costs nothing. A per-project override is enforced at write
+time: `memory_record_learning` rejects `transcript-extract`-tagged writes
+with `code: transcript_extract_disabled`, and the run skips the rest of that
+project. In that case the model call has already been paid for. A server
+older than 1.43.1 has no switch; the run warns and proceeds. An unreachable
+server makes the run exit 2.
+
 ## Run
 
 ```bash

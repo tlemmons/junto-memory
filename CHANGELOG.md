@@ -6,6 +6,18 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+## [1.43.1] - 2026-11-03
+
+An off switch for transcript extraction, which is now **off by default**.
+
+### Added
+- **query_config `transcript_extract`** (bool, default **off**; server-wide or per project via `memory_admin query_set_config`). When off, `memory_record_learning` rejects writes tagged `transcript-extract` with `code: transcript_extract_disabled`.
+- **`memory_health` → `features`**: `{"transcript_extract": bool}` (server default). This is an additive field.
+- `contrib/transcript-extract` reads that field before any model call and exits if extraction is off. A per-project rejection skips the rest of that project. An unreachable server makes the run exit 2.
+
+### Upgrade note
+- A server that already runs the extractor must turn the flag on after upgrading: `memory_admin(action="query_set_config", key="transcript_extract", value=true)`. Otherwise the next run does nothing.
+
 ## [1.43.0] - 2026-11-02
 
 Person notifications (`memory_notify`), more redaction detectors, and inference-router support for the model-backed features. Everything model-backed stays off unless configured. Shelf-life decay still ships OFF.
