@@ -34,6 +34,9 @@ POSITIVES = [
      "eyJhIjoiMjlm", "encoded_token"),
     ("mysql --password=Qz8vLm2kRt7x -h db", "Qz8vLm2kRt7x", "cli_secret"),
     ("tool --api-key a8F3kLq9Zx2Vb7Nm", "a8F3kLq9Zx2Vb7Nm", "cli_secret"),
+    ("DB_NIMBUS_STAGING_PASS=Qm7vXk2LpR9tWz4NbH6jYc3D", "Qm7vXk2LpR9tWz4NbH6jYc3D", "assigned_secret"),
+    ("- junto_staging_ro @ 10.0.0.5:3306 : Hq4zPw8NxL2vKt6RmB9sYd3F", "Hq4zPw8NxL2vKt6RmB9sYd3F", "conn_secret"),
+    ("user: app_rw pass: 4f9a2c7e1b8d3f6a9c2e5b8d1f4a7c0e", "4f9a2c7e1b8d3f6a9c2e5b8d", "assigned_secret"),
 ]
 
 NEGATIVES = [
@@ -58,6 +61,12 @@ NEGATIVES = [
     "pass --token $CF_TUNNEL_TOKEN from the env",
     "the --password flag is required",
     'header eyJhbGciOiJIUzI1NiJ9 alone is not a token',
+    "memory@junto: msg_abc123def456 answered",
+    "db@host:27017: up",
+    "bypass: true",
+    "the pass = stale check",
+    "Reviews PASS: f1c17da5 on staging",
+    "grep PASS = sku=99.999|x9_ab",
 ]
 
 

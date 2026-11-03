@@ -11,7 +11,8 @@ Two classes of detector:
    ghp_…, sk-ant-…, smk_…, JWTs). These are near-zero false-positive, so they
    redact unconditionally.
 2. GENERIC assignments: ``password=…``, ``"api_key": "…"``, ``token: …``,
-   ``Authorization: Bearer …`` and ``scheme://user:PASS@host``. Prose like
+   ``Authorization: Bearer …``, ``scheme://user:PASS@host`` and
+   ``user @ host:port : PASS``. Prose like
    "the password is in 1Password" must survive, so the value has to look like
    a credential: no whitespace, at least 8 chars, not a placeholder
    (``<…>``, ``${…}``, ``$VAR``, ``xxxx``, ``***``, ``changeme``…), and
@@ -68,10 +69,17 @@ _AUTH_HEADER_RE = re.compile(
 # MONGO_PASSWORD, db_password, x-api-key, client_secret all hit.
 _ASSIGN_RE = re.compile(
     r"(?P<pre>\b[A-Za-z0-9_.\-]*?"
-    r"(?:password|passwd|pwd|secret|api[_\-]?key|apikey|access[_\-]?key|auth[_\-]?token|token|credential)"
+    r"(?:password|passwd|pwd|pass|secret|api[_\-]?key|apikey|access[_\-]?key|auth[_\-]?token|token|credential)"
     r"[\"']?\s*(?:=|:|=>)\s*[\"']?)"
     r"(?P<val>[^\s\"'`,;&}{)\]]{8,})",
     re.IGNORECASE,
+)
+
+# user @ host:PORT : secret — a connection handle written as prose (infra-team
+# 2026-11-03: two staging DB passwords got through in this shape). The port is
+# required so plain agent addressing ("memory@junto: …") never matches.
+_CONN_HANDLE_RE = re.compile(
+    r"(?P<pre>\b[\w.\-]+\s*@\s*[\w.\-]+:\d{2,5}\s*:\s*)(?P<val>[^\s\"'`,;]{12,})"
 )
 
 _PLACEHOLDER_RE = re.compile(
@@ -156,6 +164,10 @@ def redact_secrets(text: str, hits: Optional[List[Dict]] = None) -> Tuple[str, D
                 return m.group(0)
             if kind != "url_password" and not _looks_secret(val):
                 return m.group(0)
+            # A bare upper-case PASS is a test/review verdict ("Reviews PASS:
+            # f1c17da5"), not a credential key; DB_PASS / pass: still hit.
+            if kind == "assigned_secret" and _key_label(kind, m.group("pre")) == "PASS":
+                return m.group(0)
             if kind == "url_password" and (len(val) < 6 or _PLACEHOLDER_RE.match(val)
                                            or val[0] in "<$"):
                 return m.group(0)
@@ -167,6 +179,7 @@ def redact_secrets(text: str, hits: Optional[List[Dict]] = None) -> Tuple[str, D
     text = _AUTH_HEADER_RE.sub(_value_sub("auth_header"), text)
     text = _CLI_FLAG_RE.sub(_value_sub("cli_secret"), text)
     text = _ASSIGN_RE.sub(_value_sub("assigned_secret"), text)
+    text = _CONN_HANDLE_RE.sub(_value_sub("conn_secret"), text)
     return text, found
 
 
