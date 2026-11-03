@@ -29,6 +29,9 @@ from shared_memory.intent import get_current_context_tokens
 from shared_memory.op_log import emit_op_log_from_context, fetch_embedding_for_op_log
 from shared_memory.state import active_sessions
 
+# Tag the transcript extractor puts on every learning it writes.
+TRANSCRIPT_EXTRACT_TAG = "transcript-extract"
+
 logger = logging.getLogger(__name__)
 
 
@@ -388,6 +391,25 @@ async def memory_record_learning(
         pass
 
     tags = tags or []
+
+    # Transcript-extraction off switch (query_config `transcript_extract`,
+    # default OFF). Checked before any write work so a disabled server stores
+    # nothing from the extractor.
+    if TRANSCRIPT_EXTRACT_TAG in tags:
+        from shared_memory.query_config import get_effective_config
+        try:
+            _te_on = bool(get_effective_config(get_mongo(), project).get("transcript_extract"))
+        except Exception:
+            _te_on = False
+        if not _te_on:
+            return json.dumps({
+                "error": "transcript extraction is disabled on this server"
+                         + (f" for project '{normalize_project(project)}'" if project else ""),
+                "code": "transcript_extract_disabled",
+                "hint": "An operator enables it with memory_admin(action='query_set_config', "
+                        "key='transcript_extract', value=true[, project=...]).",
+            })
+
     chroma = await get_chroma()
     session_info = active_sessions[session_id]
     now = utc_now_iso()
