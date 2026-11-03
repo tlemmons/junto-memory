@@ -6,6 +6,11 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+## [1.43.2] - 2026-11-03
+
+### Fixed
+- **Redaction gaps.** Two shapes were stored in plaintext: `user @ host:PORT : secret` connection handles (new `conn_secret` kind; the port is required, so `agent@project: …` never matches) and assignment keys ending in `PASS` (`DB_X_PASS=`, `MYSQL_PASS=`, `pass:`). A bare upper-case `PASS:` stays untouched because it is a review/test verdict. A sweep of 7,279 stored messages found 4 real credentials in these shapes and no new false positives after the PASS exclusion.
+
 ## [1.43.1] - 2026-11-03
 
 An off switch for transcript extraction, which is now **off by default**.
