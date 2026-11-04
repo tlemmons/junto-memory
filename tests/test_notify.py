@@ -59,11 +59,11 @@ def test_only_creator_or_human_can_change_channels(db):
 
 def test_send_queues_redacts_and_warns_unverified(db):
     _reg(db)
-    out = nt.enqueue(db, "human:tom", "Daily issues", "3 issues. MONGO_PASSWORD=T0mTest99", SENDER)
+    out = nt.enqueue(db, "human:tom", "Daily issues", "3 issues. MONGO_PASSWORD=FakeTst99", SENDER)
     assert out["status"] == "queued" and out["channel"] == "gmail"
     assert "not verified" in out["warning"] and out["redacted"] == {"assigned_secret": 1}
     row = db.notifications.find_one({"_id": out["notification_id"]})
-    assert "T0mTest99" not in row["body"] and row["status"] == "queued"
+    assert "FakeTst99" not in row["body"] and row["status"] == "queued"
 
 
 def test_unknown_human_and_bad_channel(db):

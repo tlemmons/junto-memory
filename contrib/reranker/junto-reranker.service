@@ -2,11 +2,12 @@
 #   cp contrib/reranker/junto-reranker.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload && systemctl --user enable --now junto-reranker
 # Binds docker0 (172.17.0.1) — needs docker up; Restart covers the boot race.
+# EDIT ExecStart: point it at YOUR junto-memory checkout (%h = your home dir).
 [Unit]
 Description=junto reranker (bge-reranker-v2-m3, GPU)
 
 [Service]
-ExecStart=/usr/bin/python3 %h/sharedUtils/junto/junto-memory/contrib/reranker/rerank_server.py --host 172.17.0.1 --port 8091
+ExecStart=/usr/bin/python3 %h/junto-memory/contrib/reranker/rerank_server.py --host 172.17.0.1 --port 8091
 Restart=always
 RestartSec=10
 

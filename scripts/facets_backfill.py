@@ -221,14 +221,17 @@ async def run_batch(db, chroma, batch, project=None, dry_run=False):
 
 # sage-router P0 (design:sage-inference-router-v0, amendment A6): the nightly
 # batch yields the GPU when its model is not loaded and no card has room.
-ROUTER_STATUS_URL = os.environ.get("JUNTO_ROUTER_STATUS_URL",
-                                   "http://192.168.15.240:11500/v1/status")
+# No default: an install without a router (e.g. the work box) skips the check.
+# sage sets it in the backfill cron line.
+ROUTER_STATUS_URL = os.environ.get("JUNTO_ROUTER_STATUS_URL", "")
 MODEL_NEED_GB = 19.0   # qwen3.8:27b resident size at num_ctx 8192 (18.4 GB, 11-01), rounded up
 
 
 def _gpu_busy() -> str:
     """Reason to defer, or '' to go. Any failure reading /status = go."""
     import httpx
+    if not ROUTER_STATUS_URL:
+        return ""
     model = claim_gate._extract_model()
     try:
         st = httpx.get(ROUTER_STATUS_URL, timeout=3.0).json()

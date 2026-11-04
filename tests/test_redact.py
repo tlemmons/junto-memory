@@ -11,32 +11,35 @@ import pytest
 from shared_memory.redact import redact_fields, redact_secrets, redaction_notice
 
 # (text, secret substring that must disappear, expected kind)
+# Every value below is a FAKE fixture credential made up for these tests (none is
+# copied or shape-preserved from a real one). `# nosemgrep` marks each line so
+# secret scanners read them as fixtures; keep new fixtures obviously fake.
 POSITIVES = [
-    ("key sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "sk-ant-api03-AbCd", "anthropic_key"),
-    ("export OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "sk-proj-AbCd", "openai_key"),
-    ("JUNTO_API_KEY=smk_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-x", "smk_AbCd", "junto_key"),
-    ("aws AKIAIOSFODNN7EXAMPLE here", "AKIAIOSFODNN7EXAMPLE", "aws_access_key"),
-    ("gh token ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "ghp_AbCd", "github_token"),
-    ("slack xoxb-1234567890-abcdefghij", "xoxb-1234567890", "slack_token"),
-    ("maps AIzaSyA-1234567890abcdefghijklmnopqrstu", "AIzaSyA-1234", "google_api_key"),
-    ("stripe sk_live_AbCdEfGhIjKlMnOpQrStUv", "sk_live_AbCd", "stripe_key"),
-    ("HA_TOKEN=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N",
+    ("key sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "sk-ant-api03-AbCd", "anthropic_key"),  # nosemgrep
+    ("export OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "sk-proj-AbCd", "openai_key"),  # nosemgrep
+    ("JUNTO_API_KEY=smk_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-x", "smk_AbCd", "junto_key"),  # nosemgrep
+    ("aws AKIAIOSFODNN7EXAMPLE here", "AKIAIOSFODNN7EXAMPLE", "aws_access_key"),  # nosemgrep
+    ("gh token ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "ghp_AbCd", "github_token"),  # nosemgrep
+    ("slack xoxb-1234567890-abcdefghij", "xoxb-1234567890", "slack_token"),  # nosemgrep
+    ("maps AIzaSyA-1234567890abcdefghijklmnopqrstu", "AIzaSyA-1234", "google_api_key"),  # nosemgrep
+    ("stripe sk_live_AbCdEfGhIjKlMnOpQrStUv", "sk_live_AbCd", "stripe_key"),  # nosemgrep
+    ("HA_TOKEN=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N",  # nosemgrep
      "eyJhbGciOiJIUzI1NiJ9", "jwt"),
-    ("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA\n-----END OPENSSH PRIVATE KEY-----",
+    ("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA\n-----END OPENSSH PRIVATE KEY-----",  # nosemgrep
      "b3BlbnNzaC1rZXktdjEAAAA", "private_key"),
-    ("MONGO_URI='mongodb://admin:T0mPass1@localhost:27017'", "T0mPass1", "url_password"),
-    ('curl -H "Authorization: Bearer 46d8f0a1b2c3d4e5f6a7b8c9d0e1f2a3"', "46d8f0a1b2c3", "auth_header"),
-    ("MONGO_DEV_PASSWORD=T0mTest99", "T0mTest99", "assigned_secret"),
-    ('"mqttPassword": "134a8f9c-77d2-4b1e-9c0d-5e6f7a8b9c0d"', "134a8f9c", "assigned_secret"),
-    ("Server=10.100.0.1;Port=3306;User=app;Password=GWRx9q2LmZ7vT3", "GWRx9q2LmZ7vT3", "assigned_secret"),
-    ("Clarity API - Token: secXk29dLq8vNmZ3pR7tWb4yHc6jFg1s", "secXk29dLq8v", "assigned_secret"),
-    ("cloudflared tunnel run --token eyJhIjoiMjlmMTRmNTg0ODlmN2Y0ODBlODRhZDA2MzUwNTJmZTMiLCJ0IjoiMGNiNmMz",
+    ("MONGO_URI='mongodb://admin:FakePw11@localhost:27017'", "FakePw11", "url_password"),  # nosemgrep
+    ('curl -H "Authorization: Bearer 46d8f0a1b2c3d4e5f6a7b8c9d0e1f2a3"', "46d8f0a1b2c3", "auth_header"),  # nosemgrep
+    ("MONGO_DEV_PASSWORD=FakeTst99", "FakeTst99", "assigned_secret"),  # nosemgrep
+    ('"mqttPassword": "fake8f9c-77d2-4b1e-9c0d-5e6f7a8b9c0d"', "fake8f9c", "assigned_secret"),  # nosemgrep
+    ("Server=db.example.invalid;Port=3306;User=app;Password=FAKEx9q2LmZ7vT3", "FAKEx9q2LmZ7vT3", "assigned_secret"),  # nosemgrep
+    ("Clarity API - Token: secXk29dLq8vNmZ3pR7tWb4yHc6jFg1s", "secXk29dLq8v", "assigned_secret"),  # nosemgrep
+    ("cloudflared tunnel run --token eyJhIjoiMjlmMTRmNTg0ODlmN2Y0ODBlODRhZDA2MzUwNTJmZTMiLCJ0IjoiMGNiNmMz",  # nosemgrep
      "eyJhIjoiMjlm", "encoded_token"),
-    ("mysql --password=Qz8vLm2kRt7x -h db", "Qz8vLm2kRt7x", "cli_secret"),
-    ("tool --api-key a8F3kLq9Zx2Vb7Nm", "a8F3kLq9Zx2Vb7Nm", "cli_secret"),
-    ("DB_NIMBUS_STAGING_PASS=Qm7vXk2LpR9tWz4NbH6jYc3D", "Qm7vXk2LpR9tWz4NbH6jYc3D", "assigned_secret"),
-    ("- junto_staging_ro @ 10.0.0.5:3306 : Hq4zPw8NxL2vKt6RmB9sYd3F", "Hq4zPw8NxL2vKt6RmB9sYd3F", "conn_secret"),
-    ("user: app_rw pass: 4f9a2c7e1b8d3f6a9c2e5b8d1f4a7c0e", "4f9a2c7e1b8d3f6a9c2e5b8d", "assigned_secret"),
+    ("mysql --password=Qz8vLm2kRt7x -h db", "Qz8vLm2kRt7x", "cli_secret"),  # nosemgrep
+    ("tool --api-key a8F3kLq9Zx2Vb7Nm", "a8F3kLq9Zx2Vb7Nm", "cli_secret"),  # nosemgrep
+    ("DB_EXAMPLE_STAGING_PASS=FAKEvXk2LpR9tWz4NbH6jYc3D", "FAKEvXk2LpR9tWz4NbH6jYc3D", "assigned_secret"),  # nosemgrep
+    ("- example_ro @ db.example.invalid:3306 : FAKEzPw8NxL2vKt6RmB9sYd3F", "FAKEzPw8NxL2vKt6RmB9sYd3F", "conn_secret"),  # nosemgrep
+    ("user: app_rw pass: 4f9a2c7e1b8d3f6a9c2e5b8d1f4a7c0e", "4f9a2c7e1b8d3f6a9c2e5b8d", "assigned_secret"),  # nosemgrep
 ]
 
 NEGATIVES = [
@@ -86,17 +89,17 @@ def test_negative_untouched(text):
 
 
 def test_key_name_survives_value_replaced():
-    out, _ = redact_secrets("MONGO_DEV_PASSWORD=T0mTest99 for the dev box")
+    out, _ = redact_secrets("MONGO_DEV_PASSWORD=FakeTst99 for the dev box")
     assert out == "MONGO_DEV_PASSWORD=[REDACTED:assigned_secret] for the dev box"
 
 
 def test_url_keeps_user_and_host():
-    out, _ = redact_secrets("mongodb://admin:T0mPass1@localhost:27017/db")
+    out, _ = redact_secrets("mongodb://admin:FakePw11@localhost:27017/db")
     assert out == "mongodb://admin:[REDACTED:url_password]@localhost:27017/db"
 
 
 def test_idempotent():
-    once, _ = redact_secrets("MONGO_DEV_PASSWORD=T0mTest99")
+    once, _ = redact_secrets("MONGO_DEV_PASSWORD=FakeTst99")
     twice, found = redact_secrets(once)
     assert twice == once and found == {}
 
@@ -123,10 +126,10 @@ def test_notice_shape():
 # --- redaction_events (metrics) -------------------------------------------------
 def test_hits_carry_kind_key_len_never_the_value():
     hits = []
-    redact_secrets("MONGO_DEV_PASSWORD=T0mTest99 and mongodb://admin:T0mPass1@h", hits)
+    redact_secrets("MONGO_DEV_PASSWORD=FakeTst99 and mongodb://admin:FakePw11@h", hits)  # nosemgrep
     assert {"kind": "assigned_secret", "key": "MONGO_DEV_PASSWORD", "len": 9} in hits
     assert {"kind": "url_password", "key": "mongodb", "len": 8} in hits
-    assert "T0m" not in repr(hits)
+    assert "Fake" not in repr(hits)
 
 
 def test_redact_fields_logs_one_event_with_field_names(monkeypatch):

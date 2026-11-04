@@ -120,12 +120,12 @@ async def test_record_learning_redacts_secrets_before_persist(_patch_storage_col
     raw = await storage.memory_record_learning(
         session_id="sess_test",
         title="dev mongo creds",
-        details="MONGO_URI='mongodb://admin:T0mPass1@localhost:27017' for the dev box",
+        details="MONGO_URI='mongodb://admin:FakePw11@localhost:27017' for the dev box",
         project="test",
     )
     response = json.loads(raw)
     stored = " ".join(_patch_storage_collection.added_docs)
-    assert "T0mPass1" not in stored
+    assert "FakePw11" not in stored
     assert "[REDACTED:url_password]" in stored
     assert response["redacted"] == {"url_password": 1}
     assert "redacted_warning" in response
