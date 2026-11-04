@@ -15,6 +15,7 @@ version via `memory_health` (`server_version`).
 - **`memory_update_backlog_item(tags=[...])`** replaces an item's tags.
 
 ### Changed
+- `scripts/facets_backfill.py`: `JUNTO_ROUTER_STATUS_URL` no longer defaults to a home-LAN address. When it's unset, the GPU-yield check is skipped. sage sets it in its cron line (no home defaults in shipped code; LVT review of PR #4).
 - **Backlog items and comments are never replicated to peers** (Tom). `backlog.added` and `backlog.updated` are still written to the local op-log for audit and restore, but `memory_sync_pull` leaves them out, and `memory_sync_push` rejects them with `local_only`. Comments have no op type at all. Before this, peer sync carried backlog items.
 
 ## [1.43.4] - 2026-11-04
