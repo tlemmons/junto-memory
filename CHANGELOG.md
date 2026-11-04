@@ -6,6 +6,11 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+## [1.43.3] - 2026-11-04
+
+### Fixed
+- **`memory_query` no longer reports a rerank cut or a failed scan as "new territory".** With rerank on, short keyword or tag queries score near zero on every candidate. The tool used to answer "No matching memories found", which led the 11-04 librarian pass to report that no transcript-extract docs existed when 265 did. The empty response now carries `rerank_dropped: N` and says the result is not evidence of absence. A collection scan that raised an exception used to be swallowed silently. It is now logged and returned as `scan_errors` (on empty and non-empty results). Both fields are additive and appear only when non-zero.
+
 ## [1.43.2] - 2026-11-03
 
 ### Fixed
