@@ -9,7 +9,7 @@ UNREVIEWED (interface:verification-state-v0); the server's redaction, write-
 time gate and facets pipeline all apply because writes go through MCP.
 
 Opt-in config (JSON, default ~/.config/junto/transcript-extract.json):
-    {"projects": {"-home-tlemmons-HA": "ha", "-home-tlemmons-sharedUtils-junto-junto-memory": "junto"},
+    {"projects": {"-home-you-myapp": "myapp", "-home-you-src-junto-memory": "junto"},
      "model": "sonnet", "max_records_per_chunk": 5}
 No config, or an empty "projects" map, means a no-op run.
 

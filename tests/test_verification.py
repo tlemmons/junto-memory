@@ -122,9 +122,9 @@ async def test_reject_needs_reason_and_redacts_it(ver):
     out = json.loads(await lifecycle_mod.memory_verify("sv", "learning_a", "rejected"))
     assert "reason is required" in out["error"]
     out = json.loads(await lifecycle_mod.memory_verify(
-        "sv", "learning_a", "rejected", reason="wrong; real creds are MONGO_PASSWORD=T0mTest99"))
+        "sv", "learning_a", "rejected", reason="wrong; real creds are MONGO_PASSWORD=FakeTst99"))
     assert out["new_verification"] == "rejected"
-    assert "T0mTest99" not in ver["col"].docs["learning_a"]["verification_reason"]
+    assert "FakeTst99" not in ver["col"].docs["learning_a"]["verification_reason"]
 
 
 async def test_invalid_verdict(ver):

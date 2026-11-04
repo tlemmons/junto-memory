@@ -6,6 +6,12 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+## [1.43.4] - 2026-11-04
+
+### Fixed
+- **No home defaults in shipped code.** `scripts/facets_backfill.py`: `JUNTO_ROUTER_STATUS_URL` no longer defaults to a home-LAN address. When it's unset, the GPU-yield check is skipped. `contrib/reranker/junto-reranker.service` now points at a generic `%h/junto-memory` checkout with an edit note. The transcript-extract docstring example uses placeholder project dirs. No server code changed. (Raised in the LVT v1.43.3 sync review.)
+- **Test fixture credentials are obviously fake.** The redactor tests used realistic-looking fixtures (a NIMBUS key name, a staging user and private IPs). They now use FAKE/example values and `db.example.invalid`, and each line carries a `# nosemgrep` marker so secret scanners read them as fixtures. All values were checked against every current and rotated secret on sage: none overlap.
+
 ## [1.43.3] - 2026-11-04
 
 ### Fixed
