@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Junto Backlog</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
+    --muted: #8b949e; --accent: #58a6ff; --green: #3fb950; --yellow: #d29922; --red: #f85149; --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         background: var(--bg); color: var(--text); font-size: 14px; }
+  header { background: var(--panel); border-bottom: 1px solid var(--border); padding: 10px 20px;
+           display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; align-items: center; }
+  h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  h1 a { color: var(--text); text-decoration: none; }
+  .login { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+  input, select, textarea { background: var(--bg); color: var(--text); border: 1px solid var(--border);
+                  border-radius: 4px; padding: 5px 7px; font-size: 13px; font-family: inherit; }
+  textarea { width: 100%; resize: vertical; font-family: ui-monospace, monospace; font-size: 12.5px; line-height: 1.45; }
+  button.btn { background: #21262d; color: var(--text); border: 1px solid var(--border); border-radius: 4px;
+               padding: 5px 11px; font-size: 12px; cursor: pointer; }
+  button.btn:hover { border-color: var(--accent); }
+  button.btn.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  button.btn:disabled { opacity: .4; cursor: default; }
+  main { padding: 16px 20px; max-width: 1300px; margin: 0 auto; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 14px; margin-bottom: 16px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .toolbar label { font-size: 12px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 6px 8px; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border);
+       font-size: 11px; text-transform: uppercase; white-space: nowrap; cursor: pointer; user-select: none; }
+  td { padding: 7px 8px; border-bottom: 1px solid rgba(48,54,61,.5); vertical-align: top; }
+  tr.row { cursor: pointer; } tr.row:hover td { background: rgba(88,166,255,.06); }
+  .muted { color: var(--muted); } .small { font-size: 12px; }
+  .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+  .p-critical { background: rgba(248,81,73,.2); color: var(--red); }
+  .p-high { background: rgba(210,153,34,.18); color: var(--yellow); }
+  .p-medium { background: rgba(88,166,255,.15); color: var(--accent); }
+  .p-low { background: #21262d; color: var(--muted); }
+  .s-idea { background: rgba(188,140,255,.18); color: var(--purple); }
+  .s-open { background: rgba(88,166,255,.15); color: var(--accent); }
+  .s-in_progress { background: rgba(210,153,34,.18); color: var(--yellow); }
+  .s-done { background: rgba(63,185,80,.15); color: var(--green); }
+  .s-other { background: #21262d; color: var(--muted); }
+  .tag { display: inline-block; background: #21262d; border: 1px solid var(--border); border-radius: 10px;
+         padding: 0 7px; font-size: 11px; color: var(--muted); margin: 1px 2px 1px 0; }
+  .hidden { display: none !important; }
+  #toast { position: fixed; bottom: 16px; right: 16px; padding: 10px 14px; border-radius: 6px; background: var(--panel);
+           border: 1px solid var(--border); display: none; max-width: 420px; z-index: 10; }
+  a { color: var(--accent); }
+  .ticket { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 16px; }
+  @media (max-width: 860px) { .ticket { grid-template-columns: 1fr; } }
+  .ticket h2 { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
+  .body { white-space: pre-wrap; word-wrap: break-word; line-height: 1.5; font-size: 13.5px; }
+  .field { margin-bottom: 10px; } .field > div:first-child { font-size: 11px; color: var(--muted); text-transform: uppercase; margin-bottom: 3px; }
+  .field input, .field select { width: 100%; }
+  .comment { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 10px; }
+  .comment .h { padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted); background: rgba(255,255,255,.02); }
+  .comment .b { padding: 8px 10px; }
+  .who-human { color: var(--purple); font-weight: 600; } .who-agent { color: var(--accent); font-weight: 600; }
+  .section-h { font-size: 12px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: .5px; margin: 18px 0 8px; }
+  .count { color: var(--muted); font-size: 12px; }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; width: min(720px, 94vw); padding: 16px; }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="#">Junto Backlog</a></h1>
+  <div class="login">
+    <span id="who">read-only</span>
+    <input id="key" type="password" placeholder="owner API key" size="22">
+    <button class="btn" id="login">Log in</button>
+    <button class="btn hidden" id="logout">Log out</button>
+    <button class="btn primary" id="newBtn">+ New</button>
+    <a href="/admin" class="small">admin</a> · <a href="/dashboard" class="small">dashboard</a>
+  </div>
+</header>
+<main>
+  <section id="listView">
+    <div class="toolbar">
+      <input id="q" placeholder="Search title, id, tag…" size="26">
+      <label>Project <select id="fProject"><option value="">all</option></select></label>
+      <label>View <select id="fView">
+        <option value="work">Work (open + active)</option>
+        <option value="ideas">Ideas</option>
+        <option value="all">Everything incl. done</option>
+      </select></label>
+      <label>Status <select id="fStatus"><option value="">any</option></select></label>
+      <label>Priority <select id="fPriority"><option value="">any</option><option>critical</option><option>high</option><option>medium</option><option>low</option></select></label>
+      <label>Assignee <input id="fAssignee" list="assignees" size="12"></label>
+      <button class="btn" id="refresh">Refresh</button>
+      <span class="count" id="count"></span>
+    </div>
+    <div class="panel scroll"><table>
+      <thead><tr>
+        <th data-k="priority">Pri</th><th data-k="title">Title</th><th data-k="status">Status</th>
+        <th data-k="project">Project</th><th data-k="assigned_to">Assignee</th><th data-k="updated">Updated</th>
+      </tr></thead>
+      <tbody id="rows"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section id="ticketView" class="hidden">
+    <div class="small" style="margin-bottom:10px"><a href="#">← Backlog</a> <span class="mono muted" id="tId"></span></div>
+    <div class="ticket">
+      <div>
+        <div class="panel">
+          <div id="tTitleView"><h2 id="tTitle"></h2></div>
+          <div id="tTitleEdit" class="hidden"><input id="eTitle" style="width:100%;font-size:16px"></div>
+          <div class="small muted" id="tByline" style="margin-bottom:12px"></div>
+          <div id="tBodyView" class="body"></div>
+          <div id="tBodyEdit" class="hidden"><textarea id="eBody" rows="16"></textarea></div>
+          <div class="toolbar" style="margin:12px 0 0">
+            <button class="btn" id="editBtn">Edit text</button>
+            <button class="btn primary hidden" id="saveText">Save</button>
+            <button class="btn hidden" id="cancelText">Cancel</button>
+          </div>
+        </div>
+        <div class="section-h">Comments <span class="count" id="cCount"></span></div>
+        <div id="comments"></div>
+        <div class="panel">
+          <textarea id="cBody" rows="4" placeholder="Add a comment — thoughts, questions, decisions…"></textarea>
+          <div class="toolbar" style="margin:8px 0 0">
+            <button class="btn primary" id="cSend">Comment</button>
+            <label><input type="checkbox" id="cNotify" checked> notify assignee <span id="cNotifyWho" class="muted"></span></label>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="panel">
+          <div class="field"><div>Status</div><select id="eStatus"></select></div>
+          <div class="field"><div>Priority</div><select id="ePriority"><option>critical</option><option>high</option><option>medium</option><option>low</option></select></div>
+          <div class="field"><div>Assignee</div><input id="eAssignee" list="assignees" placeholder="unassigned"></div>
+          <div class="field"><div>Project</div><select id="eProject"></select></div>
+          <div class="field"><div>Target version</div><input id="eTarget"></div>
+          <div class="field"><div>Tags (comma-separated)</div><input id="eTags"></div>
+          <div class="field hidden" id="deferredWrap"><div>Deferred reason</div><input id="eDeferred"></div>
+          <button class="btn primary" id="saveMeta" style="width:100%">Save fields</button>
+          <button class="btn hidden" id="promote" style="width:100%;margin-top:8px">Promote idea → open</button>
+        </div>
+        <div class="small muted" id="tStamps"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<dialog id="newDlg">
+  <h3 style="margin-top:0">New backlog item</h3>
+  <div class="field"><div>Title</div><input id="nTitle" style="width:100%"></div>
+  <div class="field"><div>Description</div><textarea id="nBody" rows="8" placeholder="What, why, any links or ids…"></textarea></div>
+  <div class="grid2">
+    <div class="field"><div>Kind</div><select id="nStatus"><option value="idea">Idea (brainstorm, not work yet)</option><option value="open">Work item (open)</option></select></div>
+    <div class="field"><div>Project</div><select id="nProject"></select></div>
+    <div class="field"><div>Priority</div><select id="nPriority"><option>critical</option><option>high</option><option selected>medium</option><option>low</option></select></div>
+    <div class="field"><div>Assignee</div><input id="nAssignee" list="assignees" placeholder="unassigned"></div>
+    <div class="field"><div>Tags (comma-separated)</div><input id="nTags"></div>
+    <div class="field"><div>Target version</div><input id="nTarget"></div>
+  </div>
+  <div class="toolbar" style="justify-content:flex-end;margin:6px 0 0">
+    <button class="btn" id="nCancel">Cancel</button>
+    <button class="btn primary" id="nCreate">Create</button>
+  </div>
+</dialog>
+<datalist id="assignees"></datalist>
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const STATUSES = ['idea','open','in_progress','blocked','needs_info','retest','deferred','done','wont_do','duplicate'];
+const PRI = { critical: 0, high: 1, medium: 2, low: 3 };
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function ago(ts) {
+  if (!ts) return '—'; const d = (Date.now() - new Date(ts).getTime()) / 1000;
+  if (d < 60) return 'now'; if (d < 3600) return Math.floor(d/60) + 'm'; if (d < 86400) return Math.floor(d/3600) + 'h'; return Math.floor(d/86400) + 'd';
+}
+function toast(msg, bad) { const t = $('toast'); t.textContent = msg; t.style.borderColor = bad ? 'var(--red)' : 'var(--green)'; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 4500); }
+function sPill(s) { const c = ['idea','open','in_progress','done'].includes(s) ? s : 'other'; return `<span class="pill s-${c}">${esc(s)}</span>`; }
+function pPill(p) { return `<span class="pill p-${esc(p)}">${esc(p)}</span>`; }
+function tagList(s) { return (s || '').split(',').map(t => t.trim()).filter(Boolean); }
+
+// Same per-tab key slot as /admin, so logging in on either page covers both.
+let KEY = null; let CAN_WRITE = false;
+try { KEY = sessionStorage.getItem('junto_admin_key'); } catch (e) {}
+async function api(path, opts = {}) {
+  const headers = opts.headers || {};
+  if (KEY) headers['Authorization'] = 'Bearer ' + KEY;
+  if (opts.body) headers['Content-Type'] = 'application/json';
+  const r = await fetch(path, { ...opts, headers });
+  let data; try { data = await r.json(); } catch (e) { data = { error: 'HTTP ' + r.status }; }
+  if (!r.ok && !data.error) data.error = 'HTTP ' + r.status;
+  return data;
+}
+async function post(path, body) { return api(path, { method: 'POST', body: JSON.stringify(body) }); }
+async function checkLogin() {
+  CAN_WRITE = false;
+  if (KEY) {
+    const me = await api('/admin/api/whoami');
+    if (me.error) { toast('Key rejected: ' + me.error, true); KEY = null; try { sessionStorage.removeItem('junto_admin_key'); } catch (e) {} }
+    else { CAN_WRITE = !!me.can_write; $('who').textContent = me.name + ' (' + me.role + ')' + (CAN_WRITE ? '' : ' · not owner: read-only'); }
+  }
+  if (!KEY) $('who').textContent = 'read-only — log in to edit';
+  $('logout').classList.toggle('hidden', !KEY); $('key').classList.toggle('hidden', !!KEY); $('login').classList.toggle('hidden', !!KEY);
+  document.querySelectorAll('#newBtn,#editBtn,#saveMeta,#cSend,#promote').forEach(b => b.disabled = !CAN_WRITE);
+}
+$('login').onclick = async () => { KEY = $('key').value.trim(); $('key').value = ''; try { sessionStorage.setItem('junto_admin_key', KEY); } catch (e) {} await checkLogin(); };
+$('key').onkeydown = e => { if (e.key === 'Enter') $('login').click(); };
+$('logout').onclick = async () => { KEY = null; try { sessionStorage.removeItem('junto_admin_key'); } catch (e) {} await checkLogin(); };
+
+// ── filters (remembered per browser) ──
+const FKEYS = ['q','fProject','fView','fStatus','fPriority','fAssignee'];
+function saveFilters() { try { localStorage.setItem('junto_backlog_filters', JSON.stringify(Object.fromEntries(FKEYS.map(k => [k, $(k).value])))); } catch (e) {} }
+function loadFilters() { try { const f = JSON.parse(localStorage.getItem('junto_backlog_filters') || '{}'); FKEYS.forEach(k => { if (f[k] !== undefined) $(k).value = f[k]; }); } catch (e) {} }
+STATUSES.forEach(s => { $('fStatus').insertAdjacentHTML('beforeend', `<option>${s}</option>`); $('eStatus').insertAdjacentHTML('beforeend', `<option>${s}</option>`); });
+
+let PROJECTS = [];
+async function loadProjects() {
+  const d = await api('/admin/api/projects');
+  PROJECTS = (d.projects || []).map(p => typeof p === 'string' ? p : (p.name || p.project)).filter(Boolean).sort();
+  const opts = PROJECTS.map(p => `<option>${esc(p)}</option>`).join('');
+  $('fProject').insertAdjacentHTML('beforeend', opts);
+  $('eProject').innerHTML = opts; $('nProject').innerHTML = opts;
+  if (PROJECTS.includes('junto')) $('nProject').value = 'junto';
+}
+
+// ── list ──
+let ITEMS = []; let SORT = { k: 'priority', dir: 1 };
+async function loadList() {
+  const v = $('fView').value, p = new URLSearchParams();
+  if ($('fProject').value) p.set('project', $('fProject').value);
+  if ($('fStatus').value) p.set('status', $('fStatus').value);
+  else if (v === 'ideas') p.set('status', 'idea');
+  if ($('fPriority').value) p.set('priority', $('fPriority').value);
+  if ($('fAssignee').value.trim()) p.set('assigned_to', $('fAssignee').value.trim());
+  if (v === 'all') { p.set('include_done', '1'); p.set('include_ideas', '1'); }
+  if ($('fStatus').value === 'done' || $('fStatus').value === 'wont_do') p.set('include_done', '1');
+  $('rows').innerHTML = '<tr><td colspan="6" class="muted">Loading…</td></tr>';
+  const d = await api('/backlog/api/items?' + p);
+  if (d.error) { $('rows').innerHTML = `<tr><td colspan="6" style="color:var(--red)">${esc(d.error)}</td></tr>`; return; }
+  ITEMS = d.items || [];
+  const who = [...new Set(ITEMS.map(i => i.assigned_to).filter(Boolean))].sort();
+  $('assignees').innerHTML = who.map(w => `<option value="${esc(w)}">`).join('');
+  renderList();
+}
+function renderList() {
+  const q = $('q').value.trim().toLowerCase();
+  let rows = ITEMS.filter(i => !q || (i.title + ' ' + i.id + ' ' + (i.tags || []).join(' ')).toLowerCase().includes(q));
+  const k = SORT.k;
+  rows.sort((a, b) => {
+    const av = k === 'priority' ? PRI[a.priority] ?? 9 : (a[k] || ''), bv = k === 'priority' ? PRI[b.priority] ?? 9 : (b[k] || '');
+    return (av < bv ? -1 : av > bv ? 1 : 0) * SORT.dir || ((b.updated || '') > (a.updated || '') ? 1 : -1);
+  });
+  $('count').textContent = rows.length + ' item' + (rows.length === 1 ? '' : 's');
+  $('rows').innerHTML = rows.length ? rows.map(i => `<tr class="row" data-id="${esc(i.id)}">
+      <td>${pPill(i.priority)}</td>
+      <td>${esc(i.title)}${i.comment_count ? ` <span class="muted small">💬 ${i.comment_count}</span>` : ''}<div>${(i.tags || []).slice(0, 6).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div></td>
+      <td>${sPill(i.status)}</td><td class="small">${esc(i.project || 'shared')}</td>
+      <td class="small">${esc(i.assigned_to || '—')}</td><td class="small muted" title="${esc(i.updated)}">${ago(i.updated)}</td></tr>`).join('')
+    : '<tr><td colspan="6" class="muted">Nothing matches.</td></tr>';
+  document.querySelectorAll('tr.row').forEach(r => r.onclick = () => { location.hash = r.dataset.id; });
+}
+document.querySelectorAll('th[data-k]').forEach(th => th.onclick = () => { SORT = { k: th.dataset.k, dir: SORT.k === th.dataset.k ? -SORT.dir : (th.dataset.k === 'updated' ? -1 : 1) }; renderList(); });
+['fProject','fView','fStatus','fPriority'].forEach(k => $(k).onchange = () => { saveFilters(); loadList(); });
+$('fAssignee').onchange = () => { saveFilters(); loadList(); };
+$('q').oninput = () => { saveFilters(); renderList(); };
+$('refresh').onclick = loadList;
+
+// ── ticket ──
+let CUR = null;
+async function openTicket(id) {
+  $('listView').classList.add('hidden'); $('ticketView').classList.remove('hidden');
+  $('tTitle').textContent = 'Loading…'; $('tBodyView').textContent = ''; $('comments').innerHTML = '';
+  const d = await api('/backlog/api/item?id=' + encodeURIComponent(id));
+  if (d.error) { $('tTitle').textContent = d.error; return; }
+  CUR = d; renderTicket();
+}
+function bodyOf(d) { const c = d.content || ''; const m = c.match(/^# [^\n]*\n\n?([\s\S]*)$/); return m ? m[1] : c; }
+function renderTicket() {
+  const d = CUR; textMode(false);
+  $('tId').textContent = d.id; $('tTitle').textContent = d.title;
+  $('tByline').textContent = `${d.project || 'shared'} · created by ${d.created_by || d.authored_by || 'unknown'}`;
+  $('tBodyView').textContent = bodyOf(d) || '(no description)';
+  $('eStatus').value = d.backlog_status || 'open'; $('ePriority').value = d.priority || 'medium';
+  $('eAssignee').value = d.assigned_to || ''; $('eTarget').value = d.target_version || '';
+  if (d.project && !PROJECTS.includes(d.project)) $('eProject').insertAdjacentHTML('beforeend', `<option>${esc(d.project)}</option>`);
+  $('eProject').value = d.project || '';
+  $('eTags').value = (d.tags || []).join(', ');
+  $('deferredWrap').classList.toggle('hidden', d.backlog_status !== 'deferred');
+  $('promote').classList.toggle('hidden', d.backlog_status !== 'idea');
+  $('tStamps').innerHTML = `created ${esc(d.created || '')}<br>updated ${esc(d.updated || '')}`;
+  $('cNotifyWho').textContent = d.assigned_to ? '(' + d.assigned_to + ')' : '(no assignee)';
+  $('cNotify').disabled = !d.assigned_to;
+  const cm = d.comments || [];
+  $('cCount').textContent = cm.length ? '(' + cm.length + ')' : '';
+  $('comments').innerHTML = cm.map(c => `<div class="comment"><div class="h"><span class="who-${c.author_kind === 'human' ? 'human' : 'agent'}">${esc(c.author)}</span>
+      ${c.author_kind === 'human' ? '' : '<span class="muted">(agent)</span>'} · <span title="${esc(c.created)}">${ago(c.created)} ago</span></div>
+      <div class="b body">${esc(c.body)}</div></div>`).join('') || '<div class="muted small" style="margin-bottom:10px">No comments yet.</div>';
+}
+function textMode(on) {
+  ['tTitleEdit','tBodyEdit','saveText','cancelText'].forEach(i => $(i).classList.toggle('hidden', !on));
+  ['tTitleView','tBodyView','editBtn'].forEach(i => $(i).classList.toggle('hidden', on));
+}
+$('editBtn').onclick = () => { $('eTitle').value = CUR.title; $('eBody').value = bodyOf(CUR); textMode(true); };
+$('cancelText').onclick = () => textMode(false);
+$('eStatus').onchange = () => $('deferredWrap').classList.toggle('hidden', $('eStatus').value !== 'deferred');
+async function update(fields, okMsg) {
+  const r = await post('/backlog/api/update', { id: CUR.id, ...fields });
+  if (r.error) { toast(r.error, true); return false; }
+  toast(okMsg + (r.redacted ? ' (a secret was redacted)' : ''));
+  await openTicket(r.id || CUR.id); return true;
+}
+$('saveText').onclick = () => {
+  const f = {};
+  if ($('eTitle').value.trim() && $('eTitle').value.trim() !== CUR.title) f.title = $('eTitle').value.trim();
+  if ($('eBody').value !== bodyOf(CUR)) f.description = $('eBody').value;
+  if (!Object.keys(f).length) { textMode(false); return; }
+  update(f, 'Saved');
+};
+$('saveMeta').onclick = () => {
+  const d = CUR, f = {};
+  if ($('eStatus').value !== (d.backlog_status || 'open')) f.status = $('eStatus').value;
+  if ($('ePriority').value !== (d.priority || 'medium')) f.priority = $('ePriority').value;
+  if ($('eAssignee').value.trim() !== (d.assigned_to || '')) f.assigned_to = $('eAssignee').value.trim();
+  if ($('eTarget').value.trim() !== (d.target_version || '')) f.target_version = $('eTarget').value.trim();
+  if ($('eStatus').value === 'deferred' && $('eDeferred').value.trim()) f.deferred_reason = $('eDeferred').value.trim();
+  const tags = tagList($('eTags').value);
+  if (JSON.stringify(tags) !== JSON.stringify(d.tags || [])) f.tags = tags;
+  if ($('eProject').value && $('eProject').value !== (d.project || '')) {
+    if (!confirm(`Move this item to project "${$('eProject').value}"?`)) return;
+    f.project = $('eProject').value;
+  }
+  if (!Object.keys(f).length) { toast('Nothing changed'); return; }
+  update(f, 'Fields saved');
+};
+$('promote').onclick = () => update({ status: 'open' }, 'Promoted to open');
+$('cSend').onclick = async () => {
+  const body = $('cBody').value.trim(); if (!body) return;
+  $('cSend').disabled = true;
+  const r = await post('/backlog/api/comment', { id: CUR.id, body, notify: $('cNotify').checked && !$('cNotify').disabled });
+  $('cSend').disabled = !CAN_WRITE;
+  if (r.error) { toast(r.error, true); return; }
+  $('cBody').value = '';
+  toast('Comment added' + (r.notified ? (r.notified.error ? ' — notify failed: ' + r.notified.error : ' · ' + r.notified.to + ' notified') : ''), !!(r.notified && r.notified.error));
+  openTicket(CUR.id);
+};
+
+// ── new item ──
+$('newBtn').onclick = () => { ['nTitle','nBody','nAssignee','nTags','nTarget'].forEach(i => $(i).value = ''); if ($('fProject').value) $('nProject').value = $('fProject').value; $('newDlg').showModal(); $('nTitle').focus(); };
+$('nCancel').onclick = () => $('newDlg').close();
+$('nCreate').onclick = async () => {
+  if (!$('nTitle').value.trim()) { toast('Title is required', true); return; }
+  const r = await post('/backlog/api/create', {
+    title: $('nTitle').value.trim(), description: $('nBody').value, status: $('nStatus').value,
+    project: $('nProject').value, priority: $('nPriority').value, assigned_to: $('nAssignee').value.trim(),
+    tags: tagList($('nTags').value), target_version: $('nTarget').value.trim() });
+  if (r.error) { toast(r.error, true); return; }
+  $('newDlg').close(); toast('Created ' + r.id); location.hash = r.id;
+};
+
+// ── routing ──
+function route() {
+  const id = location.hash.slice(1);
+  if (id.startsWith('backlog_')) openTicket(id);
+  else { $('ticketView').classList.add('hidden'); $('listView').classList.remove('hidden'); CUR = null; loadList(); }
+}
+window.onhashchange = route;
+(async () => { loadFilters(); await checkLogin(); await loadProjects(); route(); })();
+</script>
+</body>
+</html>

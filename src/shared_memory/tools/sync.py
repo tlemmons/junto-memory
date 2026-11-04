@@ -995,6 +995,10 @@ async def _apply_backlog_updated(db, chroma, op):
     ):
         if payload.get(field) is not None:
             metadata[field] = payload[field]
+    # tags ride backlog.updated as a list since 1.44.0 (interface:backlog-ideas-comments-v0 §3);
+    # chroma metadata stores them as a JSON string.
+    if isinstance(payload.get("tags"), list):
+        metadata["tags"] = json.dumps(payload["tags"])
     # On move, the metadata.project follows the new collection so
     # downstream listing queries find it in the right bucket.
     if is_move:

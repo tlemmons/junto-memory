@@ -6,6 +6,14 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+## [1.44.0] - 2026-11-04
+
+### Added
+- **`/backlog` page.** A Jira-lite ticket view for humans (interface:backlog-ideas-comments-v0). It lists every project with filters and search. Open a ticket to edit its text and fields, comment on it, and create new items. It is LAN-only like `/admin`, and writes need an owner key (the same browser-tab key as `/admin`). Every read and write goes through the backlog tools under a principal session, so redaction, write-lint, op-log and tenant isolation are exactly what agents get.
+- **`idea` backlog status** for brainstorm items. `memory_list_backlog` leaves ideas out unless you pass `include_ideas=true` or `status="idea"`, so agents don't pick them up as work. `memory_add_backlog_item(status="idea")` creates one.
+- **Ticket comments.** `memory_update_backlog_item(comment=...)` adds one (redacted). `memory_get_by_id` on a `backlog_*` id now returns `comments` plus the item's status, priority, assignee, target version and creator. List rows carry `comment_count` when it's above zero. A comment from the page can notify the assignee. Comments are not replicated to peers in v0.
+- **`memory_update_backlog_item(tags=[...])`** replaces an item's tags, and `backlog.updated` op-log entries carry them to peers.
+
 ## [1.43.4] - 2026-11-04
 
 ### Fixed
