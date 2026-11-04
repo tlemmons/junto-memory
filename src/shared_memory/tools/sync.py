@@ -48,6 +48,7 @@ from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import ORIGIN_SERVER_ID
 from shared_memory.helpers import require_session, utc_now_iso
 from shared_memory.op_log import (
+    LOCAL_ONLY_OP_TYPES,
     OPLOG_COLLECTION,
     OPLOG_SCHEMA_VERSION,
     claim_or_verify_state_owner,
@@ -112,7 +113,8 @@ def _pull_op_log(
 
     for origin in sorted(known_origins):
         cur = int(cursors.get(origin, 0))
-        query: Dict[str, Any] = {"origin": origin, "seq": {"$gt": cur}}
+        query: Dict[str, Any] = {"origin": origin, "seq": {"$gt": cur},
+                                 "op_type": {"$nin": sorted(LOCAL_ONLY_OP_TYPES)}}
 
         if projects:
             query["$or"] = [
@@ -400,6 +402,16 @@ async def _push_ops(
                 "op_id": op["_id"],
                 "disposition": "rejected",
                 "reason": f"op_type not in §4.1 catalog: {op['op_type']}",
+            })
+            rejected_count += 1
+            continue
+
+        # ── Local-only types (backlog) never replicate ──
+        if op["op_type"] in LOCAL_ONLY_OP_TYPES:
+            results.append({
+                "op_id": op["_id"],
+                "disposition": "rejected",
+                "reason": f"local_only: {op['op_type']} is not replicated",
             })
             rejected_count += 1
             continue
@@ -995,10 +1007,6 @@ async def _apply_backlog_updated(db, chroma, op):
     ):
         if payload.get(field) is not None:
             metadata[field] = payload[field]
-    # tags ride backlog.updated as a list since 1.44.0 (interface:backlog-ideas-comments-v0 §3);
-    # chroma metadata stores them as a JSON string.
-    if isinstance(payload.get("tags"), list):
-        metadata["tags"] = json.dumps(payload["tags"])
     # On move, the metadata.project follows the new collection so
     # downstream listing queries find it in the right bucket.
     if is_move:

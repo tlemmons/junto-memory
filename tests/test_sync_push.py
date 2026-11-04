@@ -595,6 +595,15 @@ def test_push_rejects_unknown_op_type():
     assert "op_type" in result["results"][0]["reason"]
 
 
+def test_push_rejects_backlog_ops_as_local_only():
+    """Backlog items never replicate (Tom 2026-11-04): a peer's backlog op is refused, not applied."""
+    db = _FakeMongoDB()
+    chroma = _FakeChroma()
+    result = _push(db, chroma, [_op("backlog.added", 1), _op("backlog.updated", 2)])
+    assert _dispositions(result) == ["rejected", "rejected"]
+    assert all("local_only" in r["reason"] for r in result["results"])
+
+
 # ───────────────────────────────────────────────────────────────────
 # Schema gate (§4.4)
 # ───────────────────────────────────────────────────────────────────

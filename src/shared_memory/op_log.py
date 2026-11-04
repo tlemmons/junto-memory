@@ -66,6 +66,12 @@ OP_TYPES = (
 
 _OP_TYPE_SET = frozenset(OP_TYPES)
 
+# Logged locally (audit + restore trail) but NEVER replicated: memory_sync_pull
+# leaves them out and memory_sync_push rejects them. Backlog items and their
+# comments stay on the box that holds them (Tom, 2026-11-04;
+# interface:backlog-ideas-comments-v0). Comments have no op type at all.
+LOCAL_ONLY_OP_TYPES = frozenset({"backlog.added", "backlog.updated"})
+
 
 class OpLogError(Exception):
     """Raised when an op-log invariant is violated."""

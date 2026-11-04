@@ -76,6 +76,9 @@ class _FakeOpLog:
                     elif op == "$in":
                         if actual not in arg:
                             return False
+                    elif op == "$nin":
+                        if actual in arg:
+                            return False
                     elif op == "$exists":
                         present = _has_path(row, k)
                         if present is not arg:
@@ -151,6 +154,14 @@ def test_pull_cold_start_returns_everything_sorted():
     assert [o["seq"] for o in result["ops"]] == [1, 2, 3]
     assert result["next_cursor"] == {"central": 3}
     assert result["has_more"] == {"central": False}
+
+
+def test_pull_never_replicates_backlog_ops():
+    """Backlog items stay on the box that holds them (Tom 2026-11-04)."""
+    rows = [_op(1), _op(2, op_type="backlog.added"), _op(3, op_type="backlog.updated"), _op(4)]
+    result = sync_tool._pull_op_log(_FakeDB(rows), cursors={}, limit=500, projects=None)
+    assert [o["seq"] for o in result["ops"]] == [1, 4]
+    assert result["next_cursor"] == {"central": 4}
 
 
 def test_pull_advances_past_cursor():
