@@ -68,12 +68,7 @@
     <button data-tab="connections">Connections</button>
     <button data-tab="changes">Change log</button>
   </nav>
-  <div class="login">
-    <span id="who">read-only</span>
-    <input id="key" type="password" placeholder="owner API key" size="18">
-    <button class="btn" id="login">Unlock edits</button>
-    <button class="btn hidden" id="logout">Lock</button>
-  </div>
+  <div class="login"><span id="juntoAccount"></span></div>
 </header>
 
 <main>
@@ -110,6 +105,7 @@
 </main>
 <div id="toast"></div>
 
+<script src="/ui/account.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 function esc(s) { if (s == null) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -123,28 +119,10 @@ function age(iso) {
 function fmt(v) { if (v === null || v === undefined) return '<span class="muted">—</span>'; if (v === '') return '<span class="muted">""</span>'; return esc(JSON.stringify(v)); }
 function toast(msg, bad) { const t = $('toast'); t.textContent = msg; t.style.borderColor = bad ? 'var(--red)' : 'var(--green)'; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 4000); }
 
-// API key lives only in this tab's sessionStorage; storage may be unavailable.
-let KEY = null; let CAN_WRITE = false;
-try { KEY = sessionStorage.getItem('junto_admin_key'); } catch (e) {}
-async function api(path, opts = {}) {
-  const headers = opts.headers || {};
-  if (KEY) headers['Authorization'] = 'Bearer ' + KEY;
-  if (opts.body) headers['Content-Type'] = 'application/json';
-  const r = await fetch(path, { ...opts, headers });
-  let data; try { data = await r.json(); } catch (e) { data = { error: 'HTTP ' + r.status }; }
-  if (!r.ok && !data.error) data.error = 'HTTP ' + r.status;
-  return data;
-}
-async function checkLogin() {
-  if (!KEY) { CAN_WRITE = false; $('who').textContent = 'read-only'; $('logout').classList.add('hidden'); return; }
-  const me = await api('/admin/api/whoami');
-  if (me.error) { toast('Key rejected: ' + me.error, true); KEY = null; try { sessionStorage.removeItem('junto_admin_key'); } catch (e) {} CAN_WRITE = false; $('who').textContent = 'read-only'; return; }
-  CAN_WRITE = !!me.can_write;
-  $('who').textContent = me.name + ' (' + me.role + ')' + (CAN_WRITE ? '' : ' · not owner: read-only');
-  $('logout').classList.remove('hidden');
-}
-$('login').onclick = async () => { KEY = $('key').value.trim(); $('key').value = ''; try { sessionStorage.setItem('junto_admin_key', KEY); } catch (e) {} await checkLogin(); render(); };
-$('logout').onclick = async () => { KEY = null; try { sessionStorage.removeItem('junto_admin_key'); } catch (e) {} await checkLogin(); render(); };
+// Login (password cookie or API key) is the shared account widget: /ui/account.js.
+let CAN_WRITE = false;
+const api = (path, opts) => JuntoUI.api(path, opts);
+JuntoUI.onChange(me => { CAN_WRITE = !!(me && me.can_write); render(); });
 
 let TAB = 'overview';
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
@@ -366,7 +344,7 @@ async function revokeConn(name) {
 function render() {
   return ({ overview: renderOverview, settings: renderSettings, agents: renderAgents, alerts: renderAlerts, tasks: renderTasks, connections: renderConnections, changes: renderChanges })[TAB]();
 }
-checkLogin().then(render);
+JuntoUI.ready.then(me => { CAN_WRITE = !!(me && me.can_write); render(); });
 setInterval(() => { if (TAB === 'overview' || TAB === 'agents' || TAB === 'alerts' || TAB === 'tasks') render(); }, 30000);
 </script>
 </body>

@@ -11,7 +11,7 @@ POST /admin/api/alerts/ack     acknowledge an alert        (owner key)
 GET  /admin/api/changes        change log of settings writes
 
 Reads are LAN-open like /dashboard. Writes need an OWNER-role API key
-(Authorization: Bearer). Every /admin request arriving through the public
+(Authorization: Bearer) or an owner's login cookie (ui_auth.py). Every /admin request arriving through the public
 tunnel is refused, so the page stays LAN-only even if a tunnel route is added.
 
 ADDING A SETTING: put it in the owning module's CONFIG_KEYS (push_control or
@@ -100,7 +100,12 @@ def _mask(key, value):
 
 
 def _auth(request) -> Dict[str, Any]:
-    """{'ok': bool, 'name', 'role', 'error', 'status'} for the request's Bearer key."""
+    """{'ok', 'name', 'role', 'projects', 'via', 'error', 'status'} for the request.
+
+    A Bearer key wins when present; otherwise the human login cookie
+    (ui_auth.session_user). A cookie-authenticated POST must pass the CSRF
+    check (X-Junto-UI header + same origin) or it is refused."""
+    from shared_memory import ui_auth
     from shared_memory.auth import detect_tunnel_origin, parse_bearer_token, validate_api_key
 
     headers = [(k.lower(), v) for k, v in request.headers.raw]
@@ -108,12 +113,19 @@ def _auth(request) -> Dict[str, Any]:
         return {"ok": False, "status": 403, "error": "admin is LAN-only"}
     key = parse_bearer_token(headers)
     if not key:
-        return {"ok": False, "status": 401, "error": "no API key"}
+        s = ui_auth.session_user(request)
+        if not s:
+            return {"ok": False, "status": 401, "error": "not logged in"}
+        if not s["csrf_ok"]:
+            return {"ok": False, "status": 403, "error": "missing X-Junto-UI header or cross-origin request"}
+        return {"ok": s["role"] in OWNER_ROLES, "status": 403, "error": "owner role required",
+                "name": s["name"], "role": s["role"], "projects": s["projects"], "via": "session"}
     rec = validate_api_key(key)
     if not rec:
         return {"ok": False, "status": 401, "error": "invalid or revoked key"}
     return {"ok": rec.get("role") in OWNER_ROLES, "status": 403,
-            "error": "owner role required", "name": rec.get("name"), "role": rec.get("role")}
+            "error": "owner role required", "name": rec.get("name"), "role": rec.get("role"),
+            "projects": rec.get("projects") or [], "via": "key"}
 
 
 def _lan_only(request) -> Optional[Any]:
@@ -136,7 +148,14 @@ def _lan_only(request) -> Optional[Any]:
     if auth.REQUIRE_KEY:
         key = auth.parse_bearer_token(headers)
         if not key:
-            return JSONResponse({"error": "no API key"}, status_code=401)
+            # A logged-in human (ui_auth) counts as a key: same unscoped rule.
+            from shared_memory import ui_auth
+            s = ui_auth.session_user(request)
+            if not s:
+                return JSONResponse({"error": "no API key"}, status_code=401)
+            if s["projects"]:
+                return JSONResponse({"error": "server-wide view: requires an unscoped login"}, status_code=403)
+            return None
         rec = auth.validate_api_key(key)
         if not rec:
             return JSONResponse({"error": "invalid or revoked key"}, status_code=401)
@@ -301,7 +320,7 @@ def register_admin_routes(mcp, get_mongo) -> None:
         a = _auth(request)
         if a.get("name") is None:
             return JSONResponse({"error": a["error"]}, status_code=a["status"])
-        return JSONResponse({"name": a["name"], "role": a["role"], "can_write": a["ok"]})
+        return JSONResponse({"name": a["name"], "role": a["role"], "can_write": a["ok"], "via": a.get("via")})
 
     @mcp.custom_route("/admin/api/projects", methods=["GET"])
     async def admin_projects(request):
