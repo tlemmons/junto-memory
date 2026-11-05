@@ -95,9 +95,10 @@ def test_session_user_and_csrf(db):
     ok = _Req({"Cookie": f"{ui_auth.COOKIE}={token}", "Host": "sage:8080", "X-Junto-UI": "1",
                "Origin": "http://sage:8080"}, "POST")
     assert ui_auth.session_user(ok, db)["csrf_ok"]
-    evil = _Req({"Cookie": f"{ui_auth.COOKIE}={token}", "Host": "sage:8080", "X-Junto-UI": "1",
-                 "Origin": "http://evil.example"}, "POST")
-    assert not ui_auth.session_user(evil, db)["csrf_ok"]
+    # Origin is logged, not enforced: a proxy or Tailscale name makes it differ from Host.
+    proxied = _Req({"Cookie": f"{ui_auth.COOKIE}={token}", "Host": "localhost:8080", "X-Junto-UI": "1",
+                    "Origin": "http://sage.lemmons.net:8080"}, "POST")
+    assert ui_auth.session_user(proxied, db)["csrf_ok"]
     assert ui_auth.session_user(_Req({"Cookie": f"{ui_auth.COOKIE}=forged"}), db) is None
 
 

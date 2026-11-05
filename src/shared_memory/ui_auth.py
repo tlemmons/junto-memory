@@ -26,8 +26,11 @@ Security model:
   `ui_users` on every request, so disabling a user or changing a role is
   immediate.
 - CSRF: a cookie-authenticated state-changing request must carry the custom
-  header `X-Junto-UI: 1` (another site cannot set it without a CORS preflight,
-  which this server never grants), and its Origin, when sent, must match Host.
+  header `X-Junto-UI: 1`. Another site cannot set it without a CORS preflight,
+  and this server grants none (no CORS middleware anywhere). Origin is NOT
+  compared with Host: proxies, port forwards and Tailscale names legitimately
+  make them differ (the first live login was refused that way, 2026-11-05).
+  A mismatch is only logged.
 - Brute force: 5 failed logins for a username within 15 min locks that
   username for the rest of the window (in-process; resets on restart).
 - Every /ui route refuses tunnel origins, like /admin.
@@ -216,13 +219,14 @@ def _cookie_token(headers) -> Optional[str]:
     return m.value if m and m.value else None
 
 
-def _same_origin(headers) -> bool:
-    """Origin (when the browser sends one) must name this host."""
+def _csrf_ok(headers) -> bool:
+    """The X-Junto-UI header is the CSRF defence. Origin vs Host is logged, not enforced."""
+    if _header(headers, CSRF_HEADER) != "1":
+        return False
     origin, host = _header(headers, "origin"), _header(headers, "host")
-    if not origin:
-        return True
-    netloc = origin.split("://", 1)[-1].rstrip("/")
-    return bool(host) and netloc.lower() == host.lower()
+    if origin and host and origin.split("://", 1)[-1].rstrip("/").lower() != host.lower():
+        log.info("ui_auth: Origin %r differs from Host %r (allowed; header present)", origin, host)
+    return True
 
 
 def session_user(request, db=None) -> Optional[Dict[str, Any]]:
@@ -251,8 +255,7 @@ def session_user(request, db=None) -> Optional[Dict[str, Any]]:
         db.ui_sessions.update_one({"_id": s["_id"]}, {"$set": {
             "last_seen": now, "expires_at": now + timedelta(days=SESSION_DAYS)}})
     method = (getattr(request, "method", "GET") or "GET").upper()
-    csrf_ok = method in ("GET", "HEAD") or (
-        _header(headers, CSRF_HEADER) == "1" and _same_origin(headers))
+    csrf_ok = method in ("GET", "HEAD") or _csrf_ok(headers)
     return {"name": user["_id"], "role": user.get("role") or "user",
             "projects": user.get("projects") or [], "via": "session", "csrf_ok": csrf_ok,
             "_sid": s["_id"]}
@@ -291,13 +294,12 @@ def register_ui_auth_routes(mcp, get_mongo) -> None:
             return None
 
     def _gate(request):
-        """Tunnel refused; JSON POSTs must carry X-Junto-UI from this origin."""
+        """Tunnel refused; JSON POSTs must carry X-Junto-UI."""
         blocked = _tunnel_only(request)
         if blocked:
             return blocked
-        h = _headers(request)
-        if _header(h, CSRF_HEADER) != "1" or not _same_origin(h):
-            return JSONResponse({"error": "missing X-Junto-UI header or cross-origin request"}, status_code=403)
+        if not _csrf_ok(_headers(request)):
+            return JSONResponse({"error": "missing X-Junto-UI header"}, status_code=403)
         db = get_mongo()
         if db is None:
             return JSONResponse({"error": "MongoDB unavailable"}, status_code=503)

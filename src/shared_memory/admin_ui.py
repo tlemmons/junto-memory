@@ -117,7 +117,7 @@ def _auth(request) -> Dict[str, Any]:
         if not s:
             return {"ok": False, "status": 401, "error": "not logged in"}
         if not s["csrf_ok"]:
-            return {"ok": False, "status": 403, "error": "missing X-Junto-UI header or cross-origin request"}
+            return {"ok": False, "status": 403, "error": "missing X-Junto-UI header"}
         return {"ok": s["role"] in OWNER_ROLES, "status": 403, "error": "owner role required",
                 "name": s["name"], "role": s["role"], "projects": s["projects"], "via": "session"}
     rec = validate_api_key(key)
