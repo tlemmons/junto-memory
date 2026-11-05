@@ -8,6 +8,7 @@ version via `memory_health` (`server_version`).
 
 ### Changed
 - **`/backlog` page hides closed items by default** (Tom). Closed means done, wont_do and duplicate. A "show completed" checkbox brings them back. It starts unticked on every load and isn't remembered. Picking a closed status in the Status filter shows those items regardless. The "Everything incl. done" view is gone, replaced by "Work + ideas".
+- **`/backlog` page reads and edits in a right-hand pane** (Tom). The list stays on the left. Clicking a row opens the item beside it, and you can edit fields, edit text and comment there without leaving the list. j/k or ↑/↓ move through the list and Esc closes the pane. Before switching items, the page asks if there's unsaved text or a comment draft. Below 1000px wide it falls back to one view at a time.
 
 ## [1.44.0] - 2026-11-04
 

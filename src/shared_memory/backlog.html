@@ -25,7 +25,23 @@
   button.btn:hover { border-color: var(--accent); }
   button.btn.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
   button.btn:disabled { opacity: .4; cursor: default; }
-  main { padding: 16px 20px; max-width: 1300px; margin: 0 auto; }
+  main { padding: 12px 16px; }
+  /* List on the left, ticket on the right; each scrolls on its own. */
+  .split { display: grid; grid-template-columns: minmax(0, 11fr) minmax(0, 9fr); gap: 16px; height: calc(100vh - 80px); }
+  #listView, #ticketView { min-height: 0; display: flex; flex-direction: column; }
+  #listView .panel { flex: 1; overflow: auto; margin-bottom: 0; }
+  #ticketView { overflow-y: auto; padding-right: 4px; }
+  td.t { overflow-wrap: anywhere; }
+  tr.row.sel td { background: rgba(88,166,255,.14); }
+  .empty { margin: auto; color: var(--muted); text-align: center; }
+  .pane-h { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 10px; }
+  .fields .wide { grid-column: span 2; }
+  @media (max-width: 1000px) {
+    .split { grid-template-columns: 1fr; height: auto; }
+    body.has-ticket #listView, body:not(.has-ticket) #ticketView { display: none; }
+    #ticketView { overflow: visible; }
+  }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 14px; margin-bottom: 16px; }
   .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
   .toolbar label { font-size: 12px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
@@ -53,9 +69,6 @@
   #toast { position: fixed; bottom: 16px; right: 16px; padding: 10px 14px; border-radius: 6px; background: var(--panel);
            border: 1px solid var(--border); display: none; max-width: 420px; z-index: 10; }
   a { color: var(--accent); }
-  .ticket { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 16px; }
-  @media (max-width: 860px) { .ticket { grid-template-columns: 1fr; } }
-  .ticket h2 { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
   .body { white-space: pre-wrap; word-wrap: break-word; line-height: 1.5; font-size: 13.5px; }
   .field { margin-bottom: 10px; } .field > div:first-child { font-size: 11px; color: var(--muted); text-transform: uppercase; margin-bottom: 3px; }
   .field input, .field select { width: 100%; }
@@ -83,7 +96,7 @@
     <a href="/admin" class="small">admin</a> · <a href="/dashboard" class="small">dashboard</a>
   </div>
 </header>
-<main>
+<main class="split">
   <section id="listView">
     <div class="toolbar">
       <input id="q" placeholder="Search title, id, tag…" size="26">
@@ -109,46 +122,47 @@
     </table></div>
   </section>
 
-  <section id="ticketView" class="hidden">
-    <div class="small" style="margin-bottom:10px"><a href="#">← Backlog</a> <span class="mono muted" id="tId"></span></div>
-    <div class="ticket">
-      <div>
-        <div class="panel">
-          <div id="tTitleView"><h2 id="tTitle"></h2></div>
-          <div id="tTitleEdit" class="hidden"><input id="eTitle" style="width:100%;font-size:16px"></div>
-          <div class="small muted" id="tByline" style="margin-bottom:12px"></div>
-          <div id="tBodyView" class="body"></div>
-          <div id="tBodyEdit" class="hidden"><textarea id="eBody" rows="16"></textarea></div>
-          <div class="toolbar" style="margin:12px 0 0">
-            <button class="btn" id="editBtn">Edit text</button>
-            <button class="btn primary hidden" id="saveText">Save</button>
-            <button class="btn hidden" id="cancelText">Cancel</button>
-          </div>
-        </div>
-        <div class="section-h">Comments <span class="count" id="cCount"></span></div>
-        <div id="comments"></div>
-        <div class="panel">
-          <textarea id="cBody" rows="4" placeholder="Add a comment — thoughts, questions, decisions…"></textarea>
-          <div class="toolbar" style="margin:8px 0 0">
-            <button class="btn primary" id="cSend">Comment</button>
-            <label><input type="checkbox" id="cNotify" checked> notify assignee <span id="cNotifyWho" class="muted"></span></label>
-          </div>
-        </div>
-      </div>
-      <div>
-        <div class="panel">
+  <section id="ticketView">
+    <div id="tEmpty" class="empty">Select an item to read or edit it here.<br><span class="small">↑/↓ or j/k move through the list · Esc closes</span></div>
+    <div id="tPane" class="hidden">
+      <div class="pane-h small"><span class="mono muted" id="tId"></span><a href="#" title="Close (Esc)">✕ close</a></div>
+      <div class="panel">
+        <div id="tTitleView"><h2 id="tTitle" style="margin:0 0 4px;font-size:19px;font-weight:600"></h2></div>
+        <div id="tTitleEdit" class="hidden"><input id="eTitle" style="width:100%;font-size:16px"></div>
+        <div class="small muted" id="tByline" style="margin-bottom:12px"></div>
+        <div class="fields">
           <div class="field"><div>Status</div><select id="eStatus"></select></div>
           <div class="field"><div>Priority</div><select id="ePriority"><option>critical</option><option>high</option><option>medium</option><option>low</option></select></div>
           <div class="field"><div>Assignee</div><input id="eAssignee" list="assignees" placeholder="unassigned"></div>
           <div class="field"><div>Project</div><select id="eProject"></select></div>
-          <div class="field"><div>Target version</div><input id="eTarget"></div>
-          <div class="field"><div>Tags (comma-separated)</div><input id="eTags"></div>
-          <div class="field hidden" id="deferredWrap"><div>Deferred reason</div><input id="eDeferred"></div>
-          <button class="btn primary" id="saveMeta" style="width:100%">Save fields</button>
-          <button class="btn hidden" id="promote" style="width:100%;margin-top:8px">Promote idea → open</button>
+          <div class="field wide"><div>Target version</div><input id="eTarget"></div>
+          <div class="field" style="grid-column:1/-1"><div>Tags (comma-separated)</div><input id="eTags"></div>
+          <div class="field hidden" id="deferredWrap" style="grid-column:1/-1"><div>Deferred reason</div><input id="eDeferred"></div>
         </div>
-        <div class="small muted" id="tStamps"></div>
+        <div class="toolbar" style="margin:2px 0 0">
+          <button class="btn primary" id="saveMeta">Save fields</button>
+          <button class="btn hidden" id="promote">Promote idea → open</button>
+        </div>
       </div>
+      <div class="panel">
+        <div id="tBodyView" class="body"></div>
+        <div id="tBodyEdit" class="hidden"><textarea id="eBody" rows="16"></textarea></div>
+        <div class="toolbar" style="margin:12px 0 0">
+          <button class="btn" id="editBtn">Edit text</button>
+          <button class="btn primary hidden" id="saveText">Save</button>
+          <button class="btn hidden" id="cancelText">Cancel</button>
+        </div>
+      </div>
+      <div class="section-h">Comments <span class="count" id="cCount"></span></div>
+      <div id="comments"></div>
+      <div class="panel">
+        <textarea id="cBody" rows="4" placeholder="Add a comment — thoughts, questions, decisions…"></textarea>
+        <div class="toolbar" style="margin:8px 0 0">
+          <button class="btn primary" id="cSend">Comment</button>
+          <label><input type="checkbox" id="cNotify" checked> notify assignee <span id="cNotifyWho" class="muted"></span></label>
+        </div>
+      </div>
+      <div class="small muted" id="tStamps" style="margin-bottom:16px"></div>
     </div>
   </section>
 </main>
@@ -265,11 +279,16 @@ function renderList() {
   $('count').textContent = rows.length + ' item' + (rows.length === 1 ? '' : 's');
   $('rows').innerHTML = rows.length ? rows.map(i => `<tr class="row" data-id="${esc(i.id)}">
       <td>${pPill(i.priority)}</td>
-      <td>${esc(i.title)}${i.comment_count ? ` <span class="muted small">💬 ${i.comment_count}</span>` : ''}<div>${(i.tags || []).slice(0, 6).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div></td>
+      <td class="t">${esc(i.title)}${i.comment_count ? ` <span class="muted small">💬 ${i.comment_count}</span>` : ''}<div>${(i.tags || []).slice(0, 6).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div></td>
       <td>${sPill(i.status)}</td><td class="small">${esc(i.project || 'shared')}</td>
       <td class="small">${esc(i.assigned_to || '—')}</td><td class="small muted" title="${esc(i.updated)}">${ago(i.updated)}</td></tr>`).join('')
     : '<tr><td colspan="6" class="muted">Nothing matches.</td></tr>';
   document.querySelectorAll('tr.row').forEach(r => r.onclick = () => { location.hash = r.dataset.id; });
+  markSel();
+}
+function markSel() {
+  document.querySelectorAll('tr.row').forEach(r => r.classList.toggle('sel', r.dataset.id === SEL_ID));
+  const s = document.querySelector('tr.row.sel'); if (s) s.scrollIntoView({ block: 'nearest' });
 }
 document.querySelectorAll('th[data-k]').forEach(th => th.onclick = () => { SORT = { k: th.dataset.k, dir: SORT.k === th.dataset.k ? -SORT.dir : (th.dataset.k === 'updated' ? -1 : 1) }; renderList(); });
 ['fProject','fView','fStatus','fPriority'].forEach(k => $(k).onchange = () => { saveFilters(); loadList(); });
@@ -279,13 +298,23 @@ $('q').oninput = () => { saveFilters(); renderList(); };
 $('refresh').onclick = loadList;
 
 // ── ticket ──
-let CUR = null;
+let CUR = null; let SEL_ID = null;  // SEL_ID is set on click, before the fetch, so j/k work mid-load
 async function openTicket(id) {
-  $('listView').classList.add('hidden'); $('ticketView').classList.remove('hidden');
-  $('tTitle').textContent = 'Loading…'; $('tBodyView').textContent = ''; $('comments').innerHTML = '';
+  SEL_ID = id; markSel(); document.body.classList.add('has-ticket'); $('tEmpty').classList.add('hidden'); $('tPane').classList.remove('hidden');
+  if (!CUR || CUR.id !== id) { $('tTitle').textContent = 'Loading…'; $('tBodyView').textContent = ''; $('comments').innerHTML = ''; }
   const d = await api('/backlog/api/item?id=' + encodeURIComponent(id));
   if (d.error) { $('tTitle').textContent = d.error; return; }
-  CUR = d; renderTicket();
+  CUR = d; renderTicket(); markSel(); $('ticketView').scrollTop = 0;
+}
+function closeTicket() {
+  CUR = null; SEL_ID = null; document.body.classList.remove('has-ticket');
+  $('tPane').classList.add('hidden'); $('tEmpty').classList.remove('hidden'); markSel();
+}
+// Unsaved typing in the pane (text edit or a comment draft) is confirmed before switching away.
+function dirty() {
+  if (!CUR) return false;
+  const editing = !$('tBodyEdit').classList.contains('hidden') && ($('eTitle').value.trim() !== CUR.title || $('eBody').value !== bodyOf(CUR));
+  return editing || !!$('cBody').value.trim();
 }
 function bodyOf(d) { const c = d.content || ''; const m = c.match(/^# [^\n]*\n\n?([\s\S]*)$/); return m ? m[1] : c; }
 function renderTicket() {
@@ -320,7 +349,7 @@ async function update(fields, okMsg) {
   const r = await post('/backlog/api/update', { id: CUR.id, ...fields });
   if (r.error) { toast(r.error, true); return false; }
   toast(okMsg + (r.redacted ? ' (a secret was redacted)' : ''));
-  await openTicket(r.id || CUR.id); return true;
+  await openTicket(r.id || CUR.id); loadList(); return true;
 }
 $('saveText').onclick = () => {
   const f = {};
@@ -354,7 +383,7 @@ $('cSend').onclick = async () => {
   if (r.error) { toast(r.error, true); return; }
   $('cBody').value = '';
   toast('Comment added' + (r.notified ? (r.notified.error ? ' — notify failed: ' + r.notified.error : ' · ' + r.notified.to + ' notified') : ''), !!(r.notified && r.notified.error));
-  openTicket(CUR.id);
+  openTicket(CUR.id); loadList();
 };
 
 // ── new item ──
@@ -367,17 +396,29 @@ $('nCreate').onclick = async () => {
     project: $('nProject').value, priority: $('nPriority').value, assigned_to: $('nAssignee').value.trim(),
     tags: tagList($('nTags').value), target_version: $('nTarget').value.trim() });
   if (r.error) { toast(r.error, true); return; }
-  $('newDlg').close(); toast('Created ' + r.id); location.hash = r.id;
+  $('newDlg').close(); toast('Created ' + r.id); loadList(); location.hash = r.id;
 };
 
 // ── routing ──
+let LAST_HASH = location.hash;
 function route() {
+  if (location.hash !== LAST_HASH && dirty() && !confirm('Discard your unsaved text on this item?')) { history.replaceState(null, '', LAST_HASH || '#'); return; }
+  LAST_HASH = location.hash;
+  $('cBody').value = '';
   const id = location.hash.slice(1);
-  if (id.startsWith('backlog_')) openTicket(id);
-  else { $('ticketView').classList.add('hidden'); $('listView').classList.remove('hidden'); CUR = null; loadList(); }
+  if (id.startsWith('backlog_')) openTicket(id); else closeTicket();
 }
 window.onhashchange = route;
-(async () => { loadFilters(); await checkLogin(); await loadProjects(); route(); })();
+// Keyboard: j/k or arrows move the selection, Esc closes the pane (ignored while typing).
+document.addEventListener('keydown', e => {
+  if (e.target.closest('input,textarea,select') || e.ctrlKey || e.metaKey || e.altKey || $('newDlg').open) return;
+  const rows = [...document.querySelectorAll('tr.row')]; if (!rows.length && e.key !== 'Escape') return;
+  const i = rows.findIndex(r => r.classList.contains('sel'));
+  if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); location.hash = rows[Math.min(i + 1, rows.length - 1)].dataset.id; }
+  else if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); location.hash = rows[Math.max(i - 1, 0)].dataset.id; }
+  else if (e.key === 'Escape' && CUR) location.hash = '';
+});
+(async () => { loadFilters(); await checkLogin(); await loadProjects(); await loadList(); route(); })();
 </script>
 </body>
 </html>
