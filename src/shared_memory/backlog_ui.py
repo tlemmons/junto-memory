@@ -9,7 +9,7 @@ POST /backlog/api/update       edit fields                              (owner k
 POST /backlog/api/comment      add a comment, optionally notify assignee (owner key)
 
 Gates match /admin: tunnel origins are refused; reads use _lan_only, writes need
-an OWNER-role Bearer key. Every read and write goes through the MCP tool
+an OWNER-role Bearer key or an owner's login cookie (ui_auth.py). Every read and write goes through the MCP tool
 functions under a principal session (never on rosters), so redaction,
 write-lint, op-log and tenant isolation are exactly what agents get. Writes are
 attributed to the key's name; comments from here carry author_kind="human".
@@ -42,6 +42,10 @@ def _ensure_session(session_id: str, name: str, role: str, projects, author_kind
             "tmux_target": None, "role": role, "allowed_projects": list(projects or []),
             "is_principal": True, "author_kind": author_kind,
         }
+    else:
+        # Role/scope can change under a live server (a user's role edited, a key re-scoped).
+        active_sessions[session_id].update({"role": role, "allowed_projects": list(projects or []),
+                                            "last_activity": utc_now_iso()})
     return session_id
 
 
@@ -50,12 +54,11 @@ def _reader() -> str:
 
 
 def _writer(a: Dict[str, Any], request) -> str:
-    """The key's own session: its name, role and project scope (a scoped key stays scoped)."""
-    from shared_memory.auth import parse_bearer_token, validate_api_key
-    rec = validate_api_key(parse_bearer_token([(k.lower(), v) for k, v in request.headers.raw]) or "") or {}
+    """The caller's own session: name, role and project scope from _auth (key or login;
+    a scoped key or user stays scoped)."""
     name = a.get("name") or "human"
-    return _ensure_session(f"web_backlog_{name}", name, a.get("role") or "owner",
-                           rec.get("projects") or [], "human")
+    return _ensure_session(f"web_backlog_{a.get('via') or 'key'}_{name}", name, a.get("role") or "owner",
+                           a.get("projects") or [], "human")
 
 
 def _parse(out: str) -> Dict[str, Any]:

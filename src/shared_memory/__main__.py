@@ -613,6 +613,10 @@ def main():
     register_connection_routes(mcp, get_mongo)
     register_task_routes(mcp, get_mongo)
 
+    # ── Human login (username/password → session cookie, key management) — ui_auth.py ──
+    from shared_memory.ui_auth import register_ui_auth_routes
+    register_ui_auth_routes(mcp, get_mongo)
+
     # ── Backlog (Jira-lite page for humans) — backlog_ui.py ──
     from shared_memory.backlog_ui import register_backlog_routes
     register_backlog_routes(mcp)

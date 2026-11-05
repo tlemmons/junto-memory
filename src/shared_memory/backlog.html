@@ -88,11 +88,8 @@
 <header>
   <h1><a href="#">Junto Backlog</a></h1>
   <div class="login">
-    <span id="who">read-only</span>
-    <input id="key" type="password" placeholder="owner API key" size="22">
-    <button class="btn" id="login">Log in</button>
-    <button class="btn hidden" id="logout">Log out</button>
     <button class="btn primary" id="newBtn">+ New</button>
+    <span id="juntoAccount"></span>
     <a href="/admin" class="small">admin</a> · <a href="/dashboard" class="small">dashboard</a>
   </div>
 </header>
@@ -126,6 +123,7 @@
     <div id="tEmpty" class="empty">Select an item to read or edit it here.<br><span class="small">↑/↓ or j/k move through the list · Esc closes</span></div>
     <div id="tPane" class="hidden">
       <div class="pane-h small"><span class="mono muted" id="tId"></span><a href="#" title="Close (Esc)">✕ close</a></div>
+      <div class="small hidden" id="roHint" style="margin-bottom:8px;color:var(--yellow)">Read-only: log in (top right) to edit or comment.</div>
       <div class="panel">
         <div id="tTitleView"><h2 id="tTitle" style="margin:0 0 4px;font-size:19px;font-weight:600"></h2></div>
         <div id="tTitleEdit" class="hidden"><input id="eTitle" style="width:100%;font-size:16px"></div>
@@ -187,6 +185,7 @@
 <datalist id="assignees"></datalist>
 <div id="toast"></div>
 
+<script src="/ui/account.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const STATUSES = ['idea','open','in_progress','blocked','needs_info','retest','deferred','done','wont_do','duplicate'];
@@ -201,33 +200,19 @@ function sPill(s) { const c = ['idea','open','in_progress','done'].includes(s) ?
 function pPill(p) { return `<span class="pill p-${esc(p)}">${esc(p)}</span>`; }
 function tagList(s) { return (s || '').split(',').map(t => t.trim()).filter(Boolean); }
 
-// Same per-tab key slot as /admin, so logging in on either page covers both.
-let KEY = null; let CAN_WRITE = false;
-try { KEY = sessionStorage.getItem('junto_admin_key'); } catch (e) {}
-async function api(path, opts = {}) {
-  const headers = opts.headers || {};
-  if (KEY) headers['Authorization'] = 'Bearer ' + KEY;
-  if (opts.body) headers['Content-Type'] = 'application/json';
-  const r = await fetch(path, { ...opts, headers });
-  let data; try { data = await r.json(); } catch (e) { data = { error: 'HTTP ' + r.status }; }
-  if (!r.ok && !data.error) data.error = 'HTTP ' + r.status;
-  return data;
-}
+// Login (password cookie or API key) is the shared account widget: /ui/account.js.
+let CAN_WRITE = false;
+const api = (path, opts) => JuntoUI.api(path, opts);
 async function post(path, body) { return api(path, { method: 'POST', body: JSON.stringify(body) }); }
-async function checkLogin() {
-  CAN_WRITE = false;
-  if (KEY) {
-    const me = await api('/admin/api/whoami');
-    if (me.error) { toast('Key rejected: ' + me.error, true); KEY = null; try { sessionStorage.removeItem('junto_admin_key'); } catch (e) {} }
-    else { CAN_WRITE = !!me.can_write; $('who').textContent = me.name + ' (' + me.role + ')' + (CAN_WRITE ? '' : ' · not owner: read-only'); }
-  }
-  if (!KEY) $('who').textContent = 'read-only — log in to edit';
-  $('logout').classList.toggle('hidden', !KEY); $('key').classList.toggle('hidden', !!KEY); $('login').classList.toggle('hidden', !!KEY);
-  document.querySelectorAll('#newBtn,#editBtn,#saveMeta,#cSend,#promote').forEach(b => b.disabled = !CAN_WRITE);
+function applyLogin(me) {
+  CAN_WRITE = !!(me && me.can_write);
+  document.querySelectorAll('#newBtn,#editBtn,#saveMeta,#cSend,#promote').forEach(b => {
+    b.disabled = !CAN_WRITE; b.title = CAN_WRITE ? '' : (me ? 'Editing needs the owner role' : 'Log in (top right) to edit');
+  });
+  $('roHint').classList.toggle('hidden', CAN_WRITE);
+  $('roHint').textContent = me ? 'Read-only: editing needs the owner role.' : 'Read-only: log in (top right) to edit or comment.';
 }
-$('login').onclick = async () => { KEY = $('key').value.trim(); $('key').value = ''; try { sessionStorage.setItem('junto_admin_key', KEY); } catch (e) {} await checkLogin(); };
-$('key').onkeydown = e => { if (e.key === 'Enter') $('login').click(); };
-$('logout').onclick = async () => { KEY = null; try { sessionStorage.removeItem('junto_admin_key'); } catch (e) {} await checkLogin(); };
+JuntoUI.onChange(applyLogin);
 
 // ── filters (remembered per browser) ──
 const FKEYS = ['q','fProject','fView','fStatus','fPriority','fAssignee'];
@@ -418,7 +403,7 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); location.hash = rows[Math.max(i - 1, 0)].dataset.id; }
   else if (e.key === 'Escape' && CUR) location.hash = '';
 });
-(async () => { loadFilters(); await checkLogin(); await loadProjects(); await loadList(); route(); })();
+(async () => { loadFilters(); applyLogin(await JuntoUI.ready); await loadProjects(); await loadList(); route(); })();
 </script>
 </body>
 </html>

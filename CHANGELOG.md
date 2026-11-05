@@ -6,7 +6,16 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+## [1.45.0] - 2026-11-05
+
+### Added
+- **Human web login** (Tom). `/admin`, `/backlog` and `/dashboard` now have a shared account widget (`/ui/account.js`). You log in with a username and password and stay logged in on that browser for 30 days, with no API key to paste. Accounts are created on the host only, never over the web: `docker exec -it mcp-rag-arch python -m shared_memory.ui_user add <name>`. The same CLI also has `passwd`, `list`, `disable` and `enable`.
+- **Account menu.** It shows who you are and has log out, log out everywhere, change password, and API keys for owners. An owner can list keys (name, role, projects, last used), create one (the raw key is shown once, with a copy button) and revoke one. Existing keys can't be shown again, because only their sha256 is stored.
+- **Security.** Passwords are hashed with stdlib scrypt. The session cookie is HttpOnly and SameSite=Strict, and only its sha256 is stored server-side (`ui_sessions`, TTL-expired). The user's role and scope are re-read on every request. A state-changing request made with the cookie needs an `X-Junto-UI: 1` header. There is no CORS, so another site cannot send it. Origin is logged, not enforced, because proxies and port forwards change it. Five failed logins lock a username for 15 minutes. Every `/ui` route refuses tunnel origins.
+
 ### Changed
+- `admin_ui._auth` and `_lan_only` accept the login cookie as well as `Authorization: Bearer`. When both are present, the Bearer key wins. Under `JUNTO_REQUIRE_KEY`, server-wide reads need an unscoped login, the same rule as for keys. `/admin/api/whoami` gains `via` (`"session"` or `"key"`).
+- The pages' own key boxes are replaced by the account widget. "Use an API key instead" is still in the login form, and the key is still kept per tab.
 - **`/backlog` page hides closed items by default** (Tom). Closed means done, wont_do and duplicate. A "show completed" checkbox brings them back. It starts unticked on every load and isn't remembered. Picking a closed status in the Status filter shows those items regardless. The "Everything incl. done" view is gone, replaced by "Work + ideas".
 - **`/backlog` page reads and edits in a right-hand pane** (Tom). The list stays on the left. Clicking a row opens the item beside it, and you can edit fields, edit text and comment there without leaving the list. j/k or ↑/↓ move through the list and Esc closes the pane. Before switching items, the page asks if there's unsaved text or a comment draft. Below 1000px wide it falls back to one view at a time.
 
