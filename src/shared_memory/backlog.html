@@ -91,8 +91,9 @@
       <label>View <select id="fView">
         <option value="work">Work (open + active)</option>
         <option value="ideas">Ideas</option>
-        <option value="all">Everything incl. done</option>
+        <option value="both">Work + ideas</option>
       </select></label>
+      <label title="Closed = done, wont_do, duplicate"><input type="checkbox" id="fClosed"> show completed</label>
       <label>Status <select id="fStatus"><option value="">any</option></select></label>
       <label>Priority <select id="fPriority"><option value="">any</option><option>critical</option><option>high</option><option>medium</option><option>low</option></select></label>
       <label>Assignee <input id="fAssignee" list="assignees" size="12"></label>
@@ -217,7 +218,9 @@ $('logout').onclick = async () => { KEY = null; try { sessionStorage.removeItem(
 // ── filters (remembered per browser) ──
 const FKEYS = ['q','fProject','fView','fStatus','fPriority','fAssignee'];
 function saveFilters() { try { localStorage.setItem('junto_backlog_filters', JSON.stringify(Object.fromEntries(FKEYS.map(k => [k, $(k).value])))); } catch (e) {} }
-function loadFilters() { try { const f = JSON.parse(localStorage.getItem('junto_backlog_filters') || '{}'); FKEYS.forEach(k => { if (f[k] !== undefined) $(k).value = f[k]; }); } catch (e) {} }
+function loadFilters() { try { const f = JSON.parse(localStorage.getItem('junto_backlog_filters') || '{}'); FKEYS.forEach(k => { if (f[k] !== undefined) $(k).value = f[k]; }); } catch (e) {} if (!$('fView').value) $('fView').value = 'work'; }
+// Closed items are hidden unless "show completed" is ticked (deliberately not remembered: hidden is the default).
+const CLOSED = ['done','wont_do','duplicate'];
 STATUSES.forEach(s => { $('fStatus').insertAdjacentHTML('beforeend', `<option>${s}</option>`); $('eStatus').insertAdjacentHTML('beforeend', `<option>${s}</option>`); });
 
 let PROJECTS = [];
@@ -239,8 +242,8 @@ async function loadList() {
   else if (v === 'ideas') p.set('status', 'idea');
   if ($('fPriority').value) p.set('priority', $('fPriority').value);
   if ($('fAssignee').value.trim()) p.set('assigned_to', $('fAssignee').value.trim());
-  if (v === 'all') { p.set('include_done', '1'); p.set('include_ideas', '1'); }
-  if ($('fStatus').value === 'done' || $('fStatus').value === 'wont_do') p.set('include_done', '1');
+  if (v === 'both') p.set('include_ideas', '1');
+  if ($('fClosed').checked || CLOSED.includes($('fStatus').value)) p.set('include_done', '1');
   $('rows').innerHTML = '<tr><td colspan="6" class="muted">Loading…</td></tr>';
   const d = await api('/backlog/api/items?' + p);
   if (d.error) { $('rows').innerHTML = `<tr><td colspan="6" style="color:var(--red)">${esc(d.error)}</td></tr>`; return; }
@@ -251,7 +254,9 @@ async function loadList() {
 }
 function renderList() {
   const q = $('q').value.trim().toLowerCase();
-  let rows = ITEMS.filter(i => !q || (i.title + ' ' + i.id + ' ' + (i.tags || []).join(' ')).toLowerCase().includes(q));
+  const showClosed = $('fClosed').checked || CLOSED.includes($('fStatus').value);
+  let rows = ITEMS.filter(i => showClosed || !CLOSED.includes(i.status));
+  rows = rows.filter(i => !q || (i.title + ' ' + i.id + ' ' + (i.tags || []).join(' ')).toLowerCase().includes(q));
   const k = SORT.k;
   rows.sort((a, b) => {
     const av = k === 'priority' ? PRI[a.priority] ?? 9 : (a[k] || ''), bv = k === 'priority' ? PRI[b.priority] ?? 9 : (b[k] || '');
@@ -269,6 +274,7 @@ function renderList() {
 document.querySelectorAll('th[data-k]').forEach(th => th.onclick = () => { SORT = { k: th.dataset.k, dir: SORT.k === th.dataset.k ? -SORT.dir : (th.dataset.k === 'updated' ? -1 : 1) }; renderList(); });
 ['fProject','fView','fStatus','fPriority'].forEach(k => $(k).onchange = () => { saveFilters(); loadList(); });
 $('fAssignee').onchange = () => { saveFilters(); loadList(); };
+$('fClosed').onchange = loadList;
 $('q').oninput = () => { saveFilters(); renderList(); };
 $('refresh').onclick = loadList;
 

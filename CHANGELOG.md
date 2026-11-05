@@ -6,6 +6,9 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+### Changed
+- **`/backlog` page hides closed items by default** (Tom). Closed means done, wont_do and duplicate. A "show completed" checkbox brings them back. It starts unticked on every load and isn't remembered. Picking a closed status in the Status filter shows those items regardless. The "Everything incl. done" view is gone, replaced by "Work + ideas".
+
 ## [1.44.0] - 2026-11-04
 
 ### Added
