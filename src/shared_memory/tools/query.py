@@ -672,6 +672,19 @@ async def memory_get_by_id(
                 payload["verification_reason"] = meta.get("verification_reason")
         if resolved_from:
             payload["resolved_from_prefix"] = resolved_from
+        # Backlog tickets: their fields + comment thread (interface:backlog-ideas-comments-v0 §2).
+        if meta.get("type") == "backlog":
+            for _k in ("backlog_status", "priority", "assigned_to", "target_version", "created_by"):
+                if meta.get(_k):
+                    payload[_k] = meta[_k]
+            try:
+                from shared_memory.backlog_comments import list_comments
+                _db = get_mongo()
+                _cm = list_comments(_db, found_id) if _db is not None else []
+                if _cm:
+                    payload["comments"] = _cm
+            except Exception as e:  # noqa: BLE001
+                log.warning("get_by_id: backlog comments failed for %s: %s", found_id, e)
         # Facets ride the follow-through surface too (get_by_id is the
         # documented pointer-chase for /recall). Best-effort, learnings only.
         if found_id.startswith("learning_"):

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 from typing import List
 
 from mcp.server.fastmcp import Context
@@ -9,7 +10,14 @@ from mcp.server.fastmcp import Context
 from shared_memory.app import mcp
 from shared_memory.auth import collection_allowed, project_allowed, tenant_isolation_error
 from shared_memory.clients import get_chroma, get_mongo
-from shared_memory.config import BACKLOG_PRIORITIES, BACKLOG_STATUSES, PROJECT_PREFIX, SHARED_PREFIX
+from shared_memory.config import (
+    BACKLOG_ADD_STATUSES,
+    BACKLOG_IDEA_STATUS,
+    BACKLOG_PRIORITIES,
+    BACKLOG_STATUSES,
+    PROJECT_PREFIX,
+    SHARED_PREFIX,
+)
 from shared_memory.helpers import (
     get_project_collection,
     get_shared_collection,
@@ -34,6 +42,7 @@ async def memory_add_backlog_item(
     tags: List[str] = None,
     target_version: str = None,
     deferred_reason: str = None,
+    status: str = "open",
     ctx: Context = None
 ) -> str:
     """
@@ -55,11 +64,17 @@ async def memory_add_backlog_item(
         tags: Tags for categorization (e.g., ["tech-debt", "v7"])
         target_version: Target version/release for this item (e.g., "v6.1", "sprint-5")
         deferred_reason: Reason for deferring (when status is deferred)
+        status: "open" (default) or "idea". An idea is a brainstorm item, not
+            work to pick up; memory_list_backlog leaves ideas out unless asked
+            (interface:backlog-ideas-comments-v0).
     """
     error = require_session(session_id)
     if error:
         return error
 
+    status = status or "open"
+    if status not in BACKLOG_ADD_STATUSES:
+        return json.dumps({"error": f"Invalid status for a new item. Must be one of: {BACKLOG_ADD_STATUSES}"})
     if priority not in BACKLOG_PRIORITIES:
         return json.dumps({"error": f"Invalid priority. Must be one of: {BACKLOG_PRIORITIES}"})
 
@@ -96,7 +111,7 @@ async def memory_add_backlog_item(
     metadata = {
         "title": title,
         "type": "backlog",
-        "backlog_status": "open",
+        "backlog_status": status,
         "priority": priority,
         "project": project or "",
         "assigned_to": assigned_to or "",
@@ -145,6 +160,7 @@ async def memory_add_backlog_item(
         "id": backlog_id,
         "title": title,
         "priority": priority,
+        "backlog_status": status,
         "project": project or "shared",
         "assigned_to": assigned_to,
         "target_version": target_version,
@@ -176,6 +192,7 @@ async def memory_list_backlog(
     include_done: bool = False,
     updated_within_days: int = None,
     limit: int = 20,
+    include_ideas: bool = False,
     offset: int = 0,
     ctx: Context = None
 ) -> str:
@@ -198,6 +215,9 @@ async def memory_list_backlog(
         tags_match: How to match `tags` — "all" (default; item must carry every
             listed tag) or "any" (item carries at least one listed tag).
         include_done: Include completed items (default False)
+        include_ideas: Include brainstorm items (status "idea"; default False).
+            status="idea" lists only ideas. Don't start work on an idea — comment
+            on it instead (interface:backlog-ideas-comments-v0).
         updated_within_days: Only return items whose `updated` timestamp is within
             the last N days. Omit (default None) to disable the recency filter.
             Server-side filter — cheaper than load-then-filter at the caller.
@@ -286,6 +306,8 @@ async def memory_list_backlog(
                             continue
                 if not include_done and item_status in ["done", "wont_do"]:
                     continue
+                if item_status == BACKLOG_IDEA_STATUS and not include_ideas and status != BACKLOG_IDEA_STATUS:
+                    continue
                 if recency_cutoff is not None:
                     item_updated = parse_timestamp(meta.get("updated"))
                     if item_updated is None or item_updated < recency_cutoff:
@@ -322,6 +344,18 @@ async def memory_list_backlog(
     effective_limit = min(limit, 100) if limit > 0 else total
     paginated = items[offset:offset + effective_limit] if effective_limit else items[offset:]
 
+    # comment_count rides a row only when > 0 (interface:backlog-ideas-comments-v0 §2)
+    try:
+        from shared_memory.backlog_comments import counts as _comment_counts
+        _db = get_mongo()
+        if _db is not None and paginated:
+            _n = _comment_counts(_db, [it["id"] for it in paginated])
+            for it in paginated:
+                if _n.get(it["id"]):
+                    it["comment_count"] = _n[it["id"]]
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning("list_backlog: comment counts failed: %s", e)
+
     result = {
         "count": len(paginated),
         "total": total,
@@ -347,6 +381,8 @@ async def memory_update_backlog_item(
     target_version: str = None,
     deferred_reason: str = None,
     project: str = None,
+    tags: List[str] = None,
+    comment: str = None,
     ctx: Context = None
 ) -> str:
     """
@@ -363,6 +399,9 @@ async def memory_update_backlog_item(
         target_version: Target version/release (e.g., "v6.1", "sprint-5")
         deferred_reason: Reason for deferring (when status is deferred)
         project: Move item to a different project (deletes from current collection, adds to new one)
+        tags: Replace the item's tags with this list
+        comment: Add a comment to the item's thread (may be the only argument).
+            Comments show in memory_get_by_id (interface:backlog-ideas-comments-v0).
     """
     error = require_session(session_id)
     if error:
@@ -374,9 +413,9 @@ async def memory_update_backlog_item(
         return json.dumps({"error": f"Invalid priority. Must be one of: {BACKLOG_PRIORITIES}"})
 
     from shared_memory.redact import redact_fields, redaction_notice
-    (title, description, deferred_reason), _redacted = redact_fields(
-        title, description, deferred_reason, tool="memory_update_backlog_item",
-        session_id=session_id, fields=["title", "description", "deferred_reason"])
+    (title, description, deferred_reason, comment), _redacted = redact_fields(
+        title, description, deferred_reason, comment, tool="memory_update_backlog_item",
+        session_id=session_id, fields=["title", "description", "deferred_reason", "comment"])
 
     chroma = await get_chroma()
     session_info = active_sessions[session_id]
@@ -415,6 +454,8 @@ async def memory_update_backlog_item(
                     meta["target_version"] = target_version
                 if deferred_reason is not None:
                     meta["deferred_reason"] = deferred_reason
+                if tags is not None:
+                    meta["tags"] = json.dumps([t for t in tags if t])
 
                 meta["updated"] = now
                 meta["updated_by"] = session_info["claude_instance"]
@@ -499,6 +540,7 @@ async def memory_update_backlog_item(
                         "deferred_reason": meta.get("deferred_reason") or "",
                         "moved_from_collection": col.name if moved else None,
                         "edit_count": meta.get("edit_count"),
+                        "tags": json.loads(meta.get("tags") or "[]"),
                         "updated": now,
                         "embedding": embedding,
                     },
@@ -516,6 +558,22 @@ async def memory_update_backlog_item(
                     "target_version": meta.get("target_version") or None,
                     "deferred_reason": meta.get("deferred_reason") or None
                 }
+                if comment and comment.strip():
+                    from shared_memory.backlog_comments import add_comment
+                    _db = get_mongo()
+                    if _db is None:
+                        _resp["comment_error"] = "MongoDB unavailable; comment not saved"
+                    else:
+                        try:
+                            _c = add_comment(
+                                _db, item_id, meta.get("project") or "",
+                                session_info["claude_instance"],
+                                session_info.get("author_kind") or "agent", comment)
+                            _resp["comment_id"] = _c["id"]
+                        except ValueError as e:
+                            _resp["comment_error"] = str(e)
+                if tags is not None:
+                    _resp["tags"] = json.loads(meta.get("tags") or "[]")
                 if _redacted:
                     _resp.update(redaction_notice(_redacted))
                 return json.dumps(_resp)

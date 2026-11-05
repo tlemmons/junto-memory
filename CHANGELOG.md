@@ -6,6 +6,21 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+### Changed
+- **`/backlog` page hides closed items by default** (Tom). Closed means done, wont_do and duplicate. A "show completed" checkbox brings them back. It starts unticked on every load and isn't remembered. Picking a closed status in the Status filter shows those items regardless. The "Everything incl. done" view is gone, replaced by "Work + ideas".
+- **`/backlog` page reads and edits in a right-hand pane** (Tom). The list stays on the left. Clicking a row opens the item beside it, and you can edit fields, edit text and comment there without leaving the list. j/k or ↑/↓ move through the list and Esc closes the pane. Before switching items, the page asks if there's unsaved text or a comment draft. Below 1000px wide it falls back to one view at a time.
+
+## [1.44.0] - 2026-11-04
+
+### Added
+- **`/backlog` page.** A Jira-lite ticket view for humans (interface:backlog-ideas-comments-v0). It lists every project with filters and search. Open a ticket to edit its text and fields, comment on it, and create new items. It is LAN-only like `/admin`, and writes need an owner key (the same browser-tab key as `/admin`). Every read and write goes through the backlog tools under a principal session, so redaction, write-lint, op-log and tenant isolation are exactly what agents get.
+- **`idea` backlog status** for brainstorm items. `memory_list_backlog` leaves ideas out unless you pass `include_ideas=true` or `status="idea"`, so agents don't pick them up as work. `memory_add_backlog_item(status="idea")` creates one.
+- **Ticket comments.** `memory_update_backlog_item(comment=...)` adds one (redacted). `memory_get_by_id` on a `backlog_*` id now returns `comments` plus the item's status, priority, assignee, target version and creator. List rows carry `comment_count` when it's above zero. A comment from the page can notify the assignee.
+- **`memory_update_backlog_item(tags=[...])`** replaces an item's tags.
+
+### Changed
+- **Backlog items and comments are never replicated to peers** (Tom). `backlog.added` and `backlog.updated` are still written to the local op-log for audit and restore, but `memory_sync_pull` leaves them out, and `memory_sync_push` rejects them with `local_only`. Comments have no op type at all. Before this, peer sync carried backlog items.
+
 ## [1.43.4] - 2026-11-04
 
 ### Fixed

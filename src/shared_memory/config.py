@@ -155,7 +155,12 @@ DEFAULT_EXPIRY_DAYS = {
 WORK_STATUSES = ["in_progress", "blocked", "completed", "abandoned"]
 
 # Backlog item statuses
-BACKLOG_STATUSES = ["open", "in_progress", "deferred", "done", "wont_do", "retest", "blocked", "duplicate", "needs_info"]
+BACKLOG_STATUSES = ["open", "in_progress", "deferred", "done", "wont_do", "retest", "blocked", "duplicate", "needs_info", "idea"]
+
+# Brainstorm items (interface:backlog-ideas-comments-v0 §1): not work to pick up,
+# so memory_list_backlog leaves them out unless asked.
+BACKLOG_IDEA_STATUS = "idea"
+BACKLOG_ADD_STATUSES = ["open", "idea"]
 
 # Backlog priorities
 BACKLOG_PRIORITIES = ["critical", "high", "medium", "low"]

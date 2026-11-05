@@ -613,6 +613,10 @@ def main():
     register_connection_routes(mcp, get_mongo)
     register_task_routes(mcp, get_mongo)
 
+    # ── Backlog (Jira-lite page for humans) — backlog_ui.py ──
+    from shared_memory.backlog_ui import register_backlog_routes
+    register_backlog_routes(mcp)
+
     # ── Delegated-inference runner API (runners are service principals) — runner_api.py ──
     from shared_memory.runner_api import register_runner_routes
     register_runner_routes(mcp, get_mongo)
