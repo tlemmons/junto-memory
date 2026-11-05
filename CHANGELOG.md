@@ -6,6 +6,8 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+## [1.45.0] - 2026-11-05
+
 ### Added
 - **Human web login** (Tom). `/admin`, `/backlog` and `/dashboard` now have a shared account widget (`/ui/account.js`). You log in with a username and password and stay logged in on that browser for 30 days, with no API key to paste. Accounts are created on the host only, never over the web: `docker exec -it mcp-rag-arch python -m shared_memory.ui_user add <name>`. The same CLI also has `passwd`, `list`, `disable` and `enable`.
 - **Account menu.** It shows who you are and has log out, log out everywhere, change password, and API keys for owners. An owner can list keys (name, role, projects, last used), create one (the raw key is shown once, with a copy button) and revoke one. Existing keys can't be shown again, because only their sha256 is stored.
