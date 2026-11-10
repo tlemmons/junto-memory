@@ -274,3 +274,45 @@ async def test_define_spec_recovers_malformed_xml_leak(monkeypatch):
     assert "</content>" not in stored_doc and "</invoke>" not in stored_doc, stored_doc
     # A swallowed non-project param (spec_type) is preserved in-doc, not lost.
     assert "agent_state" in stored_doc, stored_doc
+
+
+async def test_define_spec_without_project_refuses_to_fork_project_spec(monkeypatch):
+    """backlog_44c1d5797441: get_spec without project falls back to the caller's
+    project, but define_spec without project wrote a NEW shared copy, forking the
+    spec. It now refuses and names the project; force=True still creates it."""
+    cols = {}
+    _patch_chroma(monkeypatch, cols)
+    proj = _FakeCol("proj_nimbus")
+    await proj.upsert(["spec_interface_x-v0"], ["v1 body"],
+                      [_spec_meta("1.0.0", "interface", "active", "nimbus", name="interface:x-v0")])
+    cols["proj_nimbus"] = proj
+    _install()
+    res = json.loads(await specs.memory_define_spec(
+        session_id="s1", name="interface:x-v0", content="v2 body", spec_type="interface"))
+    assert res.get("error") == "spec_exists_in_project" and res["project"] == "nimbus", res
+    assert "spec_interface_x-v0" not in cols.get("shared_patterns", _FakeCol("x")).docs
+
+    res = json.loads(await specs.memory_define_spec(
+        session_id="s1", name="interface:x-v0", content="v2 body", spec_type="interface", force=True))
+    assert "error" not in res, res
+    assert "spec_interface_x-v0" in cols["shared_patterns"].docs
+
+
+async def test_define_spec_without_project_still_updates_existing_shared(monkeypatch):
+    cols = {}
+    _patch_chroma(monkeypatch, cols)
+    for name in ("proj_nimbus", "shared_patterns"):
+        await _patch_target(cols, name)
+    _install()
+    res = json.loads(await specs.memory_define_spec(
+        session_id="s1", name="interface:x-v0", content="v2 body", spec_type="interface",
+        owner="frames-team"))
+    assert "error" not in res, res
+    assert cols["shared_patterns"].docs["spec_interface_x-v0"][0] == "v2 body"
+
+
+async def _patch_target(cols, name):
+    col = cols.setdefault(name, _FakeCol(name))
+    await col.upsert(["spec_interface_x-v0"], ["v1 body"],
+                     [_spec_meta("1.0.0", "interface", "active",
+                                 "nimbus" if name.startswith("proj_") else "", name="interface:x-v0")])
