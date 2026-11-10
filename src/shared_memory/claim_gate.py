@@ -254,7 +254,12 @@ def _cache_claim(db, doc_id: str, claim: str) -> None:
     if db is None:
         return
     from shared_memory.helpers import utc_now_iso
+    from shared_memory.redact import redact_secrets
 
+    # A model-written claim can quote a secret the body no longer shows
+    # (infra-team msg_eec26d1a9b4d: a 09-14 claim kept a password the body's
+    # later scrub removed). Redact here like every free-text writer.
+    claim, _ = redact_secrets(claim)
     db[CLAIMS_COLLECTION].update_one(
         {"_id": doc_id},
         {"$set": {
