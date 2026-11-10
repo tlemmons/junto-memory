@@ -163,3 +163,31 @@ def test_redact_fields_logs_one_event_with_field_names(monkeypatch):
     ev = logged[0]
     assert ev["tool"] == "memory_store" and ev["project"] == "nimbus" and ev["agent"] == "billing-team"
     assert ev["hits"] == [{"kind": "assigned_secret", "key": "token", "len": 32, "field": "content"}]
+
+
+# backlog_c4c5a7dd19ce: prose false positives from the 2026-11-04 stored-data
+# scan. Values are obviously fake.
+def test_prose_pass_is_not_a_key():
+    for text in ("## Handoff Notes Next pass: rerun_the_backfill2 tonight",  # nosemgrep
+                 "Acceptance (f) and (c) pass: f1c17da5e9 and 7cc0b78f0e",  # nosemgrep
+                 "efuse unreviewed commits. Bypass: admin-merge-v2 on main",  # nosemgrep
+                 "Optional same-pass: fixup_rows_v3 after ACL lands"):  # nosemgrep
+        assert redact_secrets(text) == (text, {})
+
+
+def test_pass_with_credential_context_still_redacts():
+    for text in ("user: bob pass: Fak3Pw-xyz-123",  # nosemgrep
+                 "ssh pi@frame-host pass: Fak3Pw-xyz-123",  # nosemgrep
+                 "DB_PASS: Fak3Pw-xyz-123", "db_pass: Fak3Pw-xyz-123"):  # nosemgrep
+        out, found = redact_secrets(text)
+        assert "Fak3Pw-xyz-123" not in out and found == {"assigned_secret": 1}, text
+
+
+def test_time_is_not_a_conn_handle():
+    text = "2 adjacent ~20s native holds @16:02: frameStateChangedXYZ987"
+    assert redact_secrets(text) == (text, {})
+
+
+def test_conn_handle_with_host_still_redacts():
+    out, found = redact_secrets("staging_rw @ db.example.test:3306 : Fak3Pw-xyz-1234")  # nosemgrep
+    assert "Fak3Pw-xyz-1234" not in out and found == {"conn_secret": 1}
