@@ -314,8 +314,19 @@ def _store_facets(db, doc_id: str, facets: Dict) -> None:
     if db is None:
         return
     from shared_memory.helpers import utc_now_iso
+    from shared_memory.redact import redact_secrets
 
-    row = {k: v for k, v in facets.items() if v}
+    # Facets are model output and are served by get_by_id and recall, so they
+    # go through the redactor too (infra-team msg_eec26d1a9b4d).
+    row = {}
+    for k, v in facets.items():
+        if not v:
+            continue
+        if isinstance(v, str):
+            v, _ = redact_secrets(v)
+        elif isinstance(v, list):
+            v = [redact_secrets(x)[0] if isinstance(x, str) else x for x in v]
+        row[k] = v
     row.update({
         "recipe_version": FACETS_RECIPE_VERSION,
         "model": claim_gate._extract_model(),

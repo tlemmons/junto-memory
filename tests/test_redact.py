@@ -191,3 +191,19 @@ def test_time_is_not_a_conn_handle():
 def test_conn_handle_with_host_still_redacts():
     out, found = redact_secrets("staging_rw @ db.example.test:3306 : Fak3Pw-xyz-1234")  # nosemgrep
     assert "Fak3Pw-xyz-1234" not in out and found == {"conn_secret": 1}
+
+
+# infra-team msg_eec26d1a9b4d: a facets claim quoted the password in prose.
+def test_quoted_prose_secret_redacts():
+    for text in ('reset to a username of "admin" and a new password "Fak3Pw-xyz-12345" as of today',  # nosemgrep
+                 "the secret is 'Fak3Pw-xyz-12345' for now"):  # nosemgrep
+        out, found = redact_secrets(text)
+        assert "Fak3Pw-xyz-12345" not in out and found == {"quoted_secret": 1}, (text, out)
+    assert '"admin"' in redact_secrets('username of "admin" and password "Fak3Pw-xyz-12345"')[0]
+
+
+def test_quoted_prose_names_are_not_secrets():
+    for text in ('the token "CheckoutToken" is read from config',
+                 'the secret "github_webhook_secret" lives in 1Password',
+                 'password "${DB_PASS}" comes from env'):
+        assert redact_secrets(text) == (text, {}), text

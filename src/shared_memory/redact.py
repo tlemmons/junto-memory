@@ -82,6 +82,15 @@ _CONN_HANDLE_RE = re.compile(
     r"(?P<pre>\b[\w.\-]+\s*@\s*(?=[\w.\-]*[A-Za-z.])[\w.\-]+:\d{2,5}\s*:\s*)(?P<val>[^\s\"'`,;]{12,})"
 )
 
+# Prose that quotes the value: 'a new password "Xy7…"', 'secret is "…"'. A
+# model-written facets claim leaked a password in exactly this shape (no = or :).
+_QUOTED_RE = re.compile(
+    r"(?P<pre>\b(?:password|passwd|passphrase|secret|token)s?\b"
+    r"(?:\s+(?:is|was|of|to|now|set to|reset to))?\s+[\"'])"
+    r"(?P<val>[^\"'\s]{8,})(?P<post>[\"'])",
+    re.IGNORECASE,
+)
+
 # The host must hold a letter or a dot (above): "holds @16:02: …" is a time,
 # not host:port (scan 2026-11-04, backlog_c4c5a7dd19ce).
 
@@ -192,6 +201,7 @@ def redact_secrets(text: str, hits: Optional[List[Dict]] = None) -> Tuple[str, D
     text = _CLI_FLAG_RE.sub(_value_sub("cli_secret"), text)
     text = _ASSIGN_RE.sub(_value_sub("assigned_secret"), text)
     text = _CONN_HANDLE_RE.sub(_value_sub("conn_secret"), text)
+    text = _QUOTED_RE.sub(_value_sub("quoted_secret"), text)
     return text, found
 
 
