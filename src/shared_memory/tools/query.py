@@ -12,7 +12,7 @@ from shared_memory.app import mcp
 from shared_memory.auth import collection_allowed, project_allowed, scoped_projects
 from shared_memory.clients import get_chroma, get_mongo
 from shared_memory.config import OVERLAP_WINDOW_HOURS, PROJECT_PREFIX, SHARED_PREFIX
-from shared_memory.decay import STALE_BELOW
+from shared_memory.decay import STALE_BELOW, is_unreviewed_extract
 from shared_memory.helpers import (
     cleanup_stale_signals,
     embed_query_once,
@@ -438,10 +438,16 @@ async def memory_query(
         # Relevance band: >70% = 0 (best), 50-70% = 1, <50% = 2
         pct = int(r["relevance"].rstrip("%")) / 100
         band = 0 if pct > 0.70 else (1 if pct > 0.50 else 2)
-        # Within band: verified first (interface:verification-state-v0), then
-        # rows past their half-life last (decay flag), then newest first.
-        # Neither lifts nor drops a doc across a band.
-        verified = 0 if r.get("verification") == "verified" else 1
+        # Within band: verified first (interface:verification-state-v0),
+        # unreviewed extractor rows last among the rest, then rows past their
+        # half-life last (decay flag), then newest first. None of these lifts
+        # or drops a doc across a band.
+        if r.get("verification") == "verified":
+            verified = 0
+        elif is_unreviewed_extract(r.get("authored_by"), r.get("verification")):
+            verified = 2
+        else:
+            verified = 1
         stale = 1 if r.get("_decay", 1.0) < STALE_BELOW else 0
         ts = parse_timestamp(r.get("updated") or r.get("created"))
         epoch = ts.timestamp() if ts else 0
