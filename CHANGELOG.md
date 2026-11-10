@@ -10,6 +10,7 @@ version via `memory_health` (`server_version`).
 
 ### Fixed
 - **Facets and the claim cache are redacted at write.** A model-written `facets.claim` could quote a secret the doc body no longer showed (infra-team report). `learning_facets` claims and triggers and `learning_claims` now go through the redactor like every free-text writer.
+- **Idle nudges no longer pile up.** Each new idle nudge supersedes the recipient's unread older ones, and nudges now expire after 48h like other info messages. Before, an agent with a closed terminal collected one per idle cycle (96 for one work-box agent) and got them all replayed at once on its next launch.
 - **New redactor shape `quoted_secret`:** prose that quotes the value, such as `password "…"` or `secret is "…"`, with no `=` or `:`.
 
 ## [1.46.0] - 2026-11-10
