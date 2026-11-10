@@ -103,6 +103,11 @@ class _FakeMessages:
     def insert_one(self, doc):
         self.docs.append(doc)
 
+    def update_many(self, flt, upd):
+        for d in self.docs:
+            if all(d.get(k) == v for k, v in flt.items()):
+                d.update(upd["$set"])
+
 
 class _FakeDb:
     def __init__(self):
@@ -668,3 +673,22 @@ def test_server_policy_fills_in_when_project_has_none(monkeypatch):
 def test_valid_timezone():
     assert idle_park.valid_timezone("America/Denver")
     assert not idle_park.valid_timezone("Mountain") and not idle_park.valid_timezone(None)
+
+
+async def test_new_nudge_supersedes_unread_old_one_and_carries_ttl(monkeypatch):
+    """juntoTom msg_d70227a93049: 96 unread nudges piled up for one closed
+    terminal and replayed in a burst. Only the newest stays pending."""
+    from shared_memory.tools import messaging
+
+    async def fake_notify(project, agent, packet=None):
+        pass
+
+    monkeypatch.setattr(messaging, "_notify_inbox_for_send", fake_notify)
+    db = _FakeDb()
+    first = await idle_park._send_nudge(db, "junto", "memory", 50)
+    second = await idle_park._send_nudge(db, "junto", "memory", 50)
+    other = await idle_park._send_nudge(db, "junto", "inbox", 50)
+    by_id = {d["_id"]: d for d in db.messages.docs}
+    assert by_id[first]["status"] == "completed" and by_id[first]["superseded_by"] == second
+    assert by_id[second]["status"] == "pending" and by_id[other]["status"] == "pending"
+    assert by_id[second]["expire_at"] > by_id[second]["created_at"]
