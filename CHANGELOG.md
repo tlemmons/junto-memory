@@ -6,6 +6,16 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+## [1.46.0] - 2026-11-10
+
+### Changed
+- **Unreviewed transcript-extractor rows rank lower** (Tom's 11-10 keep ruling). In `memory_query` they sort last within their relevance band; in `/recall` they take a 0.05 sort penalty. The reported score is unchanged, and a verified extractor row ranks normally.
+- **`memory_define_spec` without `project` no longer forks a project spec.** If your own project already has an active spec with that name and there is no shared one, the call returns `error: spec_exists_in_project` naming the project. Pass `project=` to update it, or `force=True` to create a separate shared spec.
+- **Transcript extractor** (`contrib/transcript-extract`): de-identifies by default (emails, IPs, phone numbers, uuids, long numeric ids; the prompt asks for roles instead of names); drops point-in-time records and status sentences; treats `memory_register_function` as already saved; checks the top 3 results for duplicates.
+
+### Fixed
+- **Redactor false positives.** Prose such as "Next pass:", "3 cases pass:" and "Bypass:" is no longer redacted unless a credential word or `user@host` comes just before it. `DB_PASS` and `db_pass` still redact. A time like "@16:02:" is no longer read as a `host:port` connection handle.
+
 ## [1.45.0] - 2026-11-05
 
 ### Added
