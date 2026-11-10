@@ -9,6 +9,8 @@ Rules learned from a reviewed trial (2026-10-30):
 - Lines marked "ALREADY SAVED" are things the session already recorded. Do not extract anything that restates them.
 - Record the session's FINAL understanding. Read to the end before writing. If the session later corrected, retracted or disproved a claim, write only the corrected version, or nothing. Never write a claim the session walked back.
 - No point-in-time state: what is deployed, merged, pending or awaiting approval, current counts, line numbers, "still broken". Write the lasting fact (the mechanism, the cause, the rule), or skip the record.
+- Never assert status: do not say a change was applied, deployed, merged or restarted, or that something still needs a restart. Status goes stale within days; the week review found it was the main source of wrong rows.
+- Refer to people by role, never by name: "the customer", "the operator", "a teammate", "the agent". Leave out user ids, frame ids, order or tracking numbers, emails, phone numbers and IP addresses entirely.
 
 Leave out:
 - plans, todos, guesses, and anything not confirmed by the end of the excerpt
@@ -23,8 +25,9 @@ Write each record so it stands on its own without the transcript:
 - title: one line, under 100 characters, naming the subject concretely.
 - details: 2 to 6 sentences. Name the files, services and commands involved. For decisions, give the reason. For resolutions, give symptom, cause and fix.
 - lines: the L-number span the record comes from, like "L120-L188".
+- point_in_time: true if the record only holds while the current state lasts (what is deployed, pending, broken, a current count); false if it is a lasting mechanism, cause, rule or decision. Records marked true are discarded, so be honest.
 
 Output ONLY this JSON, nothing before or after it:
-{"records": [{"kind": "decision|explanation|resolution", "title": "...", "details": "...", "lines": "L..-L.."}]}
+{"records": [{"kind": "decision|explanation|resolution", "title": "...", "details": "...", "lines": "L..-L..", "point_in_time": false}]}
 
 If nothing qualifies, output {"records": []}. An empty result is a good result for most sessions.

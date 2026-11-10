@@ -459,8 +459,12 @@ async def _recall_payload(body, api_key, via_tunnel=False):
                     c["decay"] = round(f, 2)
         except Exception:
             _decay = {}
+    from shared_memory.decay import RECALL_EXTRACT_PENALTY, is_unreviewed_extract
     candidates.sort(key=lambda c: -(c["score"] * _decay.get(c["id"], 1.0)
-                                     + (RECALL_VERIFIED_BONUS if c.get("verification") == "verified" else 0)))
+                                     + (RECALL_VERIFIED_BONUS if c.get("verification") == "verified" else 0)
+                                     - (RECALL_EXTRACT_PENALTY
+                                        if is_unreviewed_extract(c.get("authored_by"), c.get("verification"))
+                                        else 0)))
     candidates = candidates[:max(0, k - len(lexical))] + lexical
 
     # one_line: claim facet when present (mongo best-effort), else content head.

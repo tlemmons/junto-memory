@@ -47,6 +47,17 @@ def decay_factor(shelf_life: Optional[str], verification: Optional[str],
     return max(DECAY_FLOOR, 0.5 ** (age_days / HALF_LIFE_DAYS[shelf_life]))
 
 
+# Rows the nightly transcript extractor wrote rank below other rows until a
+# librarian or human verifies them (Tom's 11-08 keep ruling, condition 5;
+# review:extract-week-junto-v0: 10% of them are stale or wrong if trusted).
+EXTRACTOR_INSTANCE = "extractor"
+RECALL_EXTRACT_PENALTY = 0.05
+
+
+def is_unreviewed_extract(authored_by: Optional[str], verification: Optional[str]) -> bool:
+    return authored_by == EXTRACTOR_INSTANCE and (verification or "unreviewed") == "unreviewed"
+
+
 def age_days_of(updated: Optional[str]) -> Optional[float]:
     from shared_memory.helpers import parse_timestamp, utc_now
     ts = parse_timestamp(updated) if updated else None
