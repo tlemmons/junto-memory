@@ -6,6 +6,12 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+## [1.46.1] - 2026-11-10
+
+### Fixed
+- **Facets and the claim cache are redacted at write.** A model-written `facets.claim` could quote a secret the doc body no longer showed (infra-team report). `learning_facets` claims and triggers and `learning_claims` now go through the redactor like every free-text writer.
+- **New redactor shape `quoted_secret`:** prose that quotes the value, such as `password "…"` or `secret is "…"`, with no `=` or `:`.
+
 ## [1.46.0] - 2026-11-10
 
 ### Changed
