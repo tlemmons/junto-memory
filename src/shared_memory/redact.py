@@ -79,8 +79,26 @@ _ASSIGN_RE = re.compile(
 # 2026-11-03: two staging DB passwords got through in this shape). The port is
 # required so plain agent addressing ("memory@junto: …") never matches.
 _CONN_HANDLE_RE = re.compile(
-    r"(?P<pre>\b[\w.\-]+\s*@\s*[\w.\-]+:\d{2,5}\s*:\s*)(?P<val>[^\s\"'`,;]{12,})"
+    r"(?P<pre>\b[\w.\-]+\s*@\s*(?=[\w.\-]*[A-Za-z.])[\w.\-]+:\d{2,5}\s*:\s*)(?P<val>[^\s\"'`,;]{12,})"
 )
+
+# Prose that quotes the value: 'a new password "Xy7…"', 'secret is "…"'. A
+# model-written facets claim leaked a password in exactly this shape (no = or :).
+_QUOTED_RE = re.compile(
+    r"(?P<pre>\b(?:password|passwd|passphrase|secret|token)s?\b"
+    r"(?:\s+(?:is|was|of|to|now|set to|reset to))?\s+[\"'])"
+    r"(?P<val>[^\"'\s]{8,})(?P<post>[\"'])",
+    re.IGNORECASE,
+)
+
+# The host must hold a letter or a dot (above): "holds @16:02: …" is a time,
+# not host:port (scan 2026-11-04, backlog_c4c5a7dd19ce).
+
+# Prose that ends in "pass": "Next pass:", "3 cases pass:", "Bypass:",
+# "same-pass:". Only a credential-ish word just before makes a bare pass a key
+# ("user: bob pass: …", "pi@host pass: …"); compound keys (DB_PASS, db_pass) never match this.
+_PROSE_PASS_RE = re.compile(r"(?:by|com|sur|over|tres|encom)?pass|[a-z]+-pass", re.IGNORECASE)
+_PASS_CONTEXT_RE = re.compile(r"\b(?:user(?:name)?|login|account|uid|ssh|sudo|sshpass)\b|\w@\w", re.IGNORECASE)
 
 _PLACEHOLDER_RE = re.compile(
     r"^(?:<.*>|\$?\{.*\}|\$[A-Za-z_][A-Za-z0-9_]*|%\(?[A-Za-z_]+\)?s?|\{\{.*\}\}|"
@@ -168,6 +186,9 @@ def redact_secrets(text: str, hits: Optional[List[Dict]] = None) -> Tuple[str, D
             # f1c17da5"), not a credential key; DB_PASS / pass: still hit.
             if kind == "assigned_secret" and _key_label(kind, m.group("pre")) == "PASS":
                 return m.group(0)
+            if kind == "assigned_secret" and _PROSE_PASS_RE.fullmatch(_key_label(kind, m.group("pre")) or "") \
+                    and not _PASS_CONTEXT_RE.search(m.string[max(0, m.start() - 40):m.start()]):
+                return m.group(0)
             if kind == "url_password" and (len(val) < 6 or _PLACEHOLDER_RE.match(val)
                                            or val[0] in "<$"):
                 return m.group(0)
@@ -180,6 +201,7 @@ def redact_secrets(text: str, hits: Optional[List[Dict]] = None) -> Tuple[str, D
     text = _CLI_FLAG_RE.sub(_value_sub("cli_secret"), text)
     text = _ASSIGN_RE.sub(_value_sub("assigned_secret"), text)
     text = _CONN_HANDLE_RE.sub(_value_sub("conn_secret"), text)
+    text = _QUOTED_RE.sub(_value_sub("quoted_secret"), text)
     return text, found
 
 

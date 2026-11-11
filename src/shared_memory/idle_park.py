@@ -561,11 +561,28 @@ def _has_pending_self_wake(db, project: str, agent: str, now_wall=None) -> bool:
 
 
 async def _send_nudge(db, project: str, agent: str, minutes: int) -> Optional[str]:
+    from shared_memory.config import MESSAGE_INFO_TTL_HOURS
     from shared_memory.helpers import utc_now
     from shared_memory.tools.messaging import _build_announce_packet, _notify_inbox_for_send
 
     message_id = f"msg_{uuid.uuid4().hex[:12]}"
     subject, body = nudge_text(db, project, minutes, agent)
+    now = utc_now()
+    # One live nudge per recipient. An agent whose terminal is closed never
+    # reads them, so they piled up (96 for one agent on spg over 11 days,
+    # juntoTom msg_d70227a93049) and the plugin replayed them all in a burst on
+    # the next launch, burying real messages. The newest nudge supersedes any
+    # unread older one, and every nudge carries the info TTL: sends through
+    # memory_send_message get expire_at, this direct insert didn't, so only the
+    # boot-time 7-day backfill ever expired them.
+    try:
+        db.messages.update_many(
+            {"to_instance": agent, "to_project": project, "status": "pending",
+             "system_notice_kind": "idle_park_nudge"},
+            {"$set": {"status": "completed", "completed_at": now, "superseded_by": message_id}},
+        )
+    except Exception as e:
+        log.warning("idle-park: could not supersede old nudges for %s/%s: %s", agent, project, e)
     doc = {
         "_id": message_id,
         "to_instance": agent,
@@ -591,7 +608,8 @@ async def _send_nudge(db, project: str, agent: str, minutes: int) -> Optional[st
         "recency_bypass": False,
         "is_system_notice": True,
         "system_notice_kind": "idle_park_nudge",
-        "created_at": utc_now(),
+        "created_at": now,
+        "expire_at": now + timedelta(hours=MESSAGE_INFO_TTL_HOURS),
         "delivered_at": None,
         "received_at": None,
         "completed_at": None,

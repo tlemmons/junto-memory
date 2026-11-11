@@ -165,6 +165,32 @@ async def memory_define_spec(
     except Exception:
         pass
 
+    # get_spec without project falls back from the caller's project to shared,
+    # but a write without project always lands in shared. So an update that
+    # omits project used to FORK a project spec into a new shared copy that
+    # then shadowed nothing and drifted (backlog_44c1d5797441). Refuse instead:
+    # the caller almost certainly meant the project copy.
+    if not project and existing is None and not force:
+        sess_proj = normalize_project(session_info.get("project", ""))
+        if sess_proj:
+            try:
+                own = await (await get_project_collection(chroma, sess_proj)).get(
+                    ids=[spec_doc_id], include=["metadatas"])
+            except Exception:
+                own = {"ids": []}
+            if own["ids"] and (own["metadatas"][0] or {}).get("status", "active") == "active":
+                return json.dumps({
+                    "error": "spec_exists_in_project",
+                    "spec_name": name,
+                    "project": sess_proj,
+                    "message": (
+                        f"'{name}' exists in project '{sess_proj}', and a write without "
+                        "project would create a separate shared copy. Pass "
+                        f"project='{sess_proj}' to update it, or force=True if you really "
+                        "want a new shared spec with the same name."
+                    ),
+                })
+
     # §7.4 — state-spec multi-instance detection. Every state-spec write
     # registers (project, owner) → ORIGIN_SERVER_ID on first write; later
     # writes from a different origin (i.e., a peer pushed a state spec

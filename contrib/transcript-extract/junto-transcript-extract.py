@@ -10,8 +10,16 @@ time gate and facets pipeline all apply because writes go through MCP.
 
 Opt-in config (JSON, default ~/.config/junto/transcript-extract.json):
     {"projects": {"-home-you-myapp": "myapp", "-home-you-src-junto-memory": "junto"},
-     "model": "sonnet", "max_records_per_chunk": 5}
-No config, or an empty "projects" map, means a no-op run.
+     "model": "sonnet", "max_records_per_chunk": 5, "deidentify": true}
+No config, or an empty "projects" map, means a no-op run. Opt-in is per
+transcript dir, so per agent: list only the dirs of agents that record little
+by hand (the 11-08 week review: value tracks how little the agent saves).
+"deidentify" (default true) scrubs emails, phone numbers, IPs and long numeric
+ids from the transcript before the model sees it and from every record.
+
+Records that assert point-in-time status (deployed / merged / pending / needs
+a restart) are not written: the week review found status claims were the main
+source of STALE rows (review:extract-week-junto-v0 finding 4).
 
 State (watermarks): ~/.local/state/junto-transcript-extract/state.json
     {"<transcript path>": <lines already processed>}
@@ -55,6 +63,34 @@ MAX_TOOL_INPUT_CHARS = 200   # tool_use rows keep a short hint, not the payload
 DUPLICATE_RELEVANCE = 85     # skip a record when memory_query's top hit is >= this %
 RUN_DEADLINE_SECONDS = int(os.environ.get("JUNTO_EXTRACT_DEADLINE", "3000"))
 KINDS = ("decision", "explanation", "resolution")
+DUPLICATE_PROBE_LIMIT = 3    # memory_query sorts within a relevance band, so the top row isn't always the closest
+
+# Tools whose call means the session already saved this knowledge. Register_function
+# was missing: most "known" junto rows re-described a fix registered at park.
+_SAVE_TOOLS = ("memory_record_learning", "memory_store", "memory_define_spec",
+               "memory_register_function")
+
+# De-identification (condition 1 of the 11-08 keep ruling). Names can't be
+# caught by regex; the prompt asks for roles instead of names.
+_PII_PATTERNS = (
+    (re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"), "[email]"),
+    (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b"), "[ip]"),
+    (re.compile(r"(?<![\w-])(?:\+?\d{1,2}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}\b"), "[phone]"),
+    (re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I), "[id]"),
+    (re.compile(r"(?<![\w.])\d{6,}(?![\w.])"), "[id]"),
+)
+
+# Point-in-time status assertions (condition 2). A matching title drops the
+# record; a matching sentence in details is removed. Deliberately narrow:
+# "X requires a restart" or "the filter is applied first" can be lasting
+# mechanism, so those are left to the prompt's point_in_time flag.
+_STATUS_RE = re.compile(
+    r"\b(?:was|were|has been|have been|got)\s+(?:now\s+)?"
+    r"(?:deployed|applied|merged|shipped|released|restarted|rolled out)\b"
+    r"|\b(?:is|are)\s+(?:now\s+)?(?:deployed|merged|shipped|released|pending|awaiting)\b"
+    r"|\bstill\s+(?:broken|pending|open|failing|unmerged|undeployed)\b"
+    r"|\bnot\s+yet\s+(?:deployed|merged|fixed|shipped|released|applied)\b",
+    re.I)
 
 # The server's redactor is the source of truth; import it from the repo when
 # present so the prompt never even sees a secret. Fall back to server-side
@@ -90,7 +126,7 @@ def _text_of(content):
         elif t == "tool_use":
             inp = block.get("input") or {}
             name = block.get("name") or ""
-            if "memory_record_learning" in name or "memory_store" in name or "memory_define_spec" in name:
+            if any(t in name for t in _SAVE_TOOLS):
                 # What the session ALREADY saved: the extractor must not re-record it.
                 hint = "ALREADY SAVED: " + str(inp.get("title") or inp.get("name") or "")
             else:
@@ -99,6 +135,25 @@ def _text_of(content):
         # tool_result and thinking blocks are dropped: results are bulk output,
         # thinking is not the agent's stated position.
     return out
+
+
+def deidentify(text):
+    for pat, repl in _PII_PATTERNS:
+        text = pat.sub(repl, text)
+    return text
+
+
+def strip_status(record):
+    """Drop point-in-time status from a record: None when the title asserts
+    status or nothing lasting is left, else the record with status sentences
+    removed from details."""
+    if _STATUS_RE.search(record["title"]):
+        return None
+    sentences = re.split(r"(?<=[.!?])\s+", record["details"].strip())
+    kept = [x for x in sentences if not _STATUS_RE.search(x)]
+    if not kept:
+        return None
+    return {**record, "details": " ".join(kept)}
 
 
 def sanitize(path, start_line):
@@ -146,7 +201,7 @@ def chunks(text):
     return out[-MAX_CHUNKS_PER_SESSION:]   # newest content wins when over the cap
 
 
-def extract(chunk, model, max_records):
+def extract(chunk, model, max_records, deid=True):
     prompt = PROMPT_FILE.read_text().replace("{MAX_RECORDS}", str(max_records))
     # No tools, no MCP servers, no saved transcript (so the extractor never
     # extracts itself), instructions as the system prompt, and a neutral cwd so
@@ -168,8 +223,16 @@ def extract(chunk, model, max_records):
     records = json.loads(m.group(0)).get("records") or []
     clean = []
     for r in records[:max_records]:
-        if r.get("kind") in KINDS and r.get("title") and r.get("details"):
-            clean.append(r)
+        if r.get("kind") not in KINDS or not r.get("title") or not r.get("details"):
+            continue
+        if r.get("point_in_time") is True:
+            continue
+        r = strip_status({k: v for k, v in r.items() if k != "point_in_time"})
+        if r is None:
+            continue
+        if deid:
+            r["title"], r["details"] = deidentify(r["title"]), deidentify(r["details"])
+        clean.append(r)
     return clean
 
 
@@ -223,10 +286,11 @@ async def write_records(batch, dry_run):
                     continue
                 probe = json.loads(_text(await s.call_tool("memory_query", {
                     "session_id": sid, "query": f"{r['title']}\n{r['details'][:300]}",
-                    "project": project, "limit": 1, "include_shared": False,
+                    "project": project, "limit": DUPLICATE_PROBE_LIMIT, "include_shared": False,
                 })) or "{}")
-                top = (probe.get("results") or [{}])[0]
-                if int(str(top.get("relevance", "0")).rstrip("%") or 0) >= DUPLICATE_RELEVANCE:
+                best = max((int(str(h.get("relevance", "0")).rstrip("%") or 0)
+                            for h in probe.get("results") or []), default=0)
+                if best >= DUPLICATE_RELEVANCE:
                     dupes += 1
                     continue
                 details = (f"{r['details']}\n\n---\nProvenance: transcript-extract · kind={r['kind']} · "
@@ -275,6 +339,7 @@ def main():
     state = load_json(STATE, {})
     model = cfg.get("model", "sonnet")
     max_records = int(cfg.get("max_records_per_chunk", 5))
+    deid = cfg.get("deidentify", True) is not False
     now = time.time()
 
     todo = []
@@ -289,13 +354,15 @@ def main():
             break
         start_line = int(state.get(str(path), 0))
         text, cc_sid, total, skip = sanitize(path, start_line)
+        if deid:
+            text = deidentify(text)
         if skip or total <= start_line:
             new_state[str(path)] = total
             continue
         done += 1
         try:
             for chunk in chunks(text):
-                for r in extract(chunk, model, max_records):
+                for r in extract(chunk, model, max_records, deid):
                     batch.append((junto_project, str(path), cc_sid, r))
             new_state[str(path)] = total
         except Exception as e:  # leave the watermark so the next run retries
