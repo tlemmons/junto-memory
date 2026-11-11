@@ -9,6 +9,9 @@ Pins:
 - extract() drops point_in_time records and de-identifies the rest;
 - a memory_register_function call counts as ALREADY SAVED;
 - unreviewed extractor rows are flagged for demotion; verified ones are not.
+- a transcript deleted before it is read is skipped, not fatal.
+- names the model reports (its "names" field, plus a focused second pass)
+  are scrubbed to [name], and names found by earlier runs stay scrubbed.
 """
 
 import importlib.util
@@ -89,3 +92,62 @@ def test_unreviewed_extract_flag():
     assert is_unreviewed_extract("extractor", None)
     assert not is_unreviewed_extract("extractor", "verified")
     assert not is_unreviewed_extract("memory", "unreviewed")
+
+
+def test_sanitize_skips_vanished_transcript(tmp_path):
+    # CC can prune a transcript between the glob and the read; one vanished
+    # file must be skipped, not crash the whole nightly run.
+    assert tx.sanitize(tmp_path / "gone.jsonl", 0) == ("", None, 0, "transcript vanished")
+
+
+def test_extract_scrubs_reported_names(monkeypatch):
+    records = [{"kind": "resolution", "title": "Four black Shimmick screens on 'Single Wall' traced to hardware",
+                "details": "The shimmick frames went black; Single Wall goes to the bench. Wallboard is unaffected.",
+                "lines": "L1-L9", "names": ["Shimmick", "Single Wall", ""], "point_in_time": False}]
+
+    def fake_run(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"result": json.dumps({"records": records})}), "")
+
+    monkeypatch.setattr(tx.subprocess, "run", fake_run)
+    out = tx.extract("L1 USER: hi", "sonnet", 5)[0]
+    assert out["title"] == "Four black [name] screens on '[name]' traced to hardware"
+    assert out["details"] == "The [name] frames went black; [name] goes to the bench. Wallboard is unaffected."
+    assert "names" not in out
+    assert tx.extract("L1 USER: hi", "sonnet", 5, deid=False)[0]["title"].startswith("Four black Shimmick")
+
+
+def test_extract_names_pass_catches_unreported_names(monkeypatch):
+    records = [{"kind": "resolution", "title": "Shimmick's black screens traced to hardware",
+                "details": "Bring back Single Wall first.", "lines": "L1", "names": [], "point_in_time": False}]
+    calls = []
+
+    def fake_run(cmd, input=None, **kw):
+        calls.append(input)
+        body = {"records": records} if len(calls) == 1 else {"names": ["Shimmick", "Single Wall"]}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"result": json.dumps(body)}), "")
+
+    monkeypatch.setattr(tx.subprocess, "run", fake_run)
+    out = tx.extract("L1 USER: hi", "sonnet", 5)[0]
+    assert out["title"] == "[name]'s black screens traced to hardware"
+    assert out["details"] == "Bring back [name] first."
+    assert len(calls) == 2 and "Shimmick" in calls[1]
+    calls.clear()
+    tx.extract("L1 USER: hi", "sonnet", 5, deid=False)
+    assert len(calls) == 1   # no names pass when de-identification is off
+
+
+def test_extract_known_names_scrub_and_grow(monkeypatch):
+    records = [{"kind": "resolution", "title": "Shimmick frames went black",
+                "details": "GoDaddy mail and the Kitchen frame were unrelated.", "lines": "L1",
+                "names": ["GoDaddy", "Kitchen"], "point_in_time": False}]
+
+    def fake_run(cmd, input=None, **kw):
+        body = {"names": []} if "List the names" in cmd[2] else {"records": records}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"result": json.dumps(body)}), "")
+
+    monkeypatch.setattr(tx.subprocess, "run", fake_run)
+    known = {"Shimmick"}   # found by an earlier run; neither pass reports it this time
+    out = tx.extract("L1 USER: hi", "sonnet", 5, known=known, allow=["godaddy"])[0]
+    assert out["title"] == "[name] frames went black"
+    assert out["details"] == "GoDaddy mail and the [name] frame were unrelated."
+    assert known == {"Shimmick", "Kitchen"}
