@@ -102,7 +102,7 @@ def test_sanitize_skips_vanished_transcript(tmp_path):
 
 def test_extract_scrubs_reported_names(monkeypatch):
     records = [{"kind": "resolution", "title": "Four black Shimmick screens on 'Single Wall' traced to hardware",
-                "details": "The shimmick frames went black; Single Wall goes to the bench. Wallboard is unaffected.",
+                "details": "The Shimmick frames went black; Single Wall goes to the bench. Wallboard is unaffected.",
                 "lines": "L1-L9", "names": ["Shimmick", "Single Wall", ""], "point_in_time": False}]
 
     def fake_run(cmd, **kw):
@@ -151,3 +151,8 @@ def test_extract_known_names_scrub_and_grow(monkeypatch):
     assert out["title"] == "[name] frames went black"
     assert out["details"] == "GoDaddy mail and the [name] frame were unrelated."
     assert known == {"Shimmick", "Kitchen"}
+
+
+def test_scrub_names_case_rules():
+    assert tx.scrub_names("Bill asked us to bill him monthly.", ["Bill"]) == "[name] asked us to bill him monthly."
+    assert tx.scrub_names("Mail from Weizhang and weizhang@", ["weizhang"]) == "Mail from [name] and [name]@"

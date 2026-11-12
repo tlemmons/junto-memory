@@ -198,12 +198,15 @@ def sanitize(path, start_line):
 
 def scrub_names(text, names):
     """Replace each name the model reported (the prompt's "names" field) with
-    [name]. The model drops names from its prose only about half the time but
+    [name], case-sensitively unless the name is all lowercase. The model drops names from its prose only about half the time but
     lists them reliably, so code does the removal (nimbus dry-runs 2026-11-11)."""
     for name in sorted({str(n).strip() for n in names if str(n).strip()}, key=len, reverse=True):
         if len(name) < 2:
             continue
-        text = re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", "[name]", text, flags=re.IGNORECASE)
+        # Exact case, so the name "Bill" leaves the verb "bill" alone. An
+        # all-lowercase handle or domain (shimmick, weizhang) matches any case.
+        flags = 0 if name != name.lower() else re.IGNORECASE
+        text = re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", "[name]", text, flags=flags)
     return text
 
 
