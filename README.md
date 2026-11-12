@@ -5,6 +5,7 @@
 ![Python 3.11+](https://img.shields.io/badge/python-3.11+-green.svg)
 ![MCP Compatible](https://img.shields.io/badge/MCP-compatible-purple.svg)
 ![Docker](https://img.shields.io/badge/docker-ready-blue.svg)
+[![SafeSkill 91/100](https://img.shields.io/badge/SafeSkill-91%2F100_Verified%20Safe-brightgreen)](https://safeskill.dev/scan/tlemmons-junto-memory)
 
 > The **memory** component of the **[Junto](https://github.com/tlemmons/junto-stack)** multi-agent coordination system. For a working stack with docker-compose + adopter walkthrough, start at [`junto-stack`](https://github.com/tlemmons/junto-stack).
 
