@@ -55,6 +55,9 @@ STATE = Path(os.environ.get("JUNTO_EXTRACT_STATE",
                             "~/.local/state/junto-transcript-extract/state.json")).expanduser()
 PROJECTS_DIR = Path("~/.claude/projects").expanduser()
 PROMPT_FILE = Path(__file__).with_name("extract_prompt.txt")
+# Customer names found by any run, per junto project, scrubbed from every later
+# record. Holds customer names: local only, mode 0600, never sent anywhere.
+NAMES_FILE = Path(os.environ.get("JUNTO_EXTRACT_NAMES", str(STATE.parent / "names.json"))).expanduser()
 
 IDLE_SECONDS = 2 * 3600      # only sessions untouched for 2h (a live session is still deciding)
 CHUNK_CHARS = 60_000         # per claude -p call
@@ -160,7 +163,13 @@ def sanitize(path, start_line):
     """Transcript lines after start_line -> (rendered text with L<n> markers,
     session_id, total_lines, skip_reason)."""
     rows, session_id, n = [], None, 0
-    with open(path, errors="replace") as fh:
+    try:
+        fh = open(path, errors="replace")
+    except FileNotFoundError:
+        # Deleted between the directory listing and now (CC prunes old
+        # transcripts); skip it rather than kill the whole run.
+        return "", None, 0, "transcript vanished"
+    with fh:
         for n, line in enumerate(fh, 1):
             try:
                 d = json.loads(line)
@@ -187,6 +196,17 @@ def sanitize(path, start_line):
     return rendered, session_id, n, None
 
 
+def scrub_names(text, names):
+    """Replace each name the model reported (the prompt's "names" field) with
+    [name]. The model drops names from its prose only about half the time but
+    lists them reliably, so code does the removal (nimbus dry-runs 2026-11-11)."""
+    for name in sorted({str(n).strip() for n in names if str(n).strip()}, key=len, reverse=True):
+        if len(name) < 2:
+            continue
+        text = re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", "[name]", text, flags=re.IGNORECASE)
+    return text
+
+
 def chunks(text):
     out, cur = [], []
     size = 0
@@ -201,37 +221,66 @@ def chunks(text):
     return out[-MAX_CHUNKS_PER_SESSION:]   # newest content wins when over the cap
 
 
-def extract(chunk, model, max_records, deid=True):
-    prompt = PROMPT_FILE.read_text().replace("{MAX_RECORDS}", str(max_records))
+NAMES_PROMPT = (
+    "You are given JSON records on stdin. List every proper name in them that belongs to a person, "
+    "customer, company, organization, place, or a label someone gave their own device or site "
+    "(like a frame called \"Kitchen\" or \"Single Wall\"), spelled exactly as it appears. Do not list "
+    "product, software or service names (Nimbus, Outlook, MongoDB, GoDaddy). "
+    'Output ONLY this JSON: {"names": ["..."]}'
+)
+
+
+def _claude_json(system_prompt, user_prompt, stdin, model):
+    """One tool-less claude -p turn -> the first JSON object in its reply, or {}."""
     # No tools, no MCP servers, no saved transcript (so the extractor never
     # extracts itself), instructions as the system prompt, and a neutral cwd so
     # no project CLAUDE.md is discovered. --bare would be cleaner but needs an
     # API key; this keeps the run on the subscription.
-    cmd = [CLAUDE_BIN, "-p", "Extract records from the transcript excerpt on stdin.",
-           "--system-prompt", prompt, "--output-format", "json", "--max-turns", "1",
+    cmd = [CLAUDE_BIN, "-p", user_prompt,
+           "--system-prompt", system_prompt, "--output-format", "json", "--max-turns", "1",
            "--tools", "", "--strict-mcp-config", "--no-session-persistence"]
     if model:
         cmd += ["--model", model]
-    proc = subprocess.run(cmd, input=chunk, capture_output=True, text=True, timeout=600,
+    proc = subprocess.run(cmd, input=stdin, capture_output=True, text=True, timeout=600,
                           cwd=tempfile.gettempdir())
     if proc.returncode != 0:
         raise RuntimeError(f"claude -p exit {proc.returncode}: {proc.stderr[:300]}")
     body = json.loads(proc.stdout).get("result", "")
     m = re.search(r"\{.*\}", body, re.DOTALL)
-    if not m:
-        return []
-    records = json.loads(m.group(0)).get("records") or []
+    return json.loads(m.group(0)) if m else {}
+
+
+def extract(chunk, model, max_records, deid=True, known=None, allow=()):
+    """known: this project's set of already-found names. It is read for the
+    scrub and updated in place with new finds. allow: names never scrubbed."""
+    prompt = PROMPT_FILE.read_text().replace("{MAX_RECORDS}", str(max_records))
+    records = _claude_json(prompt, "Extract records from the transcript excerpt on stdin.",
+                           chunk, model).get("records") or []
+    extra_names = []
+    if deid and records:
+        # A focused second pass: the extract prompt alone leaves a customer name
+        # in ~1 run in 4 even with its own "names" field (dry-runs 2026-11-11).
+        # Raises like the first call, so the watermark stays and the run retries.
+        found = _claude_json(NAMES_PROMPT, "List the names in the records on stdin.",
+                             json.dumps(records), model).get("names")
+        extra_names = found if isinstance(found, list) else []
     clean = []
     for r in records[:max_records]:
         if r.get("kind") not in KINDS or not r.get("title") or not r.get("details"):
             continue
         if r.get("point_in_time") is True:
             continue
-        r = strip_status({k: v for k, v in r.items() if k != "point_in_time"})
+        names = (r.get("names") if isinstance(r.get("names"), list) else []) + extra_names
+        if deid and known is not None:
+            allowed = {str(a).lower() for a in allow}
+            known.update(n.strip() for n in map(str, names) if n.strip() and n.strip().lower() not in allowed)
+            names = sorted(known)
+        r = strip_status({k: v for k, v in r.items() if k not in ("point_in_time", "names")})
         if r is None:
             continue
         if deid:
             r["title"], r["details"] = deidentify(r["title"]), deidentify(r["details"])
+            r["title"], r["details"] = scrub_names(r["title"], names), scrub_names(r["details"], names)
         clean.append(r)
     return clean
 
@@ -340,12 +389,17 @@ def main():
     model = cfg.get("model", "sonnet")
     max_records = int(cfg.get("max_records_per_chunk", 5))
     deid = cfg.get("deidentify", True) is not False
+    allow = cfg.get("names_allow") or []
+    known = {p: set(v) for p, v in load_json(NAMES_FILE, {}).items()}
     now = time.time()
 
     todo = []
     for dirname, junto_project in projects.items():
         for path in sorted((PROJECTS_DIR / dirname).glob("*.jsonl")):
-            if now - path.stat().st_mtime < IDLE_SECONDS:
+            try:
+                if now - path.stat().st_mtime < IDLE_SECONDS:
+                    continue
+            except FileNotFoundError:
                 continue
             todo.append((path, junto_project))
     batch, new_state, done = [], dict(state), 0
@@ -356,22 +410,34 @@ def main():
         text, cc_sid, total, skip = sanitize(path, start_line)
         if deid:
             text = deidentify(text)
+        if skip == "transcript vanished":
+            new_state.pop(str(path), None)
+            continue
         if skip or total <= start_line:
             new_state[str(path)] = total
             continue
         done += 1
         try:
             for chunk in chunks(text):
-                for r in extract(chunk, model, max_records, deid):
+                for r in extract(chunk, model, max_records, deid, known.setdefault(junto_project, set()), allow):
                     batch.append((junto_project, str(path), cc_sid, r))
             new_state[str(path)] = total
         except Exception as e:  # leave the watermark so the next run retries
             print(f"extract failed for {path}: {e}", file=sys.stderr)
+    if deid:
+        # A name found in a later chunk also covers the records before it.
+        for project, _, _, r in batch:
+            r["title"] = scrub_names(r["title"], known.get(project, ()))
+            r["details"] = scrub_names(r["details"], known.get(project, ()))
     result = asyncio.run(write_records(batch, args.dry_run))
     print(f"transcripts processed: {done}, records: {len(batch)}, {result}")
     if not args.dry_run:
         STATE.parent.mkdir(parents=True, exist_ok=True)
         STATE.write_text(json.dumps(new_state, indent=1))
+        if deid:
+            NAMES_FILE.parent.mkdir(parents=True, exist_ok=True)
+            NAMES_FILE.touch(mode=0o600)
+            NAMES_FILE.write_text(json.dumps({p: sorted(v) for p, v in known.items() if v}, indent=1))
 
 
 def _arm_deadline(seconds):
