@@ -222,10 +222,14 @@ def chunks(text):
 
 
 NAMES_PROMPT = (
-    "You are given JSON records on stdin. List every proper name in them that belongs to a person, "
-    "customer, company, organization, place, or a label someone gave their own device or site "
-    "(like a frame called \"Kitchen\" or \"Single Wall\"), spelled exactly as it appears. Do not list "
-    "product, software or service names (Nimbus, Outlook, MongoDB, GoDaddy). "
+    "You are given JSON records on stdin. List every name in them that identifies a customer or other "
+    "private party, spelled exactly as it appears: a private person's name (full, first name only, or "
+    "username), a customer's company, school, church or other organization, a customer's street or town, "
+    "or a label a customer gave their own device or site (like a frame called \"Kitchen\" or "
+    "\"Single Wall\"). Do NOT list: the operator or our own staff, agent or team names (frames-team, "
+    "nimbusSupport, madrox), our own hosts and domains, artists, artworks and other public figures, "
+    "vendors, carriers, suppliers and products (Nimbus, Samsung, UPS, FedEx, GoDaddy, Google), "
+    "countries, states and large cities, or ordinary words. "
     'Output ONLY this JSON: {"names": ["..."]}'
 )
 

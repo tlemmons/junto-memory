@@ -26,7 +26,7 @@ Write each record so it stands on its own without the transcript:
 - title: one line, under 100 characters, naming the subject concretely.
 - details: 2 to 6 sentences. Name the files, services and commands involved. For decisions, give the reason. For resolutions, give symptom, cause and fix.
 - lines: the L-number span the record comes from, like "L120-L188".
-- names: every proper name still in your title or details that belongs to a person, customer, company, organization, place, or a label someone gave their own device or site (like a frame called "Kitchen"). Not product, software or service names (Nimbus, Outlook, MongoDB). Use [] if there are none. Each listed name is scrubbed from the record, so list them all.
+- names: every name still in your title or details that identifies a customer or other private party: a private person (full name, first name or username), a customer's company, school, church or other organization, a customer's street or town, or a label a customer gave their own device or site (like a frame called "Kitchen"). Not the operator, staff, agent or team names, our own hosts, artists, artworks or public figures, vendors, carriers or products (Nimbus, Samsung, UPS), countries, states or large cities. Use [] if there are none. Each listed name is scrubbed from the record, so list them all.
 - point_in_time: true if the record only holds while the current state lasts (what is deployed, pending, broken, a current count) or only describes a one-off episode; false if it is a lasting mechanism, cause, rule or decision. Records marked true are discarded, so be honest.
 
 Output ONLY this JSON, nothing before or after it:
