@@ -678,6 +678,8 @@ async def _apply_function_registered(db, chroma, op):
         metadata["prefer_over"] = payload["prefer_over"]
     if payload.get("requires"):
         metadata["requires"] = json.dumps(payload["requires"])
+    if payload.get("tags"):
+        metadata["tags"] = json.dumps(payload["tags"])
 
     doc_parts = [
         f"# Function: {name}",
@@ -951,6 +953,10 @@ async def _apply_store_tagged(db, chroma, op):
                   "archive_reason", "restored_at", "restored_by"):
         if payload.get(field) is not None:
             metadata[field] = payload[field]
+    # memory_update_tags carries the full post-edit tag list
+    # (interface:knowledge-versioning-v0).
+    if isinstance(payload.get("tags"), list):
+        metadata["tags"] = json.dumps(payload["tags"])
     await coll.update(ids=[ref["doc_id"]], metadatas=[metadata])
     return {"disposition": "applied"}
 

@@ -337,6 +337,7 @@ No API keys or authentication tokens are required for local use (see [Security](
 | `memory_verify` | Mark a doc verified / rejected / unreviewed (separate from status). Verified docs lead their relevance band; rejected docs drop out of search and recall. Human, admin/owner or librarian only; no self-verify. |
 | `memory_archive_by_tag` | Bulk archive all documents matching a tag (e.g., end-of-version cleanup). |
 | `memory_restore_by_tag` | Bulk restore previously archived documents by tag. |
+| `memory_update_tags` | Add/remove tags on one existing doc (e.g. `sys:old`, `valid-until:<event>` for retiring old-system knowledge — interface:knowledge-versioning-v0). |
 
 ### Coordination & Activity (2)
 
