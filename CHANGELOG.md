@@ -6,6 +6,18 @@ version via `memory_health` (`server_version`).
 
 ## [Unreleased]
 
+### Added
+- **Knowledge versioning** (interface:knowledge-versioning-v0, for the nimbus rebuild). Tags `sys:old` / `sys:rebuild` / `sys:both` and `valid-until:<event>` are the source of truth.
+  - `memory_query` and `memory_find_function` rows gain derived `applies_to` and `valid_until`. The keys are absent on untagged rows.
+  - New tool `memory_update_tags(doc_id, add, remove)` for retro-tagging existing docs.
+  - `memory_register_function(tags=...)`: omitting it on re-registration keeps the existing tags, and a list replaces them.
+  - `memory_find_function(include_inactive=True)` returns archived/superseded refs flagged with `status` + `warning`. Rows now always carry `status`.
+  - Retiring a version is the existing `memory_archive_by_tag(tag="sys:old")`.
+
+### Fixed
+- `memory_find_function` sorted by the relevance STRING, so "9%" outranked "85%".
+- `memory_archive_by_tag` / `memory_restore_by_tag` silently skipped a collection that threw. They now return `status: partial` with `errors`, and they stamp `source_status` on the facets/claims rows, as `memory_change_status` already did.
+
 ## [1.46.1] - 2026-11-10
 
 ### Fixed

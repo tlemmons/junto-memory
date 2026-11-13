@@ -222,6 +222,24 @@ async def _locate_doc(chroma, session_id, doc_id, project):
     return collection, result, None
 
 
+def _stamp_facets_status(doc_ids, new_status: str, now: str) -> bool:
+    """Stamp source_status on the learning_facets + learning_claims rows of
+    doc_ids. Best-effort: the chroma status write is the load-bearing op."""
+    if not doc_ids:
+        return False
+    try:
+        _db = get_mongo()
+        if _db is None:
+            return False
+        _stamp = {"source_status": new_status, "source_status_updated_at": now}
+        ids = list(doc_ids)
+        r1 = _db.learning_facets.update_many({"_id": {"$in": ids}}, {"$set": _stamp})
+        r2 = _db.learning_claims.update_many({"_id": {"$in": ids}}, {"$set": _stamp})
+        return bool(r1.modified_count or r2.modified_count)
+    except Exception:
+        return False
+
+
 @mcp.tool()
 async def memory_change_status(
     session_id: str,
@@ -292,17 +310,7 @@ async def memory_change_status(
     # (sub's pipelines, librarian queries) can filter without a doc join.
     # Single-writer server makes this safe; best-effort — the chroma status
     # write above is the load-bearing op.
-    facets_synced = False
-    try:
-        from shared_memory.clients import get_mongo as _get_mongo
-        _db = _get_mongo()
-        if _db is not None:
-            _stamp = {"source_status": new_status, "source_status_updated_at": now}
-            r1 = _db.learning_facets.update_many({"_id": doc_id}, {"$set": _stamp})
-            r2 = _db.learning_claims.update_many({"_id": doc_id}, {"$set": _stamp})
-            facets_synced = bool(r1.modified_count or r2.modified_count)
-    except Exception:
-        pass
+    facets_synced = _stamp_facets_status([doc_id], new_status, now)
 
     # Corrections/retractions mark the actual mistakes (context_stamp.py).
     from shared_memory.context_stamp import stamp as _context_stamp
@@ -453,6 +461,9 @@ async def memory_archive_by_tag(
     now = utc_now_iso()
     archived_count = 0
     archived_docs = []
+    errors = []
+    # status -> doc ids, for the facets source_status stamp
+    facets_by_status = {}
 
     # Import prefix constants
     from shared_memory.config import PROJECT_PREFIX, SHARED_PREFIX
@@ -525,22 +536,31 @@ async def memory_archive_by_tag(
                     },
                 )
 
+                facets_by_status.setdefault("archived", []).append(doc_id)
                 archived_count += 1
                 archived_docs.append({
                     "id": doc_id,
                     "title": meta.get("title", "Untitled"),
                     "collection": col.name
                 })
-        except Exception:
+        except Exception as e:
+            # Report, don't swallow: a silent skip under-counts the archive.
+            errors.append(f"{col.name}: {type(e).__name__}: {str(e)[:200]}")
             continue
 
-    return json.dumps({
-        "status": "completed",
+    for st, ids in facets_by_status.items():
+        _stamp_facets_status(ids, st, now)
+
+    out = {
+        "status": "completed" if not errors else "partial",
         "tag": tag,
         "archived_count": archived_count,
         "archived_docs": archived_docs[:20],  # Limit output
         "note": f"Archived {archived_count} docs. Use memory_restore_by_tag to undo."
-    }, indent=2)
+    }
+    if errors:
+        out["errors"] = errors
+    return json.dumps(out, indent=2)
 
 
 @mcp.tool()
@@ -569,6 +589,8 @@ async def memory_restore_by_tag(
     now = utc_now_iso()
     restored_count = 0
     restored_docs = []
+    errors = []
+    facets_by_status = {}
 
     # Import prefix constants
     from shared_memory.config import PROJECT_PREFIX, SHARED_PREFIX
@@ -630,19 +652,109 @@ async def memory_restore_by_tag(
                     },
                 )
 
+                facets_by_status.setdefault(previous_status, []).append(doc_id)
                 restored_count += 1
                 restored_docs.append({
                     "id": doc_id,
                     "title": meta.get("title", "Untitled"),
                     "collection": col.name
                 })
-        except Exception:
+        except Exception as e:
+            errors.append(f"{col.name}: {type(e).__name__}: {str(e)[:200]}")
             continue
 
-    return json.dumps({
-        "status": "completed",
+    for st, ids in facets_by_status.items():
+        _stamp_facets_status(ids, st, now)
+
+    out = {
+        "status": "completed" if not errors else "partial",
         "tag": tag,
         "restored_count": restored_count,
         "restored_docs": restored_docs[:20],
         "note": f"Restored {restored_count} docs to their previous status."
+    }
+    if errors:
+        out["errors"] = errors
+    return json.dumps(out, indent=2)
+
+
+@mcp.tool()
+async def memory_update_tags(
+    session_id: str,
+    doc_id: str,
+    add: List[str] = None,
+    remove: List[str] = None,
+    project: str = None,
+    ctx: Context = None
+) -> str:
+    """
+    Add or remove tags on an existing learning, function ref, or stored doc.
+
+    Built for retro-tagging sweeps, e.g. marking old-system knowledge
+    sys:old / valid-until:<event> so memory_archive_by_tag can retire it later
+    (interface:knowledge-versioning-v0). Status and content are untouched.
+
+    Args:
+        session_id: Your session ID
+        doc_id: Document ID to retag
+        add: Tags to add (already-present tags are skipped)
+        remove: Tags to remove (absent tags are skipped)
+        project: Project that owns the doc (omit: your session's project, then shared)
+    """
+    error = require_session(session_id)
+    if error:
+        return error
+    add = [t.strip() for t in (add or []) if isinstance(t, str) and t.strip()]
+    remove = [t.strip() for t in (remove or []) if isinstance(t, str) and t.strip()]
+    if not add and not remove:
+        return json.dumps({"error": "Pass at least one tag in add or remove."}, indent=2)
+
+    chroma = await get_chroma()
+    now = utc_now_iso()
+    if project:
+        project = normalize_project(project)
+
+    collection, result, _err = await _locate_doc(chroma, session_id, doc_id, project)
+    if _err:
+        return _err
+
+    meta = result["metadatas"][0]
+    try:
+        tags = json.loads(meta.get("tags", "[]")) or []
+    except (ValueError, TypeError):
+        tags = []
+    added = [t for t in add if t not in tags]
+    removed = [t for t in remove if t in tags]
+    new_tags = [t for t in tags if t not in removed] + [t for t in added if t not in removed]
+
+    if added or removed:
+        meta["tags"] = json.dumps(new_tags)
+        meta["updated"] = now
+        await collection.update(ids=[doc_id], metadatas=[meta])
+
+        session_info = active_sessions[session_id]
+        emit_op_log_from_context(
+            db=get_mongo(),
+            op_type="store.tagged",
+            actor={
+                "agent": session_info["claude_instance"],
+                "project": session_info.get("project"),
+                "session_id": session_id,
+            },
+            ref={"collection": collection.name, "doc_id": doc_id},
+            payload={
+                "title": meta.get("title", "Untitled"),
+                "operation": "retag",
+                "tags": new_tags,
+                "added": added,
+                "removed": removed,
+            },
+        )
+
+    return json.dumps({
+        "status": "updated" if (added or removed) else "unchanged",
+        "doc_id": doc_id,
+        "tags": new_tags,
+        "added": added,
+        "removed": removed,
     }, indent=2)

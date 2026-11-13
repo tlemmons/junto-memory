@@ -15,6 +15,7 @@ from shared_memory.config import PROJECT_PREFIX, SHARED_PREFIX
 from shared_memory.helpers import (
     MIN_RELEVANCE_THRESHOLD,
     calculate_relevance,
+    format_status_warning,
     get_project_collection,
     get_shared_collection,
     normalize_project,
@@ -24,6 +25,7 @@ from shared_memory.helpers import (
 )
 from shared_memory.op_log import emit_op_log_from_context, fetch_embedding_for_op_log
 from shared_memory.state import active_sessions
+from shared_memory.versioning import version_labels
 
 # Enrichment queue for librarian processing (in-memory, processed async)
 # Structure: { func_id: { project, file, name, registered_at, enriched: bool } }
@@ -64,6 +66,7 @@ async def memory_register_function(
     prefer_over: str = None,
     requires: List[str] = None,
     code: str = None,
+    tags: List[str] = None,
     ctx: Context = None
 ) -> str:
     """
@@ -93,6 +96,9 @@ async def memory_register_function(
         prefer_over: Other functions this should be used instead of (optional)
         requires: Functions/setup that must be called first (optional)
         code: Full function code - include for tricky functions so librarian can analyze (optional)
+        tags: Tags for the ref, e.g. ["sys:old", "valid-until:lane3-cutover"]
+            (interface:knowledge-versioning-v0). On re-registration, omitting
+            tags keeps the existing ones; a list replaces them.
     """
     error = require_session(session_id)
     if error:
@@ -198,6 +204,10 @@ async def memory_register_function(
         metadata["prefer_over"] = prefer_over
     if requires:
         metadata["requires"] = json.dumps(requires)
+    if tags is not None:
+        metadata["tags"] = json.dumps([t for t in tags if isinstance(t, str) and t.strip()])
+    elif existing_meta and existing_meta.get("tags"):
+        metadata["tags"] = existing_meta["tags"]
 
     # Upsert (allows updates to same function)
     await collection.upsert(
@@ -229,6 +239,7 @@ async def memory_register_function(
             "gotchas": gotchas,
             "prefer_over": prefer_over,
             "requires": requires,
+            "tags": json.loads(metadata.get("tags", "[]")),
             "has_code": bool(code),
             "code": code,
             "registered_at": now,
@@ -281,6 +292,7 @@ async def memory_find_function(
     project: str = None,
     include_shared: bool = True,
     limit: int = 5,
+    include_inactive: bool = False,
     ctx: Context = None
 ) -> str:
     """
@@ -295,12 +307,18 @@ async def memory_find_function(
     - Which function should I use for X?
     - Are there gotchas I should know about?
 
+    Rows carry `applies_to` (old | rebuild | both) and `valid_until` when the
+    ref is tagged sys:* / valid-until:* (interface:knowledge-versioning-v0).
+
     Args:
         session_id: Your session ID
         query: What you're looking for (e.g., "parse email", "user authentication", "database connection")
         project: Limit to specific project (omit to search project + shared)
         include_shared: Include cross-project functions (default True)
         limit: Maximum results (default 5)
+        include_inactive: Also return deprecated/superseded/archived refs (e.g.
+            old-system code retired with memory_archive_by_tag), flagged with
+            status + warning. Default False: active refs only.
     """
     error = require_session(session_id)
     if error:
@@ -311,7 +329,52 @@ async def memory_find_function(
     session_info = active_sessions[session_id]
 
     results = []
-    where_filter = {"$and": [{"type": "function_ref"}, {"status": "active"}]}
+    if include_inactive:
+        where_filter = {"type": "function_ref"}
+    else:
+        where_filter = {"$and": [{"type": "function_ref"}, {"status": "active"}]}
+
+    async def _search(collection, source: str) -> None:
+        found = await collection.query(
+            query_texts=[query],
+            n_results=limit,
+            where=where_filter
+        )
+        if not (found["documents"] and found["documents"][0]):
+            return
+        for i, (doc, meta, dist) in enumerate(zip(
+            found["documents"][0],
+            found["metadatas"][0],
+            found["distances"][0]
+        )):
+            relevance = calculate_relevance(dist)
+            if relevance < MIN_RELEVANCE_THRESHOLD:
+                continue
+
+            doc_id = found["ids"][0][i]
+            status = meta.get("status", "active")
+            row = {
+                "source": source,
+                "id": doc_id,
+                "name": meta.get("func_name"),
+                "file": meta.get("func_file"),
+                "purpose": meta.get("func_purpose"),
+                "gotchas": meta.get("gotchas"),
+                "prefer_over": meta.get("prefer_over"),
+                "requires": json.loads(meta.get("requires", "[]")),
+                "status": status,
+                "relevance": f"{relevance:.0%}",
+                "enriched": meta.get("enriched") == "true",
+                "access_count": meta.get("access_count", 0),
+                "_rel": relevance,
+                **version_labels(meta.get("tags")),
+            }
+            if status != "active":
+                row["warning"] = format_status_warning(status, meta.get("superseded_by"))
+            results.append(row)
+
+            # Track access
+            await update_access_stats(collection, doc_id)
 
     # Search project collection
     search_project = project or session_info.get("project")
@@ -320,39 +383,7 @@ async def memory_find_function(
     if search_project:
         try:
             proj_collection = await get_project_collection(chroma, search_project)
-            proj_results = await proj_collection.query(
-                query_texts=[query],
-                n_results=limit,
-                where=where_filter
-            )
-
-            if proj_results["documents"] and proj_results["documents"][0]:
-                for i, (doc, meta, dist) in enumerate(zip(
-                    proj_results["documents"][0],
-                    proj_results["metadatas"][0],
-                    proj_results["distances"][0]
-                )):
-                    relevance = calculate_relevance(dist)
-                    if relevance < MIN_RELEVANCE_THRESHOLD:
-                        continue
-
-                    doc_id = proj_results["ids"][0][i]
-                    results.append({
-                        "source": f"project:{search_project}",
-                        "id": doc_id,
-                        "name": meta.get("func_name"),
-                        "file": meta.get("func_file"),
-                        "purpose": meta.get("func_purpose"),
-                        "gotchas": meta.get("gotchas"),
-                        "prefer_over": meta.get("prefer_over"),
-                        "requires": json.loads(meta.get("requires", "[]")),
-                        "relevance": f"{relevance:.0%}",
-                        "enriched": meta.get("enriched") == "true",
-                        "access_count": meta.get("access_count", 0)
-                    })
-
-                    # Track access
-                    await update_access_stats(proj_collection, doc_id)
+            await _search(proj_collection, f"project:{search_project}")
         except Exception as e:
             print(f"[memory_find_function] Error searching project collection: {e}")
 
@@ -360,48 +391,13 @@ async def memory_find_function(
     if include_shared:
         try:
             shared = await get_shared_collection(chroma, "patterns")
-            shared_results = await shared.query(
-                query_texts=[query],
-                n_results=limit,
-                where=where_filter
-            )
-
-            if shared_results["documents"] and shared_results["documents"][0]:
-                for i, (doc, meta, dist) in enumerate(zip(
-                    shared_results["documents"][0],
-                    shared_results["metadatas"][0],
-                    shared_results["distances"][0]
-                )):
-                    relevance = calculate_relevance(dist)
-                    if relevance < MIN_RELEVANCE_THRESHOLD:
-                        continue
-
-                    doc_id = shared_results["ids"][0][i]
-                    results.append({
-                        "source": "shared",
-                        "id": doc_id,
-                        "name": meta.get("func_name"),
-                        "file": meta.get("func_file"),
-                        "purpose": meta.get("func_purpose"),
-                        "gotchas": meta.get("gotchas"),
-                        "prefer_over": meta.get("prefer_over"),
-                        "requires": json.loads(meta.get("requires", "[]")),
-                        "relevance": f"{relevance:.0%}",
-                        "enriched": meta.get("enriched") == "true",
-                        "access_count": meta.get("access_count", 0)
-                    })
-
-                    await update_access_stats(shared, doc_id)
+            await _search(shared, "shared")
         except Exception as e:
             print(f"[memory_find_function] Error searching shared collection: {e}")
 
-    # Sort by relevance
-    results.sort(key=lambda x: x["relevance"], reverse=True)
-    results = results[:limit]
-
-    # Clean up None values for cleaner output
-    for r in results:
-        r = {k: v for k, v in r.items() if v is not None and v != [] and v != ""}
+    # Sort by numeric relevance: the "NN%" strings sort "9%" above "85%".
+    results.sort(key=lambda x: x["_rel"], reverse=True)
+    results = [{k: v for k, v in r.items() if k != "_rel"} for r in results[:limit]]
 
     if not results:
         return json.dumps({

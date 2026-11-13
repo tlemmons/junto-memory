@@ -32,6 +32,7 @@ from shared_memory.helpers import (
     utc_now_iso,
 )
 from shared_memory.state import active_sessions, active_signals
+from shared_memory.versioning import version_labels
 
 log = logging.getLogger(__name__)
 
@@ -245,7 +246,8 @@ async def memory_query(
                         # capture — consumers fail open on null.
                         "authored_by": meta.get("claude_instance"),
                         "verification": meta.get("verification") or "unreviewed",
-                        "warning": warning if warning else None
+                        "warning": warning if warning else None,
+                        **version_labels(meta.get("tags")),
                     })
                     if _rr:
                         results[-1].update(_sim=relevance, _min=_proj_min, _cap_key="project",
@@ -294,7 +296,8 @@ async def memory_query(
                         "access_count": meta.get("access_count", 0),
                         "authored_by": meta.get("claude_instance"),
                         "verification": meta.get("verification") or "unreviewed",
-                        "warning": warning if warning else None
+                        "warning": warning if warning else None,
+                        **version_labels(meta.get("tags")),
                     })
                     await update_access_stats(proj_collection, h["id"])
         except Exception as e:  # noqa: BLE001
@@ -355,7 +358,8 @@ async def memory_query(
                             "access_count": meta.get("access_count", 0),
                             "authored_by": meta.get("claude_instance"),
                             "verification": meta.get("verification") or "unreviewed",
-                            "warning": staleness if staleness else None
+                            "warning": staleness if staleness else None,
+                            **version_labels(meta.get("tags")),
                         })
                         if _rr:
                             results[-1].update(_sim=relevance, _min=_shared_min, _cap_key=shared_name,
