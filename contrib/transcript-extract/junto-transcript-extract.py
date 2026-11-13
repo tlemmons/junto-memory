@@ -198,12 +198,15 @@ def sanitize(path, start_line):
 
 def scrub_names(text, names):
     """Replace each name the model reported (the prompt's "names" field) with
-    [name]. The model drops names from its prose only about half the time but
+    [name], case-sensitively unless the name is all lowercase. The model drops names from its prose only about half the time but
     lists them reliably, so code does the removal (nimbus dry-runs 2026-11-11)."""
     for name in sorted({str(n).strip() for n in names if str(n).strip()}, key=len, reverse=True):
         if len(name) < 2:
             continue
-        text = re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", "[name]", text, flags=re.IGNORECASE)
+        # Exact case, so the name "Bill" leaves the verb "bill" alone. An
+        # all-lowercase handle or domain (shimmick, weizhang) matches any case.
+        flags = 0 if name != name.lower() else re.IGNORECASE
+        text = re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", "[name]", text, flags=flags)
     return text
 
 
@@ -222,10 +225,14 @@ def chunks(text):
 
 
 NAMES_PROMPT = (
-    "You are given JSON records on stdin. List every proper name in them that belongs to a person, "
-    "customer, company, organization, place, or a label someone gave their own device or site "
-    "(like a frame called \"Kitchen\" or \"Single Wall\"), spelled exactly as it appears. Do not list "
-    "product, software or service names (Nimbus, Outlook, MongoDB, GoDaddy). "
+    "You are given JSON records on stdin. List every name in them that identifies a customer or other "
+    "private party, spelled exactly as it appears: a private person's name (full, first name only, or "
+    "username), a customer's company, school, church or other organization, a customer's street or town, "
+    "or a label a customer gave their own device or site (like a frame called \"Kitchen\" or "
+    "\"Single Wall\"). Do NOT list: the operator or our own staff, agent or team names (frames-team, "
+    "nimbusSupport, madrox), our own hosts and domains, artists, artworks and other public figures, "
+    "vendors, carriers, suppliers and products (Nimbus, Samsung, UPS, FedEx, GoDaddy, Google), "
+    "countries, states and large cities, or ordinary words. "
     'Output ONLY this JSON: {"names": ["..."]}'
 )
 
