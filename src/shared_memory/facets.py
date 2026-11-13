@@ -95,6 +95,13 @@ SHELF_LIFE_SYSTEM = (
 # unnecessary verify-first framing — the SAFE direction. Durable-recall
 # improvement is the backfill CC agent's job (stronger model re-judge), not
 # prompt drift here.
+# Re-tested 2026-11-13 on qwen3.8:27b against 204 librarian-reviewed rows +
+# the 3 hard probes. Current prompt: durable 70/104, volatile 94/100, probes
+# 3/3. Adding "a shipped fix whose claim is how code now behaves is DURABLE"
+# gave durable 80/104 but volatile 82/100 and FAILED the hard probe
+# (learning_a057cb7727f2e3fe -> durable); adding standing decisions too was
+# worse (volatile 68/100). Don't re-try durable-side wording here; the
+# librarian's nightly override is the correction path (learning on 11-13).
 
 TRIGGER_SYSTEM = (
     "List the conditions under which a future engineer should look this note "
