@@ -7,6 +7,8 @@ version via `memory_health` (`server_version`).
 ## [Unreleased]
 
 ### Added
+- **State-spec pointer check** (interface:state-pointer-check-v0; idea from [orbit-spec](https://github.com/las-sal/orbit-spec): position is computed, never stated). When an agent reads its OWN `agent_state` spec, `memory_get_spec` adds `pointer_check`. It lists the ids cited in live sections (Current Task, Next Steps, Blockers, Open…/Waiting/Pending; learnings under Key Context) whose target moved after the spec was written: backlog closed or updated, reminder delivered or cancelled, a reply on the owner's own message, learning superseded, or no record. The check is advisory and never fails the read. Cross-project pointers are resolved through op_log, but only for projects the caller's key can see. Replay over 43 live state specs (219 pointers) found 4 changes, all real, at a mean of 18 ms per spec.
+- op_log indexes `(op_type, ref.doc_id)` and `payload.in_response_to` (sparse), created at boot.
 - **Knowledge versioning** (interface:knowledge-versioning-v0, for the nimbus rebuild). Tags `sys:old` / `sys:rebuild` / `sys:both` and `valid-until:<event>` are the source of truth.
   - `memory_query` and `memory_find_function` rows gain derived `applies_to` and `valid_until`. The keys are absent on untagged rows.
   - New tool `memory_update_tags(doc_id, add, remove)` for retro-tagging existing docs.
