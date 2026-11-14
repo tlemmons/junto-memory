@@ -576,16 +576,20 @@ async def memory_get_spec(
             response["json_schema"] = json.loads(meta["json_schema"])
         # Owner reading their own state spec: report live pointers that moved
         # since it was written (interface:state-pointer-check-v0). Advisory.
+        sess = active_sessions[session_id]
+        sess_project = normalize_project(sess.get("project", ""))
         if (
             not version
             and meta.get("spec_type") == "agent_state"
-            and meta.get("spec_owner") == active_sessions[session_id].get("claude_instance")
+            and meta.get("spec_owner") == sess.get("claude_instance")
+            and normalize_project(meta.get("project") or project or sess_project) == sess_project
         ):
             db = get_mongo()
-            if db is not None:
-                ptr_project = project or normalize_project(active_sessions[session_id].get("project", ""))
+            if db is not None and sess_project:
                 check = await check_pointers(
-                    db, chroma, ptr_project, current_doc["content"], meta.get("updated") or ""
+                    db, chroma, sess_project, current_doc["content"], meta.get("updated") or "",
+                    owner=sess.get("claude_instance", ""),
+                    allowed=lambda coll: collection_allowed(sess, coll),
                 )
                 if check:
                     response["pointer_check"] = check

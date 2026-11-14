@@ -95,8 +95,9 @@ def test_ensure_op_log_indexes_creates_required_indexes():
     op_log.ensure_op_log_indexes(db)
 
     op_log_col = db[op_log.OPLOG_COLLECTION]
-    # We expect 5 indexes (seq, (origin, seq), ts, op_type, intent_id-sparse).
-    assert len(op_log_col.indexes_created) == 5
+    # We expect 7 indexes (seq, (origin, seq), ts, op_type, (op_type, ref.doc_id),
+    # payload.in_response_to-sparse, intent_id-sparse).
+    assert len(op_log_col.indexes_created) == 7
 
     # Pull out for inspection by name/keys.
     keys_seen = [keys for keys, _ in op_log_col.indexes_created]
@@ -105,6 +106,8 @@ def test_ensure_op_log_indexes_creates_required_indexes():
     assert [("ts", 1)] in keys_seen
     assert [("op_type", 1)] in keys_seen
     assert [("intent_id", 1)] in keys_seen
+    assert [("op_type", 1), ("ref.doc_id", 1)] in keys_seen
+    assert [("payload.in_response_to", 1)] in keys_seen
 
     # (origin, seq) must be unique; intent_id must be sparse.
     by_keys = {tuple(k): kw for k, kw in op_log_col.indexes_created}
@@ -120,7 +123,7 @@ def test_ensure_op_log_indexes_is_idempotent():
     op_log.ensure_op_log_indexes(db)
     op_log.ensure_op_log_indexes(db)
     op_log_col = db[op_log.OPLOG_COLLECTION]
-    assert len(op_log_col.indexes_created) == 10  # 5 + 5
+    assert len(op_log_col.indexes_created) == 14  # 7 + 7
 
 
 def test_next_seq_starts_at_one_and_is_monotonic():

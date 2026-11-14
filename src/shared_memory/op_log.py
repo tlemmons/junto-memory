@@ -107,6 +107,11 @@ def ensure_op_log_indexes(db) -> None:
     )
     op_log.create_index([("ts", ASCENDING)])
     op_log.create_index([("op_type", ASCENDING)])
+    # state_pointers: existence/home-collection lookups by doc id, and reply
+    # lookups by parent message (interface:state-pointer-check-v0).
+    op_log.create_index([("op_type", ASCENDING), ("ref.doc_id", ASCENDING)])
+    op_log.create_index([("payload.in_response_to", ASCENDING)], sparse=True,
+                        name="payload_in_response_to_sparse")
     op_log.create_index(
         [("intent_id", ASCENDING)],
         sparse=True,
