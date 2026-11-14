@@ -22,6 +22,7 @@ from shared_memory.op_log import (
     fetch_embedding_for_op_log,
 )
 from shared_memory.state import active_sessions
+from shared_memory.state_pointers import check_pointers
 
 
 async def _case_variant_specs(collection, name: str) -> List[str]:
@@ -573,6 +574,21 @@ async def memory_get_spec(
         }
         if meta.get("json_schema"):
             response["json_schema"] = json.loads(meta["json_schema"])
+        # Owner reading their own state spec: report live pointers that moved
+        # since it was written (interface:state-pointer-check-v0). Advisory.
+        if (
+            not version
+            and meta.get("spec_type") == "agent_state"
+            and meta.get("spec_owner") == active_sessions[session_id].get("claude_instance")
+        ):
+            db = get_mongo()
+            if db is not None:
+                ptr_project = project or normalize_project(active_sessions[session_id].get("project", ""))
+                check = await check_pointers(
+                    db, chroma, ptr_project, current_doc["content"], meta.get("updated") or ""
+                )
+                if check:
+                    response["pointer_check"] = check
         return json.dumps(response, indent=2)
 
     # Miss: surface case-insensitive near-matches (backlog_d3fb15db8acd).

@@ -19,6 +19,15 @@ PYTHONPATH=src python -m pytest tests -q
 
 CI runs the same lint and tests, plus a Docker build.
 
+## Reviews
+
+Adapted from [orbit-spec](https://github.com/las-sal/orbit-spec) by Sal, which measured these on its own history.
+
+- **Keep a pull request small.** If it changes more than 3 tools or areas (messaging, specs, auth, facets, …), split it. On orbit, changes touching more than 5 capabilities took 12–17 review rounds each; one touching 2 converged in a week.
+- **Review risky changes twice, blind.** Wire shapes, auth and data migrations get a fresh-context Claude review and a Copilot review on the PR. Neither sees the other's findings until both are in.
+- **Walk the findings one at a time.** Before fixing a finding, re-check it against the current branch. If it no longer holds, say why and close it; don't fix it a second time.
+- **Severity means consequence.** *Critical*: a user path breaks or data is lost, and the finding includes a reproduction. *Warning*: the code could diverge from what the spec intends. *Suggestion*: everything else. Suggestions never block a merge.
+
 ## Wire shapes
 
 Other projects depend on the exact shapes junto-memory returns, so treat them as fixed:
