@@ -17,6 +17,7 @@ version via `memory_health` (`server_version`).
   - Retiring a version is the existing `memory_archive_by_tag(tag="sys:old")`.
 
 ### Fixed
+- `memory_end_session` accepts `files_modified` as a string (one path per line), not just a list. A string used to fail validation, so the park never reached the server and an auto-reset agent stayed stranded (madrox, 11-15).
 - `memory_find_function` sorted by the relevance STRING, so "9%" outranked "85%".
 - `memory_archive_by_tag` / `memory_restore_by_tag` silently skipped a collection that threw. They now return `status: partial` with `errors`, and they stamp `source_status` on the facets/claims rows, as `memory_change_status` already did.
 
