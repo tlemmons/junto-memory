@@ -3,7 +3,7 @@
 import json
 import uuid
 from datetime import timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 
 from mcp.server.fastmcp import Context
 
@@ -927,7 +927,7 @@ async def memory_start_session(
 async def memory_end_session(
     session_id: str,
     summary: str,
-    files_modified: List[str] = None,
+    files_modified: Union[List[str], str] = None,
     learnings: str = None,
     handoff_notes: str = None,
     ctx: Context = None
@@ -943,7 +943,8 @@ async def memory_end_session(
     Args:
         session_id: Your session ID from memory_start_session
         summary: Summary of what you accomplished
-        files_modified: List of files you modified
+        files_modified: List of files you modified. A single string is also
+            accepted (one path per line).
         learnings: Any learnings worth recording for other Claudes
         handoff_notes: Notes for the next Claude who works on this
     """
@@ -951,6 +952,12 @@ async def memory_end_session(
     if error:
         return error
 
+    # A park that fails validation strands an auto-reset agent: it believes it
+    # parked, the server never records it, and no reset is queued (madrox
+    # 11-15 passed files_modified as one string). Accept a string as one path
+    # per line rather than rejecting the whole end_session.
+    if isinstance(files_modified, str):
+        files_modified = [f.strip() for f in files_modified.splitlines() if f.strip()]
     files_modified = files_modified or []
     chroma = await get_chroma()
     session_info = active_sessions[session_id]
